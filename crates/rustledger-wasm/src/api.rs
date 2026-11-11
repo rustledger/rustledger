@@ -136,8 +136,8 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = "validateSource")]
 pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     let load = load_and_book(source);
-    // `run_validation` first: it gates on `load.errors`, and an invalid option
-    // must not stop a ledger's real validation errors from being found (#2299).
+    // Validation runs whatever loaded, as `rledger check` does (#2937); an
+    // invalid option, reported beside it, does not stop it (#2299).
     let validation_errors = run_validation(&load);
     let mut errors = load.reported_errors();
     errors.extend(validation_errors);
@@ -688,7 +688,7 @@ fn validate_with_filesystem(
         }
     };
 
-    let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
+    let errors = crate::helpers::reported_ledger_errors(ledger.errors);
 
     ValidationResult {
         // Warnings do not invalidate a ledger; only actual errors do.
@@ -863,11 +863,7 @@ fn query_with_filesystem(
     let booking_failed = ledger.blocks_queries();
     // Advisory-only codes (E1004, closing an account with a balance) are not
     // reported by `rledger query` either: the same canonical predicate.
-    let mut errors: Vec<Error> = std::mem::take(&mut ledger.errors)
-        .into_iter()
-        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
-        .map(Error::from)
-        .collect();
+    let mut errors = crate::helpers::reported_ledger_errors(std::mem::take(&mut ledger.errors));
     // This surface lists the ledger's errors, not the option warnings, so the
     // rejected option's refusal says why the query did not answer.
     errors.extend(ledger.query_refusal().map(Error::from));

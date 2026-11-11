@@ -82,18 +82,23 @@ pub struct ProcessedLedger {
     /// placeholder locations plugins gave the directives they created, so a
     /// query resolves both (#2825). Empty when the source did not load.
     pub source_map: rustledger_loader::SourceMap,
+    /// The transactions booking refused, as indices into `directives`
+    /// ([`rustledger_loader::Ledger::booking_refused`]): [`run_validation`]
+    /// sets them aside as the validating loader does. Empty when the source
+    /// did not load.
+    pub booking_refused: Vec<usize>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
     /// `errors` on purpose.
     ///
-    /// `errors` is what [`has_fatal`] gates on, and that gate means "the
-    /// directive stream is unsound to work with" — a parse or booking failure.
-    /// An invalid option does not make directives unsound, so folding these in
-    /// here would make [`run_validation`] skip, and a ledger with a typo'd
-    /// option would silently stop reporting its real validation errors (the
-    /// exact drop #2292 fixed for plugin warnings). Surfaces that *report*
-    /// diagnostics merge this in; surfaces that gate on soundness do not.
+    /// `errors` is what [`has_fatal`] gates on: whether a surface may work
+    /// with the directive stream, and whether a ledger is valid. An invalid
+    /// option is reported but does not make the directives unsound, so it is
+    /// kept out of that gate. ([`run_validation`] no longer gates on `errors`
+    /// at all: it validates whatever loaded, as `rledger check` does, #2937.)
+    /// Surfaces that *report* diagnostics merge this in; surfaces that gate on
+    /// soundness do not.
     pub option_errors: Vec<Error>,
     /// Whether a query over the source refuses: it failed to parse, a
     /// transaction failed to book
@@ -156,6 +161,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
+            booking_refused: Vec::new(),
             options,
             errors,
             option_errors,
@@ -182,6 +188,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
+                booking_refused: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 option_errors,
@@ -216,6 +223,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             // fields move out: a blocking error, or a rejected
             // `booking_method` (#2911), whose E7002 is in `option_errors`.
             let query_blocked = ledger.blocks_queries();
+            let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
@@ -229,6 +237,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directives,
                 directive_spans,
                 source_map,
+                booking_refused,
                 options,
                 errors,
                 option_errors,
@@ -241,6 +250,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
+            booking_refused: Vec::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
             option_errors,
@@ -260,18 +270,40 @@ pub fn has_fatal(errors: &[Error]) -> bool {
     errors.iter().any(|e| e.severity == Severity::Error)
 }
 
+/// A validating load's errors as WASM [`Error`]s, leaving out the
+/// advisory-only ones ([`rustledger_validate::is_advisory_only_code`]: E1004,
+/// closing an account with a balance), which `rledger check` and bean-check
+/// do not report either; `rledger lint closed-nonempty` does (#2937). For the
+/// surfaces that validate through the loader (`validateMultiFile`,
+/// `validateWithHost`, `Ledger.fromFiles`); [`run_validation`] leaves them out
+/// the same way.
+pub fn reported_ledger_errors(errors: Vec<rustledger_loader::LedgerError>) -> Vec<Error> {
+    errors
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(Error::from)
+        .collect()
+}
+
 /// Run validation on a loaded ledger and return validation errors.
+///
+/// Which errors stop validation is `rledger check`'s rule, the validating
+/// loader's: none do. A transaction booking refused is set aside
+/// ([`rustledger_loader::Ledger::booking_refused`]): Early sees it as written
+/// and Late does not, and the session reports the account errors Early held
+/// for it, as `process` does. This used to return nothing on any
+/// severity-error in `load.errors`, so a STRICT ledger with an ambiguous
+/// reduction reported its booking error and not the `Balance failed` that
+/// follows it, which `check` and bean-check both report (#2937). A source
+/// that failed to parse or load has no directives here, so nothing is
+/// validated for it.
+///
+/// Advisory-only diagnostics
+/// ([`rustledger_validate::ErrorCode::is_advisory_only`]: E1004, closing an
+/// account with a balance) are left out, as `check` and bean-check leave them
+/// out; `rledger lint closed-nonempty` reports them (#2937).
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     use rustledger_validate::ValidationSession;
-
-    // Skip validation only when loading produced a genuine *error* (parse or
-    // booking failure) — those make the directive stream unsound to validate.
-    // A warning must NOT skip validation, or real diagnostics (E1001, balance
-    // residuals, …) would be silently dropped for any ledger that also emits a
-    // plugin warning.
-    if has_fatal(&load.errors) {
-        return Vec::new();
-    }
 
     // Build date→line mapping from parse result for error locations
     let mut date_to_line: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -303,22 +335,33 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // With the kept spans, as `rledger check` and the FFI validate: the pad
     // rule reads them as beancount's line order, so an "Attempt to pad an
     // entry with cost" lists tied positions as they do (#2901).
-    let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
-        let spanned = spanned_directives(&load.directives, &load.directive_spans);
-        let (session, mut errors) = session.run_early_spanned(&spanned, today);
-        let (session, late_errs) = session.run_late_spanned(&spanned, today);
-        errors.extend(late_errs);
-        (session, errors)
-    } else {
-        let (session, mut errors) = session.run_early(&load.directives, today);
-        let (session, late_errs) = session.run_late(&load.directives, today);
-        errors.extend(late_errs);
-        (session, errors)
-    };
+    let refused = |index: &usize| load.booking_refused.binary_search(index).is_ok();
+    // `load_and_book` keeps one span per directive (it unzips them from the
+    // loader's stream), so the spans always line up; the refused indices are
+    // positions in that same stream, and a refused transaction is noted by its
+    // span, so a stream without them could not be validated as `check` does.
+    debug_assert_eq!(
+        load.directive_spans.len(),
+        load.directives.len(),
+        "load_and_book keeps one span per directive"
+    );
+    let spanned = spanned_directives(&load.directives, &load.directive_spans);
+    let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
+    let mut booked = Vec::with_capacity(spanned.len());
+    for (index, directive) in spanned.into_iter().enumerate() {
+        if refused(&index) {
+            session.note_refused_by_booking(&directive);
+        } else {
+            booked.push(directive);
+        }
+    }
+    let (session, late_errs) = session.run_late_spanned(&booked, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
 
     errors
         .iter()
+        .filter(|err| !err.code.is_advisory_only())
         .map(|err| {
             let fallback_line = date_to_line.get(&err.date.to_string()).copied();
             validation_error_to_wasm(err, &load.lookup, None, fallback_line)
@@ -742,10 +785,10 @@ mod option_diagnostic_tests {
         );
     }
 
-    /// The trap in the obvious fix. `run_validation` skips when
-    /// `has_fatal(&load.errors)`, so folding option errors into `errors` would
-    /// make a typo'd option silently swallow every real validation error —
-    /// the same drop #2292 fixed for plugin warnings.
+    /// An invalid option must not cost the ledger its real validation errors,
+    /// the drop #2292 fixed for plugin warnings. `run_validation` used to skip
+    /// on any error in `load.errors`; it no longer gates on them (#2937), and
+    /// this pins that the option error does not suppress validation either way.
     #[test]
     fn an_invalid_option_does_not_suppress_validation() {
         let load = load_and_book(BAD_OPTION_AND_BAD_ACCOUNT);
@@ -826,8 +869,9 @@ mod option_diagnostic_tests {
 
     /// `reported_errors` is what every reporting surface reads and `errors` is
     /// what every soundness gate reads. If option diagnostics ever leak into
-    /// the second, `run_validation` starts skipping; if they ever fall out of
-    /// the first, surfaces go silent again. Both directions, pinned.
+    /// the second, a typo'd option makes a ledger unsound to work with; if they
+    /// ever fall out of the first, surfaces go silent again. Both directions,
+    /// pinned.
     #[test]
     fn option_diagnostics_are_reported_but_do_not_gate() {
         let load = load_and_book(BAD_OPTION);

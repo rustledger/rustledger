@@ -356,8 +356,28 @@ fn semantic_validation_errors(
         validation_options = validation_options.with_document_base(dir);
     }
     let session = rustledger_validate::ValidationSession::new(validation_options);
-    let (session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
-    let (session, late) = session.run_late_spanned(&loaded.spanned_directives, today);
+    let (mut session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
+    // A transaction booking refused is set aside as the validating loader
+    // sets it aside (`Ledger::booking_refused`): Early saw it as written, Late
+    // does not, and the session reports the account errors Early held for it.
+    // Late over it counted its unbooked postings into the balances, so a
+    // balance after a refused STRICT reduction reported a different
+    // accumulated amount from `rledger check` and bean-check (#2937).
+    let booked: std::borrow::Cow<'_, [rustledger_core::Spanned<Directive>]> =
+        if loaded.booking_refused.is_empty() {
+            std::borrow::Cow::Borrowed(&loaded.spanned_directives)
+        } else {
+            let mut booked = Vec::with_capacity(loaded.spanned_directives.len());
+            for (index, directive) in loaded.spanned_directives.iter().enumerate() {
+                if loaded.booking_refused.binary_search(&index).is_ok() {
+                    session.note_refused_by_booking(directive);
+                } else {
+                    booked.push(directive.clone());
+                }
+            }
+            std::borrow::Cow::Owned(booked)
+        };
+    let (session, late) = session.run_late_spanned(&booked, today);
     verrs.extend(late);
     // Capture the per-balance computed results (#1663) before `finalize` consumes
     // the session.
@@ -380,6 +400,10 @@ fn semantic_validation_errors(
     };
     let errors = verrs
         .into_iter()
+        // Advisory-only diagnostics (E1004, closing an account with a
+        // balance) are not reported, as `rledger check` and bean-check do not
+        // report them; `rledger lint closed-nonempty` does (#2937).
+        .filter(|err| !err.code.is_advisory_only())
         .filter(|err| !is_dup_of_booking(&err.message))
         .map(|err| {
             let mut e = ffi::Error::new(&err.message).validate_phase();
@@ -4944,6 +4968,46 @@ mod validation_options_tests {
                     .map(|e| e.message.clone())
                     .collect();
                 assert_eq!(load, check, "load, expand_pads {expand}");
+            }
+        }
+    }
+}
+
+/// The FFI side of the drift guard for which findings every diagnostic
+/// surface reports (#2937): `validate` and `load` report exactly what `rledger
+/// check`, WASM and the LSP report on the same ledgers. The wire error carries
+/// no code, so a finding is matched on its line and message.
+#[cfg(test)]
+mod surface_agreement {
+    include!("../../rustledger-loader/tests/surface_agreement/cases.rs");
+
+    use super::wit;
+
+    fn check(case: &SurfaceCase, surface: &str, errors: &[wit::Error]) {
+        let mut got: Vec<(u32, &str)> = errors
+            .iter()
+            .map(|e| (e.line.unwrap_or_default(), e.message.as_str()))
+            .collect();
+        got.sort_unstable();
+        let mut want: Vec<&Finding> = case.findings.iter().collect();
+        want.sort_by_key(|f| f.line);
+        let context = format!("{} via {surface}: {got:?}", case.name);
+        assert_eq!(got.len(), want.len(), "{context}");
+        for ((line, message), finding) in got.iter().zip(&want) {
+            assert_eq!(*line, finding.line, "{context}");
+            assert!(message.starts_with(finding.message), "{context}");
+        }
+    }
+
+    #[test]
+    fn validate_and_load_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let validated = super::validate(case.source);
+            check(case, "validate", &validated.errors);
+            assert_eq!(validated.valid, case.findings.is_empty(), "{}", case.name);
+            for expand_pads in [false, true] {
+                let loaded = super::load(case.source, "ledger.beancount", expand_pads);
+                check(case, "load", &loaded.errors);
             }
         }
     }

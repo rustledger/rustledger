@@ -446,11 +446,11 @@ use crate::types::{Error, LedgerOptions};
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
 /// and held v91 before #2930 took v92. v93 is held by #2931.)
-/// v98: loader v73, PARSER OUTPUT changed (#2932). An unexpected token (an
-/// invalid token, a number, a currency, ...) among a transaction header's
-/// strings moves no string to a different field, so `* "p" <bad>` keeps payee
-/// `p` where `p` was the narration; an older blob would keep serving the
-/// shifted fields. (v95 to v97 are held by parallel PRs.)
+/// v98: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// lone header string moves it to no other field, so `* "p" <bad>` keeps
+/// payee `p` where `p` was the narration; an older blob would keep serving
+/// the shifted fields. (v95 is held by #2931 and v97 by #2947; v96 was left
+/// free for a parallel lane.)
 pub const CACHE_VERSION: u32 = 98;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

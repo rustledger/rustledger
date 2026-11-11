@@ -1,15 +1,17 @@
-//! An unexpected token in a transaction header moves no string to a
-//! different field (#2932).
+//! An invalid token in a transaction header moves no string to a different
+//! field (#2932).
 //!
-//! beancount drops a transaction whose header holds an invalid token, or a
-//! token its header grammar has no place for (a number, a currency, an
-//! account, `~`, `@`, ...); rledger keeps it under error recovery, so that
-//! editor surfaces (LSP, WASM, FFI) do not lose the entry on a typo. Counting
-//! only the strings then moved them: `* "p" <bad>` and `* "p" 123` loaded
-//! with no payee and the narration `p`. The rule now in
-//! `txn_header::header_strings` lets an unexpected token hold the string
-//! slot it sits in, so `p` stays the payee and the narration is empty. The
-//! token is still reported, at the same span, as many times as before.
+//! beancount drops a transaction whose header holds an invalid token; rledger
+//! keeps it under error recovery, so that editor surfaces (LSP, WASM, FFI) do
+//! not lose the entry on a typo. An invalid token runs to the next blank, so
+//! it can swallow a string, and counting only the strings that survived then
+//! moved them: `* "p" <bad>"y"` loaded with no payee and the narration `p`.
+//! The rule now in `txn_header::header_strings` lets an invalid token right
+//! after a lone string stand where the narration was written, so `p` stays
+//! the payee and the narration is empty. Any other unexpected token (a
+//! number, a currency, `~`, ...) cannot swallow a string, so the count rule
+//! stands for it. Every token is still reported, at the same span, as many
+//! times as before.
 //!
 //! Every case runs on `parse` (green, falling back to red) and on
 //! `parse_red_only`, and the two must agree on directives and errors.
@@ -209,17 +211,44 @@ fn test_parse_invalid_token_with_tags_and_links_keeps_every_field() {
     check_bad(&case("* \"n\" #t ^l <bad>", None, "n", &["t"], &["l"]));
 }
 
-/// Every other token the header grammar has no place for holds its slot the
-/// same way: a number, a currency (one letter too), an account, `~`, `@`,
-/// a brace, a parenthesis, a comma, a date, a boolean, a metadata key, a
-/// keyword, a second flag and a mid-line `#!`.
+/// Every other token the header grammar has no place for: a number, a
+/// currency (one letter too), an account, `~`, `@`, a brace, a parenthesis,
+/// a comma, a boolean, a metadata key, a keyword, a second flag and a
+/// mid-line `#!`. None of them can have swallowed a quoted string, so none
+/// holds a string slot: the count rule stands.
 const JUNK: &[&str] = &[
     "123", "USD", "A", "Assets:A", "~", "@", "{", "(1+2)", ",", "TRUE", "key:", "open", "txn", "*",
     "!", "#!x",
 ];
 
+fn other(header: &str, payee: Option<&'static str>, narration: &'static str) -> Case {
+    other_with(header, payee, narration, &[], &[], 1)
+}
+
+fn other_with(
+    header: &str,
+    payee: Option<&'static str>,
+    narration: &'static str,
+    tags: &'static [&'static str],
+    links: &'static [&'static str],
+    errors: usize,
+) -> Case {
+    Case {
+        header: header.replace("<bad>", BAD),
+        payee,
+        narration,
+        tags,
+        links,
+        errors,
+    }
+}
+
+/// A forgotten newline (`* "Coffee" 5.00 USD`) keeps the narration, as
+/// beancount's count rule reads it: a token after the lone string is no
+/// string that was lost.
 #[test]
-fn test_parse_unexpected_token_after_the_payee_keeps_the_payee() {
+fn test_parse_other_token_after_the_string_keeps_the_narration() {
+    check(&other("* \"Coffee\" 5.00 USD", None, "Coffee"), "5.00");
     for junk in JUNK {
         for (flag, tags, links, tail) in [
             ("*", &[][..], &[][..], ""),
@@ -231,21 +260,41 @@ fn test_parse_unexpected_token_after_the_payee_keeps_the_payee() {
             if *junk == "#!x" && !tail.is_empty() {
                 continue;
             }
-            let c = Case {
-                header: format!("{flag} \"p\" {junk}{tail}"),
-                payee: Some("p"),
-                narration: "",
+            let c = other_with(
+                &format!("{flag} \"n\" {junk}{tail}"),
+                None,
+                "n",
                 tags,
                 links,
-                errors: 1,
-            };
+                1,
+            );
             check(&c, junk);
         }
     }
 }
 
+/// Beside an invalid token after the string, another token changes nothing:
+/// the invalid token still stands where the narration was written. Two
+/// errors: the grammar's at the first token, and the invalid token's.
 #[test]
-fn test_parse_unexpected_token_before_the_string_keeps_the_narration() {
+fn test_parse_other_token_and_invalid_token_after_the_payee_keep_the_payee() {
+    for junk in JUNK {
+        // A mid-line `#!` takes the invalid token after it with it.
+        if *junk == "#!x" {
+            continue;
+        }
+        check(
+            &other_with(&format!("* \"p\" {junk} <bad>"), Some("p"), "", &[], &[], 2),
+            junk,
+        );
+    }
+}
+
+/// Another token before the lone string leaves the string where the count
+/// rule puts it, even with an invalid token after it: the header no longer
+/// shows that the string was written in the payee's place.
+#[test]
+fn test_parse_other_token_before_the_string_keeps_the_narration() {
     for junk in JUNK {
         // A mid-line `#!` runs to the end of the line (#2802), so no string
         // after it survives.
@@ -253,39 +302,44 @@ fn test_parse_unexpected_token_before_the_string_keeps_the_narration() {
             continue;
         }
         for header in [format!("* {junk} \"n\""), format!("* {junk} \"n\" {junk}")] {
-            let c = Case {
-                header,
-                payee: None,
-                narration: "n",
-                tags: &[],
-                links: &[],
-                errors: 1,
-            };
-            check(&c, junk);
+            check(&other(&header, None, "n"), junk);
         }
-        let c = Case {
-            header: format!("* {junk} \"p\" \"n\""),
-            payee: Some("p"),
-            narration: "n",
-            tags: &[],
-            links: &[],
-            errors: 1,
-        };
-        check(&c, junk);
+        check(
+            &other(&format!("* {junk} \"p\" \"n\""), Some("p"), "n"),
+            junk,
+        );
+        check(
+            &other_with(&format!("* {junk} \"n\" <bad>"), None, "n", &[], &[], 2),
+            junk,
+        );
     }
 }
 
+/// A date after the flag is an ordinary token (the missing error for it is
+/// separate), so `* 2024-01-03 "n" <bad>` keeps the narration, as
+/// `* 123 "n" <bad>` does.
 #[test]
-fn test_parse_unexpected_token_after_a_tag_is_in_no_string_slot() {
+fn test_parse_later_date_before_the_string_keeps_the_narration() {
+    check(&other("* 2024-01-03 \"n\" <bad>", None, "n"), BAD);
+    check(
+        &other_with(
+            "* 2024-01-03 \"p\" \"n\" <bad>",
+            Some("p"),
+            "n",
+            &[],
+            &[],
+            1,
+        ),
+        BAD,
+    );
+}
+
+#[test]
+fn test_parse_other_token_after_a_tag_is_in_no_string_slot() {
     for junk in JUNK {
-        let c = Case {
-            header: format!("* \"n\" #t {junk}"),
-            payee: None,
-            narration: "n",
-            tags: &["t"],
-            links: &[],
-            errors: 1,
-        };
-        check(&c, junk);
+        check(
+            &other_with(&format!("* \"n\" #t {junk}"), None, "n", &["t"], &[], 1),
+            junk,
+        );
     }
 }

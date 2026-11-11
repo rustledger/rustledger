@@ -81,18 +81,25 @@ fn test_parse_unexpected_token_before_and_after_keeps_the_narration() {
     );
 }
 
-/// Any token the header grammar has no place for holds its slot, not only
-/// an invalid one.
+/// A token that cannot have swallowed a string leaves the count rule
+/// standing: a forgotten newline (`* "Cafe" 5.00 USD`) keeps the narration,
+/// and so does a number before the string, even with an invalid token after.
 #[wasm_bindgen_test]
-fn test_parse_number_after_payee_keeps_the_payee() {
-    for header in ["* \"Cafe\" 123", "* \"Cafe\" USD", "* \"Cafe\" ~"] {
-        let (txn, errors) = parse_header(header);
-        assert_eq!(errors, 1, "{header:?}");
+fn test_parse_other_token_keeps_the_narration() {
+    for (header, errors) in [
+        ("* \"Cafe\" 5.00 USD", 1),
+        ("* \"Cafe\" USD", 1),
+        ("* \"Cafe\" ~", 1),
+        ("* 123 \"Cafe\" \u{11}", 2),
+        ("* 2024-01-03 \"Cafe\" \u{11}", 1),
+    ] {
+        let (txn, got) = parse_header(header);
+        assert_eq!(got, errors, "{header:?}");
+        assert!(get_field(&txn, "payee").is_undefined(), "{header:?}");
         assert_eq!(
-            get_field(&txn, "payee").as_string().as_deref(),
+            get_field(&txn, "narration").as_string().as_deref(),
             Some("Cafe"),
             "{header:?}"
         );
-        assert!(get_field(&txn, "narration").is_undefined(), "{header:?}");
     }
 }

@@ -97,11 +97,11 @@ pub(super) fn convert_transaction_header(
     let mut flag = '*';
     let mut seen_flag = false;
     let mut seen_str_tag_link = false;
-    // The header tokens, for the shared payee/narration rule
-    // (`txn_header::header_strings`), and the text of each header string.
-    let mut header_tokens: Vec<(K, std::ops::Range<usize>)> = Vec::new();
+    // The header token kinds, for the shared payee/narration rule
+    // (`txn_header::header_strings`, which reads kinds only), and the text of
+    // each header string.
+    let mut header_kinds: Vec<K> = Vec::new();
     let mut strings: Vec<&str> = Vec::new();
-    let mut offset = base;
     let mut tags = rustledger_core::TagSet::new();
     let mut links = rustledger_core::LinkSet::new();
     // Leading trivia before the header stays in the header region (#2628).
@@ -121,10 +121,8 @@ pub(super) fn convert_transaction_header(
         };
         let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
         let text = t.text();
-        let at = offset;
-        offset += text.len();
         if header.in_header(kind) {
-            header_tokens.push((kind, at..offset));
+            header_kinds.push(kind);
             match kind {
                 // Leading trivia and the header's terminating newline.
                 K::NEWLINE => {}
@@ -176,7 +174,7 @@ pub(super) fn convert_transaction_header(
     let date = date?;
 
     // The shared slot rule (#2932), as red `convert_transaction` uses it.
-    let slots = super::txn_header::header_strings(header_tokens);
+    let slots = super::txn_header::header_strings(header_kinds);
     let nth = |i: usize| {
         strings
             .get(i)
@@ -1570,7 +1568,7 @@ mod tests {
     /// and green agrees with `parse_red_only`.
     #[test]
     fn test_convert_transaction_header_invalid_token_moves_no_string() {
-        let cases: [(&str, Option<&str>, &str); 11] = [
+        let cases: [(&str, Option<&str>, &str); 13] = [
             ("* \u{11}\"x\"", None, ""),
             ("* \"p\" \u{11}\"y\"", Some("p"), ""),
             ("* \"p\" \u{11}", Some("p"), ""),
@@ -1580,7 +1578,9 @@ mod tests {
             ("* \"p\" \u{11} #t ^l", Some("p"), ""),
             ("* \"n\" #t \u{11}", None, "n"),
             ("* \u{11} \"n\" \u{11}", None, "n"),
-            ("* \"p\" 123", Some("p"), ""),
+            ("* \"p\" 123", None, "p"),
+            ("* 123 \"n\" \u{11}", None, "n"),
+            ("* 2024-01-03 \"n\" \u{11}", None, "n"),
             ("txn USD \"n\" Assets:A", None, "n"),
         ];
         for (header, payee, narration) in cases {

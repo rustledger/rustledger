@@ -639,10 +639,7 @@ fn transaction_flag_scoped_to_pre_string_region() {
         t.flag().is_none(),
         "trailing stray CURRENCY 'T' must NOT be reported as a flag"
     );
-    // The stray `T` holds the narration's slot (#2932), so the lone string
-    // keeps the payee's place, as the directive reads it.
-    assert_eq!(t.payee().unwrap().text_unquoted().unwrap(), "narration");
-    assert!(t.narration().is_none());
+    assert_eq!(t.narration().unwrap().text_unquoted().unwrap(), "narration");
 }
 
 #[test]

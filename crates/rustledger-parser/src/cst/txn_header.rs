@@ -255,8 +255,8 @@ pub(super) enum HeaderStrings {
     Empty,
     /// One string, the narration; no payee.
     Narration(usize),
-    /// One string, the payee: the slot after it held an unexpected token, so
-    /// the narration is empty.
+    /// One string, the payee: an invalid token after it stands where the
+    /// narration was written, so the narration is empty.
     Payee(usize),
     /// Two strings, the payee and the narration.
     PayeeNarration(usize, usize),
@@ -300,92 +300,87 @@ impl HeaderStrings {
 /// Assign a transaction header's strings to the payee and the narration
 /// (#2932).
 ///
-/// `tokens` is the header region, as for [`first_header_defect`]; the ranges
-/// are read only for a one-letter `CURRENCY` flag's length, so any frame
-/// works.
+/// `kinds` are the kinds of the header region's tokens, in source order, as
+/// for [`first_header_defect`].
 ///
 /// beancount assigns strings by count: one string is the narration, two are
-/// the payee and the narration, more are an error. That reads only the
-/// strings. rledger keeps a transaction whose header holds an unexpected
-/// token (an invalid token, or a token the header grammar has no place for:
-/// a number, a currency, an account, `~`, `@`, a second flag, ...), and
-/// counting only the strings then moved a string to a different field:
-/// `* "p" 123` and `* "p" <bad>` loaded with the narration `p`, though `p`
-/// was written in the payee's place. beancount drops those transactions.
+/// the payee and the narration, more are an error. rledger keeps a
+/// transaction whose header holds an invalid token (`ERROR_TOKEN`, which
+/// beancount drops), and an invalid token can hide a string: it runs to the
+/// next blank, as in beancount's lexer, so `<bad>"y"` is one token and `"y"`
+/// no string. Counting only the strings that survived then moved one to a
+/// different field: `* "p" <bad>"y"` loaded with the narration `p`, though
+/// `p` was written in the payee's place.
 ///
 /// The rule, so that no string ever changes field:
 ///
-/// - The string slots run from the flag to the first tag or link. A token in
-///   them that is not trivia (see `is_header_trivia`, which keeps the
-///   deprecated `|` and a comment out), the flag (the first flag token
-///   before any string, as [`first_header_defect`] counts it), a date before
-///   the first string (which [`first_header_defect`] accepts there too) or a
-///   string is an *unexpected token*, and it holds the slot it sits in. A
-///   mid-line `#!` or `#+` is one too (#2802). One after a tag or link is in
-///   the tag position, not a string slot, and changes nothing.
+/// - Only an invalid token holds a string slot, because only an invalid
+///   token can have swallowed a string. A number, a currency, an account, a
+///   date, a second flag or a mid-line `#!` cannot hold a quoted string, so
+///   nothing was displaced and the count rule stands: `* "Coffee" 5.00 USD`
+///   (a forgotten newline) keeps the narration `Coffee`, as beancount's
+///   count would read it. A mid-line BOM lexes as an invalid token, and so
+///   holds a slot.
+/// - The string slots end at the first tag or link. An invalid token after
+///   one is in the tag position, not a string slot, and changes nothing.
 /// - Two or more strings: the strings alone decide, as in beancount. Two
-///   strings already name both fields, so an unexpected token between or
-///   around them moves neither: `* <bad> "p" "n"` and `* "p" <bad> "n"` both
-///   give payee `p`, narration `n`.
-/// - One string: it is the payee only when an unexpected token follows it
-///   and none comes before it. That token held the narration slot, now
-///   empty: `* "p" <bad>` is payee `p`. With an unexpected token before the
-///   string, that token held the payee slot and the string is the narration,
-///   whatever follows: `* <bad> "n"` and `* <bad> "n" <bad>` are narration
-///   `n`. Otherwise it is the narration, as in beancount. So a token written
-///   after a string never moves that string into another field.
+///   strings already name both fields, so an invalid token between or around
+///   them moves neither: `* <bad> "p" "n"` and `* "p" <bad> "n"` both give
+///   payee `p`, narration `n`.
+/// - One string: it is the payee only when it stands straight after the
+///   flag (nothing but the date and the flag before it) and an invalid token
+///   follows it. That token stands where the narration was written, now
+///   empty: `* "p" <bad>"y"` is payee `p`, and `y` survives in no field.
+///   Anything else before the string, an invalid token or any other token
+///   (`* <bad> "n" <bad>`, `* 123 "n" <bad>`, `* 2024-01-03 "n" <bad>`),
+///   leaves the string where the count rule puts it, the narration: the
+///   header no longer shows which place it was written in. So a token
+///   written after a string never moves that string into another field, and
+///   the count rule gives way only where the one string is plainly the
+///   first of two.
 /// - No string: no payee, an empty narration.
 ///
-/// An invalid token runs to the next blank, as in beancount's lexer, so a
-/// string glued to one is part of it and no string at all: `* "p" <bad>"y"`
-/// has the one string `p`, followed by an unexpected token, so payee `p` and
-/// an empty narration; `y` survives in no field.
+/// The flag is the first token after the date that is not a string, a tag, a
+/// link or an invalid token: a transaction node only opens on a flag token
+/// or on one of those (`parser::identify_directive`), so no range is needed
+/// to tell it apart. A later date is an ordinary token.
 ///
-/// Only the fields are recovered here. The unexpected token is reported by
-/// the lexer or by [`first_header_defect`] whatever this returns, so the
-/// error count does not depend on it.
-pub(super) fn header_strings<I>(tokens: I) -> HeaderStrings
+/// Only the fields are recovered here. The invalid token is reported by the
+/// lexer whatever this returns, so the error count does not depend on it.
+pub(super) fn header_strings<I>(kinds: I) -> HeaderStrings
 where
-    I: IntoIterator<Item = (SyntaxKind, Range<usize>)>,
+    I: IntoIterator<Item = SyntaxKind>,
 {
     let mut strings: usize = 0;
-    let mut seen_token = false;
+    let mut seen_date = false;
     let mut seen_flag = false;
     let mut seen_tag_or_link = false;
-    let mut unexpected_before_string = false;
-    let mut unexpected_after_string = false;
+    let mut other_before_string = false;
+    let mut invalid_after_string = false;
 
-    for (kind, range) in tokens {
-        // A `#!` or `#+` after the first token is no comment (#2802), as in
-        // `first_header_defect`; before it, it is leading trivia.
-        let mid_line_comment =
-            seen_token && matches!(kind, SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE);
-        if is_header_trivia(kind) && !mid_line_comment {
+    for kind in kinds {
+        if is_header_trivia(kind) {
             continue;
         }
-        seen_token = true;
         match kind {
             SyntaxKind::STRING => strings += 1,
             SyntaxKind::TAG | SyntaxKind::LINK => seen_tag_or_link = true,
+            // The tag position: no string slot.
             _ if seen_tag_or_link => {}
-            // The date, and any further date before the first string, which
-            // `first_header_defect` accepts in the flag position too.
-            SyntaxKind::DATE if strings == 0 => {}
-            k if k != SyntaxKind::DATE
-                && strings == 0
-                && !seen_flag
-                && is_flag_position_token(k, &range) =>
-            {
-                seen_flag = true;
-            }
-            _ if strings == 0 => unexpected_before_string = true,
-            _ => unexpected_after_string = true,
+            SyntaxKind::ERROR_TOKEN if strings > 0 => invalid_after_string = true,
+            // Only an invalid token holds a slot after the string.
+            _ if strings > 0 => {}
+            SyntaxKind::DATE if !seen_date => seen_date = true,
+            k if !seen_flag && k != SyntaxKind::ERROR_TOKEN => seen_flag = true,
+            // Before the string: an invalid token, a second flag, a later
+            // date, a number, ...
+            _ => other_before_string = true,
         }
     }
 
     match strings {
         0 => HeaderStrings::Empty,
-        1 if unexpected_after_string && !unexpected_before_string => HeaderStrings::Payee(0),
+        1 if invalid_after_string && !other_before_string => HeaderStrings::Payee(0),
         1 => HeaderStrings::Narration(0),
         2 => HeaderStrings::PayeeNarration(0, 1),
         n => HeaderStrings::TooMany { last: n - 1 },
@@ -662,36 +657,27 @@ mod tests {
     }
 
     /// #2932: the slot rule of [`header_strings`], over every shape it
-    /// distinguishes. `s` is a string, `e` an unexpected token of the given
-    /// kind, `t` a tag. The expected payee and narration are string indexes.
+    /// distinguishes. `s` is a string, `bad` an invalid token, `t` a tag.
     #[test]
     fn test_header_strings_moves_no_string() {
         use HeaderStrings as H;
-        let s = (SyntaxKind::STRING, "\"x\"");
-        let bad = (SyntaxKind::ERROR_TOKEN, "\u{11}");
-        let t = (SyntaxKind::TAG, "#t");
-        let l = (SyntaxKind::LINK, "^l");
-        let star = (SyntaxKind::STAR, "*");
-        let date = (SyntaxKind::DATE, "2024-01-02");
-        let cases: Vec<(Vec<(SyntaxKind, &str)>, HeaderStrings)> = vec![
-            // Without an unexpected token: beancount's count rule.
+        use SyntaxKind as K;
+        let (s, bad, t, l) = (K::STRING, K::ERROR_TOKEN, K::TAG, K::LINK);
+        let (star, date, ws) = (K::STAR, K::DATE, K::WHITESPACE);
+        let cases: Vec<(Vec<SyntaxKind>, HeaderStrings)> = vec![
+            // Without an invalid token: beancount's count rule.
             (vec![date, star], H::Empty),
-            (vec![date, star, s], H::Narration(0)),
-            (vec![date, (SyntaxKind::TXN_KW, "txn"), s], H::Narration(0)),
-            (vec![date, (SyntaxKind::CURRENCY, "P"), s], H::Narration(0)),
+            (vec![date, star, ws, s], H::Narration(0)),
+            (vec![date, K::TXN_KW, s], H::Narration(0)),
             (vec![date, star, s, s], H::PayeeNarration(0, 1)),
             (vec![date, star, s, s, s, s], H::TooMany { last: 3 }),
             (vec![date, star, s, t, l], H::Narration(0)),
             // No flag (#2905): the strings are read the same.
             (vec![date, s, bad], H::Payee(0)),
-            // Before the string: it held the payee slot.
+            // Before the string: it stands in the payee's place.
             (vec![date, star, bad, s], H::Narration(0)),
-            (
-                vec![date, (SyntaxKind::FLAG, "!"), star, s],
-                H::Narration(0),
-            ),
-            // After the string: the string keeps the payee slot.
-            (vec![date, star, s, bad], H::Payee(0)),
+            // After the string: the string keeps the payee's place.
+            (vec![date, star, s, ws, bad], H::Payee(0)),
             (vec![date, star, s, bad, t, l], H::Payee(0)),
             // Before AND after: the string stays the narration.
             (vec![date, star, bad, s, bad], H::Narration(0)),
@@ -701,62 +687,58 @@ mod tests {
             (vec![date, star, s, s, bad], H::PayeeNarration(0, 1)),
             // After a tag or link: no string slot.
             (vec![date, star, s, t, bad], H::Narration(0)),
-            (
-                vec![date, star, s, l, (SyntaxKind::NUMBER, "1")],
-                H::Narration(0),
-            ),
-            // Trivia, the deprecated `|` and a comment hold no slot.
-            (
-                vec![date, star, s, (SyntaxKind::PIPE, "|")],
-                H::Narration(0),
-            ),
-            (
-                vec![date, star, s, (SyntaxKind::COMMENT, ";c")],
-                H::Narration(0),
-            ),
-            // A mid-line `#!` is no comment (#2802): it holds the slot.
-            (
-                vec![date, star, s, (SyntaxKind::SHEBANG, "#!x")],
-                H::Payee(0),
-            ),
-            // A date after the string holds its slot; before it, it is read
-            // as `first_header_defect` reads it, in the flag position.
-            (vec![date, star, s, date], H::Payee(0)),
-            (vec![date, star, date, s, bad], H::Payee(0)),
-            // Only unexpected tokens: nothing to place.
+            (vec![date, star, s, l, bad], H::Narration(0)),
+            // A later date before the first string is an ordinary token, so
+            // the string is not plainly the payee: the count rule stands.
+            (vec![date, star, date, s, bad], H::Narration(0)),
+            // A one-letter flag, `txn`, or no flag at all.
+            (vec![date, K::CURRENCY, s, bad], H::Payee(0)),
+            (vec![date, K::TXN_KW, s, bad], H::Payee(0)),
+            // Only invalid tokens: nothing to place.
             (vec![date, star, bad], H::Empty),
         ];
-        // Every kind the header grammar has no place for after a string.
-        let junk = [
-            (SyntaxKind::NUMBER, "123"),
-            (SyntaxKind::CURRENCY, "USD"),
-            (SyntaxKind::CURRENCY, "A"),
-            (SyntaxKind::ACCOUNT, "Assets:A"),
-            (SyntaxKind::TILDE, "~"),
-            (SyntaxKind::AT, "@"),
-            (SyntaxKind::L_BRACE, "{"),
-            (SyntaxKind::L_PAREN, "("),
-            (SyntaxKind::COMMA, ","),
-            (SyntaxKind::COLON, ":"),
-            (SyntaxKind::STAR, "*"),
-            (SyntaxKind::PLUS, "+"),
-            (SyntaxKind::BOOL_TRUE, "TRUE"),
-            (SyntaxKind::META_KEY, "key:"),
-            (SyntaxKind::OPEN_KW, "open"),
-            (SyntaxKind::TXN_KW, "txn"),
-            (SyntaxKind::HASH, "#"),
-            (SyntaxKind::FLAG, "!"),
-            (SyntaxKind::ERROR_TOKEN, "\u{11}"),
+        // Every other kind the header grammar has no place for cannot hold a
+        // quoted string, so it holds no slot: the count rule stands.
+        let other = [
+            K::NUMBER,
+            K::CURRENCY,
+            K::ACCOUNT,
+            K::TILDE,
+            K::AT,
+            K::L_BRACE,
+            K::L_PAREN,
+            K::COMMA,
+            K::COLON,
+            K::STAR,
+            K::PLUS,
+            K::DATE,
+            K::BOOL_TRUE,
+            K::META_KEY,
+            K::OPEN_KW,
+            K::TXN_KW,
+            K::HASH,
+            K::FLAG,
         ];
         let mut all = cases;
-        for j in junk {
-            all.push((vec![date, star, s, j], H::Payee(0)));
-            all.push((vec![date, star, j, s], H::Narration(0)));
-            all.push((vec![date, star, j, s, j], H::Narration(0)));
+        for o in other {
+            all.push((vec![date, star, s, o], H::Narration(0)));
+            all.push((vec![date, star, o, s], H::Narration(0)));
+            all.push((vec![date, star, o, s, o], H::Narration(0)));
+            // After the string, beside an invalid token, it changes nothing.
+            all.push((vec![date, star, s, o, bad], H::Payee(0)));
+            // Before the string, the header no longer shows the string's
+            // place, so the count rule stands.
+            all.push((vec![date, star, o, s, bad], H::Narration(0)));
         }
-        for (tokens, want) in all {
-            let shape = format!("{tokens:?}");
-            assert_eq!(header_strings(toks(&tokens)), want, "{shape}");
+        // Trivia holds no slot and hides no place. (A `#!` mid-line runs to
+        // the end of the line, so no string can follow it in real input.)
+        for o in [K::WHITESPACE, K::PIPE, K::COMMENT, K::BOM, K::SHEBANG] {
+            all.push((vec![date, star, s, o], H::Narration(0)));
+            all.push((vec![date, star, o, s, o, bad], H::Payee(0)));
+        }
+        for (kinds, want) in all {
+            let shape = format!("{kinds:?}");
+            assert_eq!(header_strings(kinds), want, "{shape}");
         }
     }
 

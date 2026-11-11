@@ -1367,10 +1367,10 @@ fn convert_transaction(
     let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
 
     // Payee and narration: the shared slot rule `txn_header::header_strings`
-    // (#2932), which reads the header's strings together with every
-    // unexpected token in the string slots (an invalid token, a number, a
-    // currency, an account, `~`, `@`, a second flag, ...), so that a string
-    // never moves to a different field under error recovery. Green
+    // (#2932), which reads the header's strings together with any invalid
+    // token among them (the one token that can have swallowed a string), so
+    // that a string never moves to a different field under error recovery;
+    // every other token leaves the count rule standing. Green
     // `convert_transaction_header` and the typed `payee()` / `narration()`
     // accessors use the same rule.
     let slots = node.string_slots();

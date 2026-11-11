@@ -905,17 +905,14 @@ impl Transaction {
     /// slot rule [`super::txn_header::header_strings`] (#2932), the one the
     /// directive converters use too.
     pub(super) fn string_slots(&self) -> super::txn_header::HeaderStrings {
-        super::txn_header::header_strings(self.header_tokens().map(|t| {
-            let r = t.text_range();
-            (t.kind(), usize::from(r.start())..usize::from(r.end()))
-        }))
+        super::txn_header::header_strings(self.header_tokens().map(|t| t.kind()))
     }
 
     /// The payee string, if the header has one.
     ///
     /// `Some(first)` for the canonical `"payee" "narration"` pair, and
-    /// `Some(only)` for a lone string followed by an unexpected token in the
-    /// narration's slot (`* "p" 123`), which kept it in the payee's place
+    /// `Some(only)` for a lone string right after the flag followed by an
+    /// invalid token (`* "p" <bad>`), which kept it in the payee's place
     /// (#2932). `None` for no string, a lone narration, or 3+ strings, which
     /// are ambiguous: use [`Self::strings`] for lossless access.
     pub fn payee(&self) -> Option<StringLit> {

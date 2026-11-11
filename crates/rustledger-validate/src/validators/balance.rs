@@ -1,54 +1,12 @@
 //! Balance and pad validation.
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
-use rust_decimal::{Decimal, MathematicalOps};
+use rustledger_booking::balance_tolerance;
 use rustledger_core::{Amount, Balance, Pad, Position};
 
 use super::helpers::require_account_open;
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
-
-/// Multiplier for balance assertion tolerance (matches Python beancount).
-/// Balance assertions use 2x the `tolerance_multiplier` option.
-const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
-
-/// Compute the tolerance to apply when comparing a balance assertion's
-/// expected amount against the booked actual.
-///
-/// - `expected`: the asserted amount from the balance directive.
-/// - `explicit`: the `~ tolerance` from the directive, if any (always
-///   wins).
-/// - `tolerance_multiplier`: the active `inferred_tolerance_multiplier`
-///   option (default 0.5; overridable via `option
-///   "inferred_tolerance_multiplier" "..."`).
-///
-/// Mirrors the inline logic in `validate_balance_late` (private) so
-/// out-of-pipeline consumers (currently the LSP code-lens path)
-/// produce the same verdict as the validator without re-deriving the
-/// rule from the Beancount spec.
-///
-/// Matches Python beancount:
-/// <https://github.com/beancount/beancount/blob/master/beancount/ops/balance.py>
-#[must_use]
-pub fn balance_tolerance(
-    expected: Decimal,
-    explicit: Option<Decimal>,
-    tolerance_multiplier: Decimal,
-) -> Decimal {
-    if let Some(t) = explicit {
-        return t;
-    }
-    let scale = expected.scale();
-    if scale > 0 {
-        let quantum = DECIMAL_TEN.powi(-i64::from(scale));
-        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum
-    } else {
-        Decimal::ZERO
-    }
-}
-
-/// Base 10 for tolerance scale calculation.
-const DECIMAL_TEN: Decimal = Decimal::TEN;
 
 /// Validate a Pad directive, and apply its padding (the late stream's
 /// [`crate::PadState`] plan; `index` is the pad's index in that stream).
@@ -221,6 +179,11 @@ pub fn validate_balance_late(
     // account and a `Balance failed`): an unopened account's postings are in
     // its inventory (`crate::account_inventory`).
     //
+    // Padding a currency held at cost is reported first, whatever the
+    // balance comes to: one pad group can pad it while another fails, and
+    // `process_pads` reports it either way.
+    check_padding_at_cost(state, bal, index, errors);
+
     // A pad amount for this balance that could not be computed or applied is
     // reported, not clamped, and nothing was padded; comparing would only
     // add a balance failure for the same cause (#1863).
@@ -310,92 +273,28 @@ pub fn validate_balance_late(
     }
 }
 
-#[cfg(test)]
-mod tolerance_tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    /// Default `tolerance_multiplier` from `ValidationOptions::default()`
-    /// (also the loader's default via `Options::new()`).
-    fn default_mul() -> Decimal {
-        dec!(0.5)
-    }
-
-    #[test]
-    fn explicit_tolerance_always_wins() {
-        // Even an absurdly-small / absurdly-large explicit tolerance
-        // overrides the scale-derived default. This is the
-        // contract `~ tolerance` on a Balance directive provides.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), Some(dec!(0.001)), default_mul()),
-            dec!(0.001)
-        );
-        assert_eq!(
-            balance_tolerance(dec!(100.00), Some(dec!(50)), default_mul()),
-            dec!(50)
-        );
-    }
-
-    #[test]
-    fn integer_amount_requires_exact_match() {
-        // scale == 0 means the asserted amount has no decimal places.
-        // Python beancount requires an exact match in that case; the
-        // helper returns ZERO to make `difference > 0` strict.
-        assert_eq!(
-            balance_tolerance(dec!(100), None, default_mul()),
-            Decimal::ZERO
-        );
-    }
-
-    #[test]
-    fn two_decimal_amount_uses_default_quantum() {
-        // For `100.00 USD` with the default multiplier 0.5:
-        //   tolerance = 0.5 * 2 * 0.01 = 0.01
-        // This is the Beancount-spec rule the LSP and the validator
-        // both depend on; if this changes, every balance assertion
-        // shifts pass/fail.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), None, default_mul()),
-            dec!(0.01)
-        );
-    }
-
-    #[test]
-    fn higher_precision_scales_down() {
-        // 4 decimal places: tolerance = 0.5 * 2 * 0.0001 = 0.0001
-        assert_eq!(
-            balance_tolerance(dec!(100.0000), None, default_mul()),
-            dec!(0.0001)
-        );
-    }
-
-    #[test]
-    fn multiplier_one_doubles_default() {
-        // File overrides `option "inferred_tolerance_multiplier" "1.0"`:
-        //   tolerance = 1.0 * 2 * 0.01 = 0.02
-        assert_eq!(balance_tolerance(dec!(100.00), None, dec!(1.0)), dec!(0.02));
-    }
-
-    #[test]
-    fn multiplier_zero_forces_strict_match() {
-        // `option "inferred_tolerance_multiplier" "0.0"` is the
-        // canonical way to force strict equality on a decimal
-        // amount. The helper must yield zero so the validator emits
-        // a diagnostic on any rounding drift.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), None, dec!(0.0)),
-            Decimal::ZERO
-        );
-    }
-
-    #[test]
-    fn negative_amount_uses_same_scale_logic() {
-        // Tolerance is sign-independent (the validator applies it
-        // against `(actual - expected).abs()`), but the helper does
-        // not flip sign on negative expected — scale() is unsigned.
-        assert_eq!(
-            balance_tolerance(dec!(-100.00), None, default_mul()),
-            dec!(0.01)
-        );
+/// Beancount's "Attempt to pad an entry with cost" (`beancount/ops/pad.py`),
+/// reported at the `balance` at `index`, once per lot, as beancount reports
+/// it. The padding still applies (it was added at the pad), as beancount
+/// still inserts it.
+///
+/// The plan derives it (`rustledger_booking::PaddedAtCost`) from each pad
+/// group's own running inventory, beancount's `pad_balance`, so this only
+/// reports it: the one rule lives in the plan, which `process_pads` reports
+/// from too.
+fn check_padding_at_cost(
+    state: &LedgerState,
+    bal: &Balance,
+    index: usize,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (target, at_cost) in state.pads.at_cost_of(index) {
+        let message = at_cost.message();
+        for _ in 0..at_cost.lots {
+            errors.push(
+                ValidationError::new(ErrorCode::PadWithCost, message.clone(), bal.date)
+                    .with_context(format!("account: {target}")),
+            );
+        }
     }
 }

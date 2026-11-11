@@ -343,7 +343,11 @@ fn semantic_validation_errors(
         return (Vec::new(), Vec::new());
     }
     let today = jiff::Zoned::now().date();
-    let mut validation_options = rustledger_validate::ValidationOptions::default();
+    // The options `rledger check` validates with, from the ledger's own
+    // (`LoadResult::validation_options`): a default set ignored
+    // `tolerance_multiplier`, so a balance a pad left within the ledger's
+    // tolerance was reported where `check` reports the pad unused (#2901).
+    let mut validation_options = loaded.validation_options.clone();
     if let Some(dir) = filename
         .map(std::path::Path::new)
         .and_then(std::path::Path::parent)
@@ -480,7 +484,12 @@ fn load_result(
 
     // Synthesized pad transactions have no source line (tagged 0).
     let (directives, directive_lines) = if expand_pads {
-        ffi::helpers::expand_pads(loaded.directives, loaded.directive_lines, &0u32)
+        ffi::helpers::expand_pads(
+            loaded.directives,
+            loaded.directive_lines,
+            &0u32,
+            loaded.tolerance_multiplier,
+        )
     } else {
         (loaded.directives, loaded.directive_lines)
     };
@@ -785,7 +794,10 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
             errors: refused_errors(loaded),
         };
     }
-    let directives = rustledger_booking::merge_with_padding_spanned(&loaded.spanned_directives);
+    let directives = rustledger_booking::merge_with_padding_spanned(
+        &loaded.spanned_directives,
+        loaded.tolerance_multiplier,
+    );
     let memo = std::sync::OnceLock::new();
     with_load_errors(
         loaded,
@@ -1002,7 +1014,10 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             })
             .collect()
     } else {
-        let directives = rustledger_booking::merge_with_padding_spanned(&loaded.spanned_directives);
+        let directives = rustledger_booking::merge_with_padding_spanned(
+            &loaded.spanned_directives,
+            loaded.tolerance_multiplier,
+        );
         // One memo for the batch: discrepancies are recomputed at most once,
         // by the first query that reads them (#2823).
         let memo = std::sync::OnceLock::new();
@@ -1124,6 +1139,7 @@ pub fn load_file(
         Ok(fl) => {
             let mut errors = fl.errors;
             let opts = fl.options;
+            let tolerance_multiplier = fl.tolerance_multiplier;
             let plugin_dtos = fl.plugins;
             let loaded_files = fl.loaded_files;
             // Run requested plugins via the same helper the JSON-RPC handler uses.
@@ -1145,6 +1161,7 @@ pub fn load_file(
                     directives,
                     tags,
                     &(0u32, "<synthesized>".to_string()),
+                    tolerance_multiplier,
                 );
                 let (lines, files): (Vec<u32>, Vec<String>) = tags.into_iter().unzip();
                 (directives, lines, files)
@@ -1757,13 +1774,17 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
         .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
         .map(rustledger_core::Spanned::synthesized)
         .collect();
-    let directives = rustledger_booking::merge_with_padding_spanned(&spanned);
     // The `query-entries` WIT contract carries no ledger options, so the
-    // classifier defaults to the standard five roots. Renamed-root ledgers
+    // padding is measured at beancount's default tolerance multiplier, and
+    // the classifier defaults to the standard five roots. Renamed-root ledgers
     // queried via host-provided entries won't POSSIGN-flip custom names —
     // `session.from-entries-with-options` (3.7.0, #1766) is the
     // options-carrying path; this free function is doc-soft-deprecated
     // in its favor.
+    let directives = rustledger_booking::merge_with_padding_spanned(
+        &spanned,
+        rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+    );
     run_query(
         &directives,
         &rustledger_loader::SourceMap::new(),
@@ -1783,6 +1804,34 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
 // `query`/`filter`/`clamp` methods don't care which produced it. The win over
 // the free functions: these run against the held *core* directives, so they
 // never re-parse source nor round-trip a directive list through the host.
+
+/// The `tolerance_multiplier` held options carry, for the padding a query
+/// over held entries inserts (#2901). An empty value, as a zero-initialized
+/// record from a guest language holds, is beancount's default, the same
+/// treatment [`sanitize_options`] gives an empty root. A value that is not a
+/// decimal is reported and replaced by the default too. Either way `options`
+/// is rewritten to the value used, so `info()` echoes what pads.
+fn held_tolerance_multiplier(
+    options: &mut wit::LedgerOptions,
+) -> (rust_decimal::Decimal, Option<wit::Error>) {
+    let default = rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER;
+    let given = options.inferred_tolerance_multiplier.trim();
+    let (used, error) = if given.is_empty() {
+        (default, None)
+    } else {
+        match given.parse::<rust_decimal::Decimal>() {
+            Ok(value) => (value, None),
+            Err(e) => (
+                default,
+                Some(simple_error(format!(
+                    "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
+                ))),
+            ),
+        }
+    };
+    options.inferred_tolerance_multiplier = used.to_string();
+    (used, error)
+}
 
 /// Check the `booking_method` held options carry (#2911). It is read back,
 /// exactly as given, through the loader's `Options`, so it is held to the
@@ -1855,6 +1904,9 @@ pub struct SessionState {
     /// session plugins are gated on.
     query_refusal: Option<wit::Error>,
     options: wit::LedgerOptions,
+    /// The ledger's `tolerance_multiplier`, for the padding a query inserts
+    /// (a difference within a balance's tolerance is not padded, #2901).
+    tolerance_multiplier: rust_decimal::Decimal,
     plugins: Vec<ffi::Plugin>,
     includes: Vec<(String, u32)>,
     /// Pad-expanded directives for querying, computed once on first `query`.
@@ -1952,6 +2004,7 @@ impl SessionState {
             query_refusal: loaded.query_refusal.map(error),
             errors: loaded.errors.into_iter().map(error).collect(),
             options: options(loaded.options),
+            tolerance_multiplier: loaded.tolerance_multiplier,
             plugins: loaded.plugins,
             includes: loaded
                 .includes
@@ -2002,6 +2055,7 @@ impl SessionState {
         options: wit::LedgerOptions,
     ) -> Self {
         let mut options = sanitize_options(options);
+        let (tolerance_multiplier, multiplier_error) = held_tolerance_multiplier(&mut options);
         let booking_method_error = held_booking_method(&mut options);
         // The one-time conversion is this API's whole reason to exist —
         // reserve up front so a large ledger doesn't reallocate through
@@ -2018,8 +2072,12 @@ impl SessionState {
             directives,
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
-            errors: booking_method_error.into_iter().collect(),
+            errors: multiplier_error
+                .into_iter()
+                .chain(booking_method_error)
+                .collect(),
             query_blocked: false,
+            tolerance_multiplier,
             query_refusal: None,
             options,
             plugins: vec![],
@@ -2062,6 +2120,7 @@ impl SessionState {
                 // but is kept out of `errors`, which gate the session plugins.
                 let query_blocked = !errors.is_empty() || fl.query_refusal.is_some();
                 let query_refusal = fl.query_refusal.map(error);
+                let tolerance_multiplier = fl.tolerance_multiplier;
                 let opts = fl.options;
                 let plugin_dtos = fl.plugins;
                 let loaded_files = fl.loaded_files;
@@ -2109,6 +2168,7 @@ impl SessionState {
                     query_refusal,
                     errors: notices.into_iter().chain(errors).map(error).collect(),
                     options: options(opts),
+                    tolerance_multiplier,
                     plugins: plugin_dtos,
                     includes: loaded_files.into_iter().map(|p| (p, 0)).collect(),
                     padded: std::cell::OnceCell::new(),
@@ -2128,6 +2188,7 @@ impl SessionState {
                 query_blocked: true,
                 query_refusal: None,
                 options: options(ffi::LedgerOptions::default()),
+                tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 plugins: vec![],
                 includes: vec![],
                 padded: std::cell::OnceCell::new(),
@@ -2196,6 +2257,7 @@ impl SessionState {
         let directives = self.padded_spanned.get_or_init(|| {
             rustledger_booking::merge_with_padding_spanned(
                 &rustledger_query::executor::spanned_from_parts(&self.directives, &self.spans),
+                self.tolerance_multiplier,
             )
         });
         let mut result = run_query_with_tables(
@@ -2447,9 +2509,9 @@ impl SessionState {
         } else {
             currency.to_string()
         };
-        let directives = self
-            .padded
-            .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
+        let directives = self.padded.get_or_init(|| {
+            rustledger_booking::merge_with_padding(&self.directives, self.tolerance_multiplier)
+        });
         let scope = rustledger_returns::Scope::new(investments.to_vec(), income.to_vec());
         let returns =
             rustledger_query::scope_returns(directives, &scope, &reporting_currency, end_date)
@@ -2500,9 +2562,9 @@ impl SessionState {
         // postings are spending as much as any other, and reading the
         // source-faithful stream made the CLI report disagree with `balances`
         // on the very same ledger.
-        let directives = self
-            .padded
-            .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
+        let directives = self.padded.get_or_init(|| {
+            rustledger_booking::merge_with_padding(&self.directives, self.tolerance_multiplier)
+        });
         let types = self.account_types();
         let budgets = rustledger_budget::Budgets::from_directives(directives);
         let filter = (!account_filter.is_empty()).then_some(account_filter);
@@ -3365,6 +3427,57 @@ option \"display_precision\" \"USD:0.001\"
         );
     }
 
+    /// Held options' `tolerance_multiplier` reaches the padding a query
+    /// inserts (#2901): under 2 a 0.03 difference against `balance 100.00`
+    /// is within tolerance and nothing is padded. A value that is not a
+    /// decimal is reported and replaced by the default, and `info()` echoes
+    /// the value used.
+    #[test]
+    fn test_from_entries_with_options_uses_and_reports_the_tolerance_multiplier() {
+        let loaded = SessionState::from_source(
+            "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+             2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O  -99.97 USD\n\
+             2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 100.00 USD\n",
+        );
+        let info = loaded.info();
+        let padding = |state: &SessionState| {
+            let result =
+                state.query("SELECT sum(number) WHERE flag = 'P' AND account = 'Assets:A'");
+            format!("{:?}", result.rows)
+        };
+        let with = |multiplier: &str| {
+            let mut options = info.options.clone();
+            options.inferred_tolerance_multiplier = multiplier.to_string();
+            SessionState::from_entries_with_options(&info.entries, options)
+        };
+
+        let wide = with("2");
+        assert!(wide.errors.is_empty(), "{:?}", wide.errors);
+        assert_eq!(wide.info().options.inferred_tolerance_multiplier, "2");
+        let default = with("0.5");
+        assert_ne!(
+            padding(&wide),
+            padding(&default),
+            "2 pads nothing, 0.5 pads 0.03"
+        );
+
+        let invalid = with("two");
+        assert_eq!(invalid.errors.len(), 1, "{:?}", invalid.errors);
+        assert!(
+            invalid.errors[0]
+                .message
+                .contains("invalid tolerance_multiplier \"two\""),
+            "{:?}",
+            invalid.errors
+        );
+        assert_eq!(invalid.info().options.inferred_tolerance_multiplier, "0.5");
+        assert_eq!(padding(&invalid), padding(&default));
+
+        let empty = with("");
+        assert!(empty.errors.is_empty(), "{:?}", empty.errors);
+        assert_eq!(empty.info().options.inferred_tolerance_multiplier, "0.5");
+    }
+
     /// The round-trip that motivated the whole options carrier: a session
     /// rebuilt from another session's `info()` formats identically WITH
     /// the options, and falls back to entry-inferred precision without.
@@ -3762,7 +3875,8 @@ option \"operating_currency\" \"USD\"
 
         // The shared helper both surfaces route through (CLI report_returns and
         // session.returns), so agreement here == CLI parity, not a self-check.
-        let padded = rustledger_booking::merge_with_padding(&state.directives);
+        let padded =
+            rustledger_booking::merge_with_padding(&state.directives, state.tolerance_multiplier);
         let scope = rustledger_returns::Scope::new(inv, inc);
         let end = "2021-01-01".parse().expect("date");
         let shared = rustledger_query::scope_returns(&padded, &scope, "USD", end)
@@ -4360,7 +4474,10 @@ mod query_sources_tests {
             },
         )
         .expect("loads");
-        let directives = rustledger_booking::merge_with_padding_spanned(&ledger.directives);
+        let directives = rustledger_booking::merge_with_padding_spanned(
+            &ledger.directives,
+            ledger.options.inferred_tolerance_multiplier,
+        );
         let mut executor = rustledger_query::Executor::for_ledger(
             &directives,
             &ledger.source_map,
@@ -4769,5 +4886,65 @@ mod query_answer_rule {
             );
         }
         assert!(ran >= 4, "only {ran} source-text cases");
+    }
+}
+
+/// Drift guard (#2901): `validate` and `load` validate with the ledger's own
+/// options, as `rledger check` does. They used to validate with a default
+/// set that ignored `tolerance_multiplier`.
+#[cfg(test)]
+mod validation_options_tests {
+    /// 99.97 held against a balance of 100.00: within the tolerance
+    /// `tolerance_multiplier` 2 gives, outside the default one.
+    const HELD: &str = "option \"tolerance_multiplier\" \"2\"\n\
+        2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+        2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O\n";
+    const BALANCE: &str = "2024-01-10 balance Assets:A 100.00 USD\n";
+    const PAD: &str = "2024-01-03 pad Assets:A Equity:O\n";
+
+    /// The messages `rledger check` reports for `source`: a validating load
+    /// of it as a file.
+    fn check(source: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.beancount");
+        std::fs::write(&path, source).expect("write the ledger");
+        let ledger = rustledger_loader::load(
+            &path,
+            &rustledger_loader::LoadOptions {
+                validate: true,
+                ..Default::default()
+            },
+        )
+        .expect("loads");
+        ledger.errors.iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// bean-check 3.2.3: with the pad, `Unused Pad entry` (the difference is
+    /// within the tolerance, so nothing is padded); without it, nothing.
+    #[test]
+    fn test_validate_and_load_read_the_tolerance_multiplier_as_check_does() {
+        let padded = format!("{HELD}{PAD}{BALANCE}");
+        let unpadded = format!("{HELD}{BALANCE}");
+        for (source, expected) in [
+            (padded.as_str(), vec!["Unused Pad entry".to_string()]),
+            (unpadded.as_str(), Vec::new()),
+        ] {
+            let check = check(source);
+            assert_eq!(check, expected, "rledger check");
+            let validate: Vec<String> = super::validate(source)
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect();
+            assert_eq!(validate, check, "validate");
+            for expand in [false, true] {
+                let load: Vec<String> = super::load(source, "ledger.beancount", expand)
+                    .errors
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect();
+                assert_eq!(load, check, "load, expand_pads {expand}");
+            }
+        }
     }
 }

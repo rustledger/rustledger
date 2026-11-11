@@ -1110,6 +1110,33 @@ pub const fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority) {
     (d.date(), d.priority())
 }
 
+/// Beancount's `entry_sortkey`, `(date, SORT_ORDER, lineno)`.
+///
+/// `lineno` is the directive's line in its source, whichever file that is,
+/// and for one a plugin made, the line the plugin gave it (0 when it gave
+/// none), as beancount numbers them. Beancount's sort is stable, so entries
+/// tied on this key keep the order they were parsed in (see
+/// `rustledger_booking::SourcePosition`).
+///
+/// `SORT_ORDER` is `{Open: -2, Balance: -1, Document: 1, Close: 2}` and `0`
+/// for every other type, the `pad` included. [`booking_sort_key`] differs
+/// only there, giving a `pad` a rank of its own ahead of the same date's
+/// transactions ([`DirectivePriority::Pad`]); where an order must be
+/// beancount's own rather than the booking order, as for the order
+/// beancount's `realization.postings_by_account` first meets each account,
+/// this is the key.
+#[must_use]
+pub const fn beancount_entry_sort_key(d: &Directive, lineno: usize) -> (NaiveDate, i8, usize) {
+    let order = match d {
+        Directive::Open(_) => -2,
+        Directive::Balance(_) => -1,
+        Directive::Document(_) => 1,
+        Directive::Close(_) => 2,
+        _ => 0,
+    };
+    (d.date(), order, lineno)
+}
+
 /// A transaction directive.
 ///
 /// Transactions are the most common directive type. They record transfers
@@ -2688,5 +2715,29 @@ mod tests {
                 "error for {case:?} should mention kind {kind:?}, got: {err}"
             );
         }
+    }
+
+    /// Beancount's `entry_sortkey` ranks a `pad` with the transactions, so a
+    /// same-date `note` written above it comes first, where the booking
+    /// order puts the `pad` first; `open`, `balance`, `document` and
+    /// `close` keep their places on either key.
+    #[test]
+    fn test_beancount_entry_sort_key_ranks_a_pad_by_its_place() {
+        let day = crate::naive_date(2024, 1, 2).unwrap();
+        let note = Directive::Note(Note::new(day, "Assets:A", "n"));
+        let pad = Directive::Pad(Pad::new(day, "Assets:A", "Equity:O"));
+        let open = Directive::Open(Open::new(day, "Assets:A"));
+        let balance = Directive::Balance(Balance::new(
+            day,
+            "Assets:A",
+            crate::Amount::new(rust_decimal::Decimal::ONE, "USD"),
+        ));
+        let close = Directive::Close(Close::new(day, "Assets:A"));
+        assert!(booking_sort_key(&pad) < booking_sort_key(&note));
+        assert!(beancount_entry_sort_key(&note, 1) < beancount_entry_sort_key(&pad, 2));
+        assert!(beancount_entry_sort_key(&pad, 1) < beancount_entry_sort_key(&note, 2));
+        assert!(beancount_entry_sort_key(&open, 9) < beancount_entry_sort_key(&balance, 1));
+        assert!(beancount_entry_sort_key(&balance, 9) < beancount_entry_sort_key(&note, 1));
+        assert!(beancount_entry_sort_key(&note, 9) < beancount_entry_sort_key(&close, 1));
     }
 }

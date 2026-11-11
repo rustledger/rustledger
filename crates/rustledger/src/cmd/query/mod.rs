@@ -265,7 +265,10 @@ pub fn run_with_writer<W: io::Write>(
     // the original Pad directives in the output so `FROM #entries WHERE type =
     // 'pad'` audits still enumerate them, AND handles multi-pad shadowing
     // (#1300) correctly by construction via `process_pads`.
-    let directives = merge_with_padding_spanned(&ledger.directives);
+    let directives = merge_with_padding_spanned(
+        &ledger.directives,
+        ledger.options.inferred_tolerance_multiplier,
+    );
 
     // Source map + display context from the loaded ledger (used for source-
     // location columns and number formatting respectively).

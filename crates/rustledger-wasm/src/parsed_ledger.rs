@@ -24,16 +24,19 @@ use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
 // =============================================================================
 
 /// The pad-expanded, spanned directives a ledger's queries run on, built
-/// once per ledger from its plain directives and kept spans (#2825).
+/// once per ledger from its plain directives and kept spans (#2825), padded
+/// with the ledger's `tolerance_multiplier` (#2901).
 fn query_directives<'c>(
     cache: &'c std::cell::OnceCell<Vec<rustledger_core::Spanned<Directive>>>,
     directives: &[Directive],
     spans: &[crate::helpers::DirectiveSpan],
+    tolerance_multiplier: rustledger_core::Decimal,
 ) -> &'c [rustledger_core::Spanned<Directive>] {
     cache.get_or_init(|| {
-        rustledger_booking::merge_with_padding_spanned(&crate::helpers::spanned_directives(
-            directives, spans,
-        ))
+        rustledger_booking::merge_with_padding_spanned(
+            &crate::helpers::spanned_directives(directives, spans),
+            tolerance_multiplier,
+        )
     })
 }
 
@@ -113,11 +116,10 @@ fn execute_query(
     }
 }
 
-fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
-    use rustledger_booking::process_pads;
-
-    let pad_result = process_pads(directives);
-
+fn execute_expand_pads(
+    directives: &[Directive],
+    pad_result: &rustledger_booking::PadResult,
+) -> Result<JsValue, JsError> {
     let result = PadResult {
         // The source stream, verbatim — `process_pads` no longer
         // echoes its input back, so read it from the directives we
@@ -391,6 +393,7 @@ impl ParsedLedger {
             &self.query_directives,
             &self.directives,
             &self.directive_spans,
+            crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
         );
         let options = &self.parse_result.options;
         execute_query(
@@ -461,7 +464,14 @@ impl ParsedLedger {
             };
             return to_js(&result);
         }
-        execute_expand_pads(&self.directives)
+        execute_expand_pads(
+            &self.directives,
+            &crate::helpers::pad_expansion(
+                &self.directives,
+                &crate::helpers::source_positions(&self.directive_spans, &self.source_map),
+                crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
+            ),
+        )
     }
 
     /// Run a native plugin on this ledger.
@@ -637,6 +647,11 @@ pub struct Ledger {
     /// Each directive's span and file id, for the source columns of a query
     /// (#2825). Empty for a ledger restored from a cache.
     directive_spans: Vec<crate::helpers::DirectiveSpan>,
+    /// Each directive's place in beancount's entry order (its line, and its
+    /// file's place in the load; a plugin's at the line the plugin gave it),
+    /// for the pad expansion (#2901). Kept in the cache payload, unlike the
+    /// spans.
+    directive_positions: Vec<rustledger_booking::SourcePosition>,
     /// The files the ledger was loaded from, so a query resolves `filename` /
     /// `lineno` / `location` (#2825). Empty for a ledger restored from a
     /// cache, whose source columns read NULL.
@@ -660,6 +675,10 @@ pub struct Ledger {
     /// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
     /// (#2401). Persisted in the cache payload, like `account_types`.
     summary_accounts: rustledger_query::executor::SummaryAccounts,
+    /// The `tolerance_multiplier` option, which the padding a query inserts
+    /// measures a balance's tolerance with (#2901). Persisted in the cache
+    /// payload, like `account_types`.
+    tolerance_multiplier: rustledger_core::Decimal,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
     /// Whether `errors` holds one that stops a query from answering
@@ -676,35 +695,37 @@ pub struct Ledger {
     created_tables: std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 }
 
-#[wasm_bindgen]
-
 impl Ledger {
-    /// Create a `Ledger` from multiple files with include resolution.
-    ///
-    /// Loads and runs the same processing pipeline as the CLI:
-    /// sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize.
-    ///
-    /// # Arguments
-    ///
-    /// * `files` - A JavaScript object mapping file paths to their contents.
-    /// * `entry_point` - The main file to start loading from (must exist in `files`).
-    #[wasm_bindgen(js_name = "fromFiles")]
-    pub fn from_files(files: JsValue, entry_point: &str) -> Result<Self, JsError> {
+    /// The pad expansion `expandPads` answers with: the directives padded
+    /// with their kept lines (#2901), which a restored ledger keeps too.
+    pub(crate) fn pad_result(&self) -> rustledger_booking::PadResult {
+        crate::helpers::pad_expansion(
+            &self.directives,
+            &self.directive_positions,
+            self.tolerance_multiplier,
+        )
+    }
+
+    /// The messages of the errors `getErrors` answers with.
+    #[cfg(test)]
+    pub(crate) fn error_messages(&self) -> Vec<String> {
+        self.errors.iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// [`Ledger::from_files`] once the files are a map: the load, as the CLI
+    /// runs it. Plain Rust, so native tests build a `Ledger` too.
+    pub(crate) fn from_file_map(
+        file_map: HashMap<String, String>,
+        entry_point: &str,
+    ) -> Result<Self, String> {
         use rustledger_loader::{FileSystem, LoadOptions, Loader, VirtualFileSystem, process};
-
-        let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
-            .map_err(|e| JsError::new(&format!("Invalid files object: {e}")))?;
-
-        if file_map.is_empty() {
-            return Err(JsError::new("Files map cannot be empty"));
-        }
 
         let vfs = VirtualFileSystem::from_files(file_map);
 
         if !vfs.exists(Path::new(entry_point)) {
-            return Err(JsError::new(&format!(
+            return Err(format!(
                 "Entry point '{entry_point}' not found in files map"
-            )));
+            ));
         }
 
         let mut loader = Loader::new().with_filesystem(Box::new(vfs));
@@ -715,6 +736,7 @@ impl Ledger {
                 return Ok(Self {
                     directives: Vec::new(),
                     directive_spans: Vec::new(),
+                    directive_positions: Vec::new(),
                     source_map: rustledger_loader::SourceMap::new(),
                     balance_discrepancies: Vec::new(),
 
@@ -723,6 +745,7 @@ impl Ledger {
                     account_types: rustledger_core::AccountTypes::default(),
                     booking_method: LoadOptions::default().booking_method,
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
+                    tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                     query_refused: true,
@@ -738,6 +761,7 @@ impl Ledger {
         let account_types = load_result.options.to_account_types();
         let summary_accounts =
             rustledger_query::executor::SummaryAccounts::from_options(&load_result.options);
+        let tolerance_multiplier = load_result.options.inferred_tolerance_multiplier;
 
         let load_options = LoadOptions {
             validate: true,
@@ -765,6 +789,11 @@ impl Ledger {
                     .into_iter()
                     .map(|s| (s.value, (s.span, s.file_id)))
                     .unzip();
+                // Each directive's place in beancount's entry order, whichever
+                // file it is in, for the pad expansion (#2901), kept in the
+                // cache payload so a restored ledger pads alike.
+                let directive_positions =
+                    crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
@@ -772,6 +801,7 @@ impl Ledger {
                 Ok(Self {
                     directives,
                     directive_spans,
+                    directive_positions,
                     source_map,
                     balance_discrepancies,
 
@@ -780,6 +810,7 @@ impl Ledger {
                     account_types,
                     booking_method,
                     summary_accounts,
+                    tolerance_multiplier,
                     errors,
                     editor_cache,
                     query_refused,
@@ -789,6 +820,7 @@ impl Ledger {
             Err(e) => Ok(Self {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
+                directive_positions: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
 
@@ -797,12 +829,38 @@ impl Ledger {
                 account_types,
                 booking_method,
                 summary_accounts,
+                tolerance_multiplier,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: true,
                 created_tables: std::cell::RefCell::default(),
             }),
         }
+    }
+}
+
+#[wasm_bindgen]
+
+impl Ledger {
+    /// Create a `Ledger` from multiple files with include resolution.
+    ///
+    /// Loads and runs the same processing pipeline as the CLI:
+    /// sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize.
+    ///
+    /// # Arguments
+    ///
+    /// * `files` - A JavaScript object mapping file paths to their contents.
+    /// * `entry_point` - The main file to start loading from (must exist in `files`).
+    #[wasm_bindgen(js_name = "fromFiles")]
+    pub fn from_files(files: JsValue, entry_point: &str) -> Result<Self, JsError> {
+        let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
+            .map_err(|e| JsError::new(&format!("Invalid files object: {e}")))?;
+
+        if file_map.is_empty() {
+            return Err(JsError::new("Files map cannot be empty"));
+        }
+
+        Self::from_file_map(file_map, entry_point).map_err(|e| JsError::new(&e))
     }
 
     /// Check if the ledger is valid (no errors).
@@ -865,6 +923,7 @@ impl Ledger {
             &self.query_directives,
             &self.directives,
             &self.directive_spans,
+            self.tolerance_multiplier,
         );
         execute_query(
             expanded,
@@ -892,7 +951,7 @@ impl Ledger {
     /// Expand pad directives.
     #[wasm_bindgen(js_name = "expandPads")]
     pub fn expand_pads(&self) -> Result<JsValue, JsError> {
-        execute_expand_pads(&self.directives)
+        execute_expand_pads(&self.directives, &self.pad_result())
     }
 
     /// Run a native plugin on this ledger.
@@ -938,6 +997,17 @@ impl Ledger {
                 self.account_types.expenses.clone(),
             ],
             booking_method: self.booking_method.to_string(),
+            tolerance_multiplier: self.tolerance_multiplier.to_string(),
+            directive_lines: self
+                .directive_positions
+                .iter()
+                .map(|p| u32::try_from(p.line).unwrap_or(u32::MAX))
+                .collect(),
+            directive_file_ranks: self
+                .directive_positions
+                .iter()
+                .map(|p| u32::try_from(p.file_rank).unwrap_or(u32::MAX))
+                .collect(),
             summary_account_names: vec![
                 self.summary_accounts.previous_balances.clone(),
                 self.summary_accounts.previous_earnings.clone(),
@@ -987,6 +1057,12 @@ impl Ledger {
             .booking_method
             .parse()
             .unwrap_or(rustledger_core::BookingMethod::Strict);
+        // Written by `serialize` from the loaded option, so it parses back; the
+        // fallback, beancount's default, only covers a hand-built blob.
+        let tolerance_multiplier = payload
+            .tolerance_multiplier
+            .parse()
+            .unwrap_or(rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
         let summary_accounts = match <[String; 6]>::try_from(payload.summary_account_names) {
             Ok(
                 [
@@ -1013,6 +1089,22 @@ impl Ledger {
         Ok(Self {
             directives: payload.directives,
             directive_spans: Vec::new(),
+            // A blob whose two lists disagree in length keeps no positions,
+            // and pads by its stream order.
+            directive_positions: if payload.directive_lines.len()
+                == payload.directive_file_ranks.len()
+            {
+                payload
+                    .directive_lines
+                    .iter()
+                    .zip(&payload.directive_file_ranks)
+                    .map(|(&line, &rank)| {
+                        rustledger_booking::SourcePosition::new(line as usize, rank as usize)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1021,6 +1113,7 @@ impl Ledger {
             account_types,
             booking_method,
             summary_accounts,
+            tolerance_multiplier,
             errors: payload.errors,
             editor_cache,
             query_refused: payload.query_refused,
@@ -1109,6 +1202,7 @@ mod option_warning_severity_tests {
         let ledger = Ledger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
+            directive_positions: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1116,6 +1210,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
@@ -1135,6 +1230,7 @@ mod option_warning_severity_tests {
         let broken = Ledger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
+            directive_positions: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1142,6 +1238,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
@@ -1177,6 +1274,7 @@ mod option_warning_severity_tests {
             let ledger = Ledger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
+                directive_positions: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
 
@@ -1184,6 +1282,7 @@ mod option_warning_severity_tests {
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
                 booking_method: rustledger_core::BookingMethod::Strict,
+                tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),

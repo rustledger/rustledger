@@ -22,11 +22,13 @@
 //!   Equity:Opening-Balances -1000.00 USD
 //! ```
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
-    Account, Amount, Currency, Directive, NaiveDate, Posting, Spanned, Transaction,
+    Account, Amount, Cost, Currency, Directive, NaiveDate, Position, Posting, Spanned, Transaction,
 };
+use std::collections::BTreeMap;
 use std::ops::Neg;
 
 /// Prefix of the narration carried by every synth pad transaction
@@ -73,7 +75,9 @@ pub struct PadResult {
     /// Beancount gives a padding entry the `pad`'s source location and its
     /// postings the `balance`'s, so a query reports both (#2825).
     pub padding_origins: Vec<PadOrigin>,
-    /// Any errors encountered during pad processing.
+    /// Any errors encountered during pad processing: running totals and pad
+    /// amounts out of range (#1863), beancount's "Attempt to pad an entry
+    /// with cost" once per lot at cost ([`PaddedAtCost`]), and unused pads.
     pub errors: Vec<PadError>,
 }
 
@@ -115,116 +119,568 @@ impl PadError {
     }
 }
 
-/// The pad rule: which `pad` a `balance` uses, and whether that pad is used
-/// at all. Beancount's `pad` plugin (`beancount/ops/pad.py`), per target
-/// account:
+/// Multiplier beancount applies to a `balance`'s inferred tolerance: twice
+/// the `tolerance_multiplier` option (`beancount/ops/balance.py`,
+/// `get_balance_tolerance`).
+const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
+
+/// The tolerance a `balance` assertion of `expected` is checked with.
 ///
-/// - The pad a balance can use is the latest one dated strictly before it
-///   (its `active_pad`). An earlier pad that a later one superseded is never
-///   used again, and comes out unused if it never padded.
-/// - A balance in a currency uses up that currency for the pads before it,
-///   whatever its difference (its `padded_lots`, reset by each new pad): a
-///   later balance in the same currency is compared, not padded, until
-///   another `pad` comes. So `pad`, `balance 0`, `balance 10` pads nothing
-///   and fails the second balance.
-/// - A pad is used only when it inserts padding, a non-zero difference.
-///   Otherwise it is an `Unused Pad entry`, even if a balance reached it.
+/// A `pad` measures its difference against it too: this is beancount's
+/// `get_balance_tolerance`, which both its balance check and its `pad`
+/// plugin call.
 ///
-/// [`plan_pads`] is its one caller.
+/// - `explicit`: the `~ tolerance` written on the directive, which always
+///   wins.
+/// - `tolerance_multiplier`: the `tolerance_multiplier` option (default
+///   0.5, [`crate::DEFAULT_TOLERANCE_MULTIPLIER`]).
+///
+/// Otherwise the tolerance is `tolerance_multiplier * 2` units of the
+/// asserted amount's last digit, and zero for an integer amount, which must
+/// match exactly.
+///
+/// CANONICAL: the balance check in `rustledger-validate` and [`plan_pads`]
+/// both call this, so a difference a pad leaves alone is one the check
+/// passes (#2901).
+#[must_use]
+pub fn balance_tolerance(
+    expected: Decimal,
+    explicit: Option<Decimal>,
+    tolerance_multiplier: Decimal,
+) -> Decimal {
+    if let Some(t) = explicit {
+        return t;
+    }
+    let scale = expected.scale();
+    if scale > 0 {
+        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * Decimal::new(1, scale)
+    } else {
+        Decimal::ZERO
+    }
+}
+
+/// The pad rule, beancount's `pad` plugin (`beancount/ops/pad.py`).
+///
+/// Each account with a `pad` is a pad group, walked on its own:
+///
+/// - A group sees the balances on its account AND on its sub-accounts. Each
+///   is compared against the group's own running amount: the real postings
+///   of the account and its sub-accounts, plus the padding this group has
+///   inserted (beancount's `pad_balance`). Another group's padding is no
+///   part of it, whether it went into a sub-account or came out of the
+///   group's account as that pad's source (#2901).
+/// - The pad a balance can use is the group's latest `pad` before it (its
+///   `active_pad`). A pad superseded by a later one is never used again, and
+///   comes out unused if it never padded.
+/// - A balance in a currency uses up that currency for the group until the
+///   next `pad` (`padded_lots`), whatever its difference, and so does a
+///   balance on a sub-account: `pad A`, `balance A:B 30` (held),
+///   `balance A 100` pads nothing and fails the second balance.
+/// - A pad inserts padding only for a difference beyond the balance's
+///   tolerance ([`balance_tolerance`]). A pad that never inserts padding is
+///   an `Unused Pad entry`, even if a balance reached it.
+///
+/// The padding goes into the group's account, whichever account the balance
+/// is on. [`plan_pads`] is its one caller, and walks the ledger in booking
+/// order, so the pads a group has seen when a balance comes are the ones
+/// before it (a same-date `pad` sorts after the `balance`, #2150).
 #[derive(Debug, Default)]
 struct PadTracker {
-    targets: FxHashMap<Account, Vec<TrackedPad>>,
+    /// The pad groups, by account: one for every account a `pad` names,
+    /// made before the walk so each holds every posting under it from the
+    /// first one on, as beancount's `pad_balance` does.
+    groups: FxHashMap<Account, PadGroup>,
+    /// Every `pad`, in walk order.
+    pads: Vec<TrackedPad>,
+    /// Each account's rank: the order the walk first met it, as beancount's
+    /// `realization.postings_by_account` keys its accounts. Beancount
+    /// collects a group's postings account by account in that order and
+    /// stable-sorts them by date, type and line, and one transaction's
+    /// postings share a line, so they enter `pad_balance` in account rank
+    /// order, not as written ([`Self::post_transaction`]).
+    ranks: FxHashMap<Account, usize>,
+    /// Whether an account falls in some group (is a group's account or under
+    /// one), by account, so a posting outside every group costs one lookup.
+    covered: FxHashMap<Account, bool>,
+    /// Whether the order postings enter a group can show: only in an
+    /// "Attempt to pad an entry with cost" message, so only when a posting
+    /// under some group carries a cost. Without one, the ranks are not
+    /// built and a transaction's postings are not sorted.
+    ordered: bool,
+}
+
+/// One account's pads (one of beancount's per-account walks).
+#[derive(Debug, Default)]
+struct PadGroup {
+    /// The active pad, an index into [`PadTracker::pads`].
+    active: Option<usize>,
+    /// Currencies a balance has asserted since the active pad
+    /// (`padded_lots`): they are compared, not padded.
+    padded_lots: FxHashSet<Currency>,
+    /// The units of the real postings to the account and its sub-accounts,
+    /// per currency, moved by each posting (`PadTracker::post`), so a
+    /// balance reads its amount without summing the subtree.
+    real: RunningTotals,
+    /// The padding this group has inserted, per currency.
+    padded: FxHashMap<Currency, Decimal>,
+    /// Beancount's `pad_balance` itself: the real postings under the account
+    /// and the group's own padding, as positions (lots at cost included) in
+    /// the order they came. The "pad an entry with cost" check reads it.
+    held: GroupInventory,
+}
+
+/// Running units per currency, by hash, so a group holding many currencies
+/// stays linear. A total that leaves `Decimal`'s range (#1863) carries on in
+/// `BigDecimal`, so it never needs re-summing, and reads as unrepresentable
+/// only while it is out of range.
+///
+/// Stricter than Python, on purpose: beancount sums `pad_balance` in a
+/// 28-digit `decimal` context, so a total that passes through
+/// `100000000000000000000000000001` rounds the trailing 1 away and pads it
+/// back later; this keeps it exact. Pinned by
+/// `test_plan_pads_keeps_an_overflowed_total_exact`.
+#[derive(Debug, Default)]
+struct RunningTotals {
+    fast: FxHashMap<Currency, Decimal>,
+    wide: FxHashMap<Currency, BigDecimal>,
+}
+
+impl RunningTotals {
+    fn add(&mut self, currency: &Currency, number: Decimal) {
+        if let Some(wide) = self.wide.get_mut(currency) {
+            *wide += rustledger_core::to_bigdecimal(number);
+            return;
+        }
+        let total = self.fast.entry(currency.clone()).or_default();
+        if let Some(sum) = total.checked_add(number) {
+            *total = sum;
+        } else {
+            let wide =
+                rustledger_core::to_bigdecimal(*total) + rustledger_core::to_bigdecimal(number);
+            self.fast.remove(currency);
+            self.wide.insert(currency.clone(), wide);
+        }
+    }
+
+    /// The total of `currency`, or `None` when it cannot be represented.
+    fn get(&self, currency: &Currency) -> Option<Decimal> {
+        match self.wide.get(currency) {
+            None => Some(self.fast.get(currency).copied().unwrap_or_default()),
+            Some(wide) => rustledger_core::decimal_from_big_exact(wide),
+        }
+    }
+}
+
+/// A lot of a [`GroupInventory`]: its currency and its cost, beancount's
+/// `Inventory` key.
+type LotKey = (Currency, Option<Cost>);
+
+/// An inventory that behaves as beancount's `Inventory.add_position`: a
+/// position joins the one with the same currency and cost, a lot that nets
+/// to zero is dropped, and positions keep the order they were first added
+/// (a dropped one that comes back goes last, as a Python `dict` key does).
+/// That order is what beancount's stable sort leaves ties in when it prints
+/// the inventory. A joined lot takes the incoming posting's cost object, as
+/// `add_amount` rebuilds the position with it: `{10 USD}` joined by an equal
+/// `{10.00 USD, 2024-01-02}` prints as the latter.
+#[derive(Debug, Default)]
+struct GroupInventory {
+    /// Each lot's place in `order`, its units, and the cost it prints with
+    /// (equal to the key's, but as last written).
+    lots: FxHashMap<LotKey, (u64, Decimal, Option<Cost>)>,
+    /// The lots, by the order they were added.
+    order: BTreeMap<u64, LotKey>,
+    next: u64,
+    /// How many lots at cost each currency has.
+    at_cost: FxHashMap<Currency, usize>,
+}
+
+impl GroupInventory {
+    fn add(&mut self, currency: &Currency, cost: Option<&Cost>, number: Decimal) {
+        #[cfg(test)]
+        tests::WORK.with(|n| n.set(n.get() + 1));
+        let key: LotKey = (currency.clone(), cost.cloned());
+        let Some((slot, units, written)) = self.lots.get_mut(&key) else {
+            if !number.is_zero() {
+                if cost.is_some() {
+                    *self.at_cost.entry(currency.clone()).or_default() += 1;
+                }
+                self.order.insert(self.next, key.clone());
+                self.lots.insert(key, (self.next, number, cost.cloned()));
+                self.next += 1;
+            }
+            return;
+        };
+        // Python's `decimal` keeps a sum's scale (`1.00 + 1.00` is `2.00`),
+        // which the printed inventory shows. A lot that leaves the range is
+        // left as it was: the running total (`RunningTotals`) is what pads,
+        // and the account's own overflow is reported on its posting.
+        let Some(sum) = rustledger_core::checked_add_python_scale(*units, number) else {
+            return;
+        };
+        if sum.is_zero() {
+            let slot = *slot;
+            self.order.remove(&slot);
+            self.lots.remove(&key);
+            if let Some(count) = self.at_cost.get_mut(currency).filter(|_| cost.is_some()) {
+                *count -= 1;
+            }
+        } else {
+            *units = sum;
+            written.clone_from(&key.1);
+        }
+    }
+
+    /// How many lots at cost of `currency` it holds.
+    fn lots_at_cost(&self, currency: &Currency) -> usize {
+        #[cfg(test)]
+        tests::WORK.with(|n| n.set(n.get() + 1));
+        self.at_cost.get(currency).copied().unwrap_or_default()
+    }
+
+    /// Beancount's `str(Inventory)` of it, through the canonical renderer.
+    fn render(&self) -> String {
+        let positions: Vec<Position> = self
+            .order
+            .values()
+            .filter_map(|key| {
+                let (_, units, cost) = self.lots.get(key)?;
+                #[cfg(test)]
+                tests::WORK.with(|n| n.set(n.get() + 1));
+                Some(Position {
+                    units: Amount::new(*units, &key.0),
+                    cost: cost.clone(),
+                })
+            })
+            .collect();
+        rustledger_core::python_inventory_str(&positions)
+    }
 }
 
 /// A `pad` known to a [`PadTracker`].
 #[derive(Debug)]
 struct TrackedPad {
     date: NaiveDate,
+    target: Account,
     source_account: Account,
     /// The pad's index in the input.
     index: usize,
     /// Whether this pad inserted padding for at least one balance.
     used: bool,
-    /// Currencies a balance after this pad has asserted (beancount's
-    /// `padded_lots`): this pad pads none of them again.
-    reached: FxHashSet<Currency>,
 }
 
-/// What a pad does for a balance.
+/// What a pad group does for a balance.
 enum PadAction {
-    /// The account already holds the asserted amount: nothing is padded, and
-    /// the currency is used up all the same.
-    Satisfied,
-    /// Pad this amount into the target, and its negation out of the source.
+    /// Nothing is padded: the group has no active pad open to the currency,
+    /// or the difference is within the balance's tolerance. The currency is
+    /// used up all the same.
+    Compare,
+    /// Pad this amount into the group's account, and its negation out of the
+    /// active pad's source.
     Pad(Decimal),
-    /// The target's amount, or the difference, cannot be represented: nothing
+    /// The group's amount, or the difference, cannot be represented: nothing
     /// is padded, and the caller reports it (#1863).
     Unrepresentable,
 }
 
 impl PadTracker {
-    /// Register a `pad` into `target` from `source_account`.
-    fn add(&mut self, target: &Account, date: NaiveDate, source_account: Account, index: usize) {
-        let pads = self.targets.entry(target.clone()).or_default();
-        // Kept in date order, so the last pad dated before a balance is its
-        // active pad whatever order the pads come in. Equal dates keep
-        // registration order.
-        let at = pads.partition_point(|p| p.date <= date);
-        pads.insert(
-            at,
-            TrackedPad {
-                date,
-                source_account,
-                index,
-                used: false,
-                reached: FxHashSet::default(),
-            },
-        );
+    /// A tracker with a group for each of `targets`, the accounts a `pad`
+    /// names.
+    fn new<'a>(targets: impl IntoIterator<Item = &'a Account>) -> Self {
+        let mut tracker = Self::default();
+        for target in targets {
+            tracker.groups.entry(target.clone()).or_default();
+        }
+        tracker
     }
 
-    /// Apply the rule to a `balance` of `asserted` on `account` dated `date`.
+    /// A `pad` into `target` from `source_account`: the group's active pad
+    /// from now on, with every currency open to padding again.
+    fn add(&mut self, target: &Account, date: NaiveDate, source_account: Account, index: usize) {
+        let group = self.groups.entry(target.clone()).or_default();
+        group.active = Some(self.pads.len());
+        group.padded_lots.clear();
+        self.pads.push(TrackedPad {
+            date,
+            target: target.clone(),
+            source_account,
+            index,
+            used: false,
+        });
+    }
+
+    /// Whether any `pad` names a group, so postings have somewhere to go.
+    fn tracks(&self) -> bool {
+        !self.groups.is_empty()
+    }
+
+    /// Whether `account` falls in some group: it is a group's account or
+    /// under one. Answered once per account.
+    fn covers(&mut self, account: &Account) -> bool {
+        if let Some(&covered) = self.covered.get(account) {
+            return covered;
+        }
+        let covered = prefixes(account.as_str()).any(|prefix| self.groups.contains_key(prefix));
+        self.covered.insert(account.clone(), covered);
+        covered
+    }
+
+    /// Decide [`Self::ordered`] from `directives`: whether a posting under
+    /// some group carries a cost, so a group can hold a lot at cost and
+    /// report its inventory.
+    fn order_if_costs<'a>(&mut self, directives: impl IntoIterator<Item = &'a Directive>) {
+        self.ordered = self.tracks()
+            && directives.into_iter().any(|d| match d {
+                Directive::Transaction(txn) => txn
+                    .postings
+                    .iter()
+                    .any(|p| p.cost.is_some() && self.covers(&p.account)),
+                _ => false,
+            });
+    }
+
+    /// Rank `account` if the walk has not met it yet. Only an account in a
+    /// group is ranked: ranks are only compared within one group, and
+    /// leaving the others out keeps the order of the rest.
+    fn see(&mut self, account: &Account) {
+        // A lookup first: most calls meet an account already ranked, and the
+        // key clone is only for a new one.
+        if !self.ranks.contains_key(account) && self.covers(account) {
+            let next = self.ranks.len();
+            self.ranks.insert(account.clone(), next);
+        }
+    }
+
+    /// Rank the accounts `directive` names, in the order beancount's
+    /// `realization.postings_by_account` registers them: an `open`,
+    /// `close`, `balance`, `note` or `document` its account, a `pad` its
+    /// account then its source, a `custom` its account values, and a
+    /// transaction its postings' accounts as written. Only when the order
+    /// can show ([`Self::ordered`]).
+    fn see_directive(&mut self, directive: &Directive) {
+        if !self.ordered {
+            return;
+        }
+        match directive {
+            Directive::Open(d) => self.see(&d.account),
+            Directive::Close(d) => self.see(&d.account),
+            Directive::Balance(d) => self.see(&d.account),
+            Directive::Note(d) => self.see(&d.account),
+            Directive::Document(d) => self.see(&d.account),
+            Directive::Pad(d) => {
+                self.see(&d.account);
+                self.see(&d.source_account);
+            }
+            Directive::Custom(d) => {
+                for value in &d.values {
+                    if let rustledger_core::MetaValue::Account(account) = value {
+                        self.see(account);
+                    }
+                }
+            }
+            Directive::Transaction(d) => {
+                for posting in &d.postings {
+                    self.see(&posting.account);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A transaction's real postings in some group, `(account, units,
+    /// cost)`, entering the groups in account rank order, written order
+    /// within an account, as beancount's stable sort leaves them (see
+    /// [`Self::ranks`]). Sorted only when the order can show and two of
+    /// them fall in one group: the order is only seen within a group.
+    fn post_transaction(&mut self, postings: &mut [(&Account, &Amount, Option<Cost>)]) {
+        if self.groups.is_empty() {
+            return;
+        }
+        if self.ordered && postings.len() > 1 && self.share_a_group(postings) {
+            postings.sort_by_key(|(account, _, _)| self.ranks.get(*account).copied());
+        }
+        for (account, units, cost) in postings.iter() {
+            self.post(account, units, cost.as_ref());
+        }
+    }
+
+    /// Whether two of `postings` fall in one group.
+    fn share_a_group(&self, postings: &[(&Account, &Amount, Option<Cost>)]) -> bool {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        for (account, _, _) in postings {
+            let groups =
+                prefixes(account.as_str()).filter(|prefix| self.groups.contains_key(*prefix));
+            for group in groups {
+                if !seen.insert(group) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// A real posting of `units` (at `cost`, if any) to `account`: every
+    /// group it falls in (the account's own and its ancestors') takes it.
+    /// O(depth).
+    fn post(&mut self, account: &Account, units: &Amount, cost: Option<&Cost>) {
+        if self.groups.is_empty() {
+            return;
+        }
+        for prefix in prefixes(account.as_str()) {
+            if let Some(group) = self.groups.get_mut(prefix) {
+                group.real.add(&units.currency, units.number);
+                group.held.add(&units.currency, cost, units.number);
+            }
+        }
+    }
+
+    /// The groups a `balance` on `account` belongs to: its own account's and
+    /// its ancestors', outermost first (beancount walks the groups in sorted
+    /// order).
+    fn groups_of(&self, account: &Account) -> Vec<Account> {
+        if self.groups.is_empty() {
+            return Vec::new();
+        }
+        prefixes(account.as_str())
+            .filter_map(|prefix| self.groups.get_key_value(prefix).map(|(k, _)| k.clone()))
+            .collect()
+    }
+
+    /// Apply the rule for the group of `group_account` to a `balance` of
+    /// `asserted`, checked with `tolerance`.
     ///
-    /// `current` gives the account's amount of the currency, its
-    /// sub-accounts included, as the balance check sums it (`None` when it
-    /// cannot be represented). It is called only when a pad applies.
-    ///
-    /// Returns `None` when no pad applies. Otherwise the currency is used up
-    /// for the pads before the balance, and the pad is marked used if it
-    /// pads.
+    /// Returns what to do, and the active pad when the group can pad. When
+    /// it pads a currency the group holds at cost, also beancount's "pad an
+    /// entry with cost" for it, read from the group's inventory before the
+    /// padding, as beancount checks it.
     fn balance(
         &mut self,
-        account: &Account,
-        date: NaiveDate,
+        group_account: &Account,
         asserted: &Amount,
-        current: impl FnOnce() -> Option<Decimal>,
-    ) -> Option<(&TrackedPad, PadAction)> {
-        let pads = self.targets.get_mut(account)?;
-        let before = pads.partition_point(|p| p.date < date);
-        let active = before.checked_sub(1)?;
-        if pads[active].reached.contains(&asserted.currency) {
-            // The active pad already served this currency: compare.
-            return None;
-        }
-        // Every balance marks all the pads before it, so the pads that have
-        // reached the currency are a prefix (the walk is in date order): walk
-        // back from the active pad to the first one that has, rather than over
-        // every pad.
-        for pad in pads[..before].iter_mut().rev() {
-            if pad.reached.contains(&asserted.currency) {
-                break;
-            }
-            pad.reached.insert(asserted.currency.clone());
-        }
-        let action = match current().and_then(|c| asserted.number.checked_sub(c)) {
-            None => PadAction::Unrepresentable,
-            Some(difference) if difference.is_zero() => PadAction::Satisfied,
-            Some(difference) => {
-                pads[active].used = true;
-                PadAction::Pad(difference)
-            }
+        tolerance: Decimal,
+    ) -> (PadAction, Option<(&TrackedPad, Option<PaddedAtCost>)>) {
+        let Some(group) = self.groups.get_mut(group_account) else {
+            return (PadAction::Compare, None);
         };
-        Some((&pads[active], action))
+        let currency = &asserted.currency;
+        // The currency is used up whatever comes of this balance.
+        let fresh = group.padded_lots.insert(currency.clone());
+        let Some(active) = group.active.filter(|_| fresh) else {
+            return (PadAction::Compare, None);
+        };
+        let own_padding = group.padded.get(currency).copied().unwrap_or_default();
+        let mut at_cost = None;
+        let action = match group
+            .real
+            .get(currency)
+            .and_then(|r| r.checked_add(own_padding))
+            .and_then(|current| asserted.number.checked_sub(current))
+        {
+            None => PadAction::Unrepresentable,
+            Some(difference) if difference.abs() <= tolerance => PadAction::Compare,
+            Some(difference) => match own_padding.checked_add(difference) {
+                None => PadAction::Unrepresentable,
+                Some(padded) => {
+                    let lots = group.held.lots_at_cost(currency);
+                    if lots > 0 {
+                        at_cost = Some(PaddedAtCost {
+                            lots,
+                            balance: group.held.render(),
+                        });
+                    }
+                    group.padded.insert(currency.clone(), padded);
+                    self.pads[active].used = true;
+                    PadAction::Pad(difference)
+                }
+            },
+        };
+        (action, Some((&self.pads[active], at_cost)))
     }
+
+    /// The padding [`Self::balance`] planned landed: it joins the group's
+    /// inventory, as beancount adds it to `pad_balance`.
+    fn padded(&mut self, group_account: &Account, units: &Amount) {
+        if let Some(group) = self.groups.get_mut(group_account) {
+            group.held.add(&units.currency, None, units.number);
+        }
+    }
+
+    /// Take back `difference` of `currency` from the padding of
+    /// `group_account`'s group: padding [`Self::balance`] planned that could
+    /// not be applied. It restores a total that existed a moment ago, so it
+    /// cannot overflow.
+    fn retract(&mut self, group_account: &Account, currency: &Currency, difference: Decimal) {
+        if let Some(padded) = self
+            .groups
+            .get_mut(group_account)
+            .and_then(|group| group.padded.get_mut(currency))
+        {
+            *padded -= difference;
+        }
+    }
+}
+
+/// The prefixes of `account` that can name a pad group: its ancestors,
+/// outermost first, then the account itself.
+fn prefixes(account: &str) -> impl Iterator<Item = &str> {
+    account
+        .match_indices(':')
+        .map(|(at, _)| &account[..at])
+        .chain(std::iter::once(account))
+}
+
+/// Beancount's "Attempt to pad an entry with cost" for one padding entry.
+///
+/// From `beancount/ops/pad.py`: the pad group held the padded currency at
+/// cost when the padding was inserted. Beancount reports it once for each
+/// such lot, and still pads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaddedAtCost {
+    /// How many lots of the padded currency the group held at cost: one
+    /// error each.
+    pub lots: usize,
+    /// What the group held before the padding (its real postings and its
+    /// own earlier padding, beancount's `pad_balance`), printed as
+    /// beancount prints an inventory.
+    pub balance: String,
+}
+
+impl PaddedAtCost {
+    /// The error message, as bean-check words it.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "Attempt to pad an entry with cost for balance: {}",
+            self.balance
+        )
+    }
+}
+
+/// The units of `currency` in `totals`.
+fn units_of(totals: &Totals, currency: &Currency) -> Decimal {
+    totals
+        .iter()
+        .find(|(c, _)| c == currency)
+        .map_or(Decimal::ZERO, |(_, n)| *n)
+}
+
+/// Add `number` `currency` to `totals`. A total that would leave the
+/// representable range is left as it was and reported (#1863).
+fn add_units(
+    totals: &mut Totals,
+    currency: &Currency,
+    number: Decimal,
+) -> Result<(), rustledger_core::OverflowError> {
+    if let Some((_, total)) = totals.iter_mut().find(|(c, _)| c == currency) {
+        *total = total
+            .checked_add(number)
+            .ok_or_else(|| rustledger_core::OverflowError {
+                currency: currency.clone(),
+            })?;
+    } else {
+        totals.push((currency.clone(), number));
+    }
+    Ok(())
 }
 
 /// The padding beancount inserts for a ledger, from [`plan_pads`].
@@ -261,7 +717,8 @@ pub struct PlannedPadding {
     pub origin: PadOrigin,
     /// The pad's date.
     pub date: NaiveDate,
-    /// The account padded (the pad's and the balance's account).
+    /// The account padded: the pad's account. The balance is on it or on
+    /// one of its sub-accounts.
     pub target: Account,
     /// The account the padding is taken from.
     pub source: Account,
@@ -269,6 +726,9 @@ pub struct PlannedPadding {
     pub units: Amount,
     /// The balance's asserted amount.
     pub asserted: Amount,
+    /// Beancount's "Attempt to pad an entry with cost" for this padding:
+    /// `Some` when the pad group held the padded currency at cost.
+    pub at_cost: Option<PaddedAtCost>,
 }
 
 /// A `pad` that inserted no padding.
@@ -282,43 +742,168 @@ pub struct UnusedPad {
     pub target: Account,
 }
 
+/// A directive's place in beancount's entry order.
+///
+/// Beancount sorts its entries with a stable sort on `(date, type, lineno)`
+/// ([`rustledger_core::beancount_entry_sort_key`] reads [`Self::line`]), so
+/// entries tied there keep the order they were parsed in: their file's
+/// place in the load, then their place in the file. [`Self::file_rank`] is
+/// that file's place.
+///
+/// The derived order compares the line first, then the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourcePosition {
+    /// The line in its file, whichever file that is, as beancount numbers
+    /// it. A directive a plugin made has the line the plugin gave it
+    /// (`auto_accounts` numbers its `open`s by the account's place in its
+    /// sorted list), 0 when it gave none. A directive with no location has
+    /// its place in the input.
+    pub line: usize,
+    /// Where its file comes in the load: 0 for a directive a plugin made
+    /// (`auto_accounts` and `currency_accounts` put theirs ahead of the
+    /// parsed entries, so they come first among ties) and for a directive
+    /// with no location; 1 + its file id for a source file's directive.
+    ///
+    /// File ids number the files in the order the loader reads them, depth
+    /// first: an include's own includes come before the files included
+    /// after it. Beancount reads breadth first. The two orders differ only
+    /// for a file included from an included file, against a file its
+    /// parent includes later, and only for entries on the same date, type
+    /// and line (#2901).
+    pub file_rank: usize,
+}
+
+impl SourcePosition {
+    /// The position at `line` of the file ranked `file_rank`.
+    #[must_use]
+    pub const fn new(line: usize, file_rank: usize) -> Self {
+        Self { line, file_rank }
+    }
+
+    /// The position of the directive at `index` of an input with no
+    /// locations: its place in the input stands for its line.
+    #[must_use]
+    pub const fn at_index(index: usize) -> Self {
+        Self::new(index, 0)
+    }
+
+    /// The position of the directive at `line` of source file `file_id`,
+    /// ranked after every directive a plugin made.
+    #[must_use]
+    pub const fn in_file(line: usize, file_id: u16) -> Self {
+        Self::new(line, file_id as usize + 1)
+    }
+
+    /// The position of a directive a plugin made at `line`.
+    #[must_use]
+    pub const fn from_plugin(line: usize) -> Self {
+        Self::new(line, 0)
+    }
+}
+
+/// Whether [`plan_pads`] reads the [`SourcePosition`]s it is given for
+/// `directives`.
+///
+/// Only when a posting under a pad group carries a cost, so a group can
+/// hold a lot at cost and an "Attempt to pad an entry with cost" can print
+/// the entry order. Otherwise any positions do, and a caller can skip
+/// looking them up (`SourcePosition::at_index`).
+pub fn pad_plan_reads_positions<'a, I>(directives: I) -> bool
+where
+    I: IntoIterator<Item = &'a Directive>,
+    I::IntoIter: Clone,
+{
+    let directives = directives.into_iter();
+    let mut tracker = PadTracker::new(directives.clone().filter_map(|d| match d {
+        Directive::Pad(pad) => Some(&pad.account),
+        _ => None,
+    }));
+    tracker.order_if_costs(directives);
+    tracker.ordered
+}
+
 /// Compute the padding for `sorted`, beancount's rule.
 ///
 /// `sorted` must be in booking order ([`rustledger_core::booking_sort_key`]),
 /// each directive with its index in the caller's input (the indices
-/// [`PadOrigin`] and [`UnusedPad`] report).
+/// [`PadOrigin`] and [`UnusedPad`] report) and its [`SourcePosition`].
+/// `tolerance_multiplier` is the ledger's `tolerance_multiplier` option,
+/// which a balance's tolerance derives from ([`balance_tolerance`]).
 ///
 /// Inventories track every account a posting names, opened or not, as
 /// beancount's padding reads every posting: tracking only opened accounts
 /// dropped an unopened target's own postings and padded it by the wrong
-/// amount (#2896). Which pad a balance uses is beancount's rule (the
-/// private `PadTracker`).
-pub fn plan_pads<'a, I>(sorted: I) -> PadPlan
+/// amount (#2896). They hold real postings only: each pad group counts its
+/// own padding on top, and no other group's (the private `PadTracker`,
+/// which is the rule).
+///
+/// The walk is the booking order; the order accounts are first met in,
+/// which decides the order a transaction's postings enter a group, is
+/// beancount's entry order instead (by the lines), as its
+/// `realization.postings_by_account` meets them.
+pub fn plan_pads<'a, I>(sorted: I, tolerance_multiplier: Decimal) -> PadPlan
 where
-    I: IntoIterator<Item = (usize, &'a Directive)>,
+    I: IntoIterator<Item = (usize, &'a Directive, SourcePosition)>,
 {
+    let sorted: Vec<(usize, &Directive, SourcePosition)> = sorted.into_iter().collect();
     let mut inventories = PadInventories::default();
-    let mut pads = PadTracker::default();
+    // A group for every account a `pad` names, before the walk, so each
+    // group holds every posting under it from the first one, as beancount's
+    // `pad_balance` does.
+    let mut pads = PadTracker::new(sorted.iter().filter_map(|(_, d, _)| match d {
+        Directive::Pad(pad) => Some(&pad.account),
+        _ => None,
+    }));
+    // Rank the accounts in beancount's entry order, once, before the walk,
+    // when the order can show: a group holds a lot at cost only if a posting
+    // under it carries a cost, and only that lot's message prints the order.
+    pads.order_if_costs(sorted.iter().map(|(_, d, _)| *d));
+    if pads.ordered {
+        let mut entry_order: Vec<&(usize, &Directive, SourcePosition)> = sorted.iter().collect();
+        entry_order.sort_by_key(|(_, d, position)| {
+            (
+                rustledger_core::beancount_entry_sort_key(d, position.line),
+                position.file_rank,
+            )
+        });
+        for (_, directive, _) in entry_order {
+            pads.see_directive(directive);
+        }
+    }
     let mut plan = PadPlan::default();
 
-    for (index, directive) in sorted {
+    for (index, directive, _) in sorted {
         match directive {
             Directive::Transaction(txn) => {
+                let mut posted = Vec::new();
                 for posting in &txn.postings {
                     if let Some(units) = posting.amount() {
                         // A running balance that leaves range makes every pad
                         // measured against it wrong, so report it here rather
                         // than pad from a clamped total (#1863).
-                        if let Err(e) =
-                            inventories.add(&posting.account, &units.currency, units.number)
-                        {
-                            plan.inventory_errors.push(
-                                PadError::new(txn.date, e.to_string())
-                                    .with_account(posting.account.clone()),
-                            );
+                        match inventories.add(&posting.account, &units.currency, units.number) {
+                            // The lot as booking resolved it, the canonical
+                            // way (`Position::from_posting`), when the posting
+                            // falls in a group that can read it.
+                            Ok(()) if pads.covers(&posting.account) => {
+                                let position = Position::from_posting(
+                                    units,
+                                    posting.cost.as_deref(),
+                                    txn.date,
+                                );
+                                posted.push((&posting.account, units, position.cost));
+                            }
+                            Ok(()) => {}
+                            Err(e) => {
+                                plan.inventory_errors.push(
+                                    PadError::new(txn.date, e.to_string())
+                                        .with_account(posting.account.clone()),
+                                );
+                            }
                         }
                     }
                 }
+                pads.post_transaction(&mut posted);
             }
 
             Directive::Pad(pad) => {
@@ -326,96 +911,101 @@ where
             }
 
             Directive::Balance(bal) => {
-                // The balance assertion this pad targets sums the account AND
-                // its sub-accounts (beancount semantic, verified against
-                // bean-check), so the pad difference is measured the same way.
-                let Some((pad, action)) = pads.balance(&bal.account, bal.date, &bal.amount, || {
-                    inventories.subtree_units(&bal.account, &bal.amount.currency)
-                }) else {
-                    continue;
-                };
-                let difference =
-                    match action {
-                        PadAction::Satisfied => continue,
+                let tolerance =
+                    balance_tolerance(bal.amount.number, bal.tolerance, tolerance_multiplier);
+                // Every group the balance is in: its account's and its
+                // ancestors'. Each measures its own account AND sub-accounts,
+                // as the balance check sums them.
+                for group in pads.groups_of(&bal.account) {
+                    let (action, pad) = pads.balance(&group, &bal.amount, tolerance);
+                    let (difference, pad) = match (action, pad) {
+                        (PadAction::Pad(difference), Some((pad, at_cost))) => (
+                            difference,
+                            (
+                                pad.index,
+                                pad.date,
+                                pad.target.clone(),
+                                pad.source_account.clone(),
+                                at_cost,
+                            ),
+                        ),
                         // A pad amount that cannot be represented must not be
                         // clamped: the synthetic transaction it produces is
-                        // written into the ledger as if the user had entered it
-                        // (#1863).
-                        PadAction::Unrepresentable => {
-                            plan.failed.push((index, PadError::new(
-                            bal.date,
-                            format!(
-                                "cannot compute the pad amount for {}: the {} balance exceeds \
-                                 the representable range (±7.9e28)",
-                                bal.account, bal.amount.currency
-                            ),
-                        )));
+                        // written into the ledger as if the user had entered
+                        // it (#1863).
+                        (PadAction::Unrepresentable, _) => {
+                            plan.failed.push((
+                                index,
+                                PadError::new(
+                                    bal.date,
+                                    format!(
+                                        "cannot compute the pad amount for {group}: the {} \
+                                         balance exceeds the representable range (±7.9e28)",
+                                        bal.amount.currency
+                                    ),
+                                ),
+                            ));
                             continue;
                         }
-                        PadAction::Pad(difference) => difference,
+                        _ => continue,
                     };
-
-                // Apply to inventories. `difference` was just derived from
-                // these same balances, so an overflow here means the pad
-                // target itself is out of range, so report it rather than pad
-                // to a clamped figure.
-                //
-                // A pad is two halves of one entry, so it applies as a unit:
-                // if the source overflows after the target succeeded, the
-                // target is UNDONE. Leaving it applied would credit the
-                // target without debiting the source while planning no
-                // padding, so the inventories and the plan would disagree,
-                // and a later assertion on the target could pass off a pad
-                // that never happened. The undo is always representable: it
-                // restores a total that existed a moment ago. Both halves land
-                // whatever the accounts' state, as beancount's padding entry
-                // posts to both.
-                let currency = &bal.amount.currency;
-                let mut apply = |account, number| inventories.add(account, currency, number);
-                if let Err(e) = apply(&bal.account, difference) {
-                    plan.failed
-                        .push((index, PadError::new(bal.date, e.to_string())));
-                    continue;
+                    let (pad_index, pad_date, target, source, at_cost) = pad;
+                    let currency = &bal.amount.currency;
+                    // The padding must also fit each account it posts to, as
+                    // the ledger sums it (its real postings and all the
+                    // padding into or out of it): a padding entry that
+                    // overflows its source must not be written out (#1863).
+                    // Both halves land, or neither: the group's own padding
+                    // is taken back if the source half cannot.
+                    let applied = inventories
+                        .pad(&target, currency, difference)
+                        .and_then(|()| {
+                            inventories
+                                .pad(&source, currency, -difference)
+                                .inspect_err(|_| {
+                                    // Restores a total that existed a moment
+                                    // ago, so it cannot overflow.
+                                    drop(inventories.pad(&target, currency, -difference));
+                                })
+                        });
+                    if let Err(e) = applied {
+                        pads.retract(&group, currency, difference);
+                        plan.failed
+                            .push((index, PadError::new(bal.date, e.to_string())));
+                        continue;
+                    }
+                    let units = Amount::new(difference, currency);
+                    pads.padded(&group, &units);
+                    plan.paddings.push(PlannedPadding {
+                        origin: PadOrigin {
+                            pad: pad_index,
+                            balance: index,
+                        },
+                        date: pad_date,
+                        target,
+                        source,
+                        units,
+                        asserted: bal.amount.clone(),
+                        at_cost,
+                    });
                 }
-                if let Err(e) = apply(&pad.source_account, -difference) {
-                    drop(apply(&bal.account, -difference));
-                    plan.failed
-                        .push((index, PadError::new(bal.date, e.to_string())));
-                    continue;
-                }
-
-                plan.paddings.push(PlannedPadding {
-                    origin: PadOrigin {
-                        pad: pad.index,
-                        balance: index,
-                    },
-                    date: pad.date,
-                    target: bal.account.clone(),
-                    source: pad.source_account.clone(),
-                    units: Amount::new(difference, currency),
-                    asserted: bal.amount.clone(),
-                });
             }
 
             _ => {}
         }
     }
 
-    let mut unused: Vec<UnusedPad> = pads
-        .targets
+    plan.unused = pads
+        .pads
         .into_iter()
-        .flat_map(|(target, list)| {
-            list.into_iter()
-                .filter(|p| !p.used)
-                .map(move |p| UnusedPad {
-                    pad: p.index,
-                    date: p.date,
-                    target: target.clone(),
-                })
+        .filter(|p| !p.used)
+        .map(|p| UnusedPad {
+            pad: p.index,
+            date: p.date,
+            target: p.target,
         })
         .collect();
-    unused.sort_by_key(|u| u.pad);
-    plan.unused = unused;
+    plan.unused.sort_by_key(|u| u.pad);
     plan
 }
 
@@ -429,12 +1019,18 @@ where
 /// * `directives` - The directives to process. Order does not matter:
 ///   `process_pads` sorts a view of them by date internally before
 ///   applying pad math.
+/// * `tolerance_multiplier` - The ledger's `tolerance_multiplier` option
+///   ([`crate::DEFAULT_TOLERANCE_MULTIPLIER`] when the caller has no
+///   options): a difference within a balance's tolerance is not padded
+///   ([`balance_tolerance`]).
 ///
 /// # Returns
 ///
 /// A `PadResult` containing:
 /// - The synthetic padding transactions derived from the input
-/// - Any errors encountered
+/// - Any errors encountered: out-of-range totals (#1863), "Attempt to pad an
+///   entry with cost" once per lot at cost, dated at its balance, and
+///   unused pads
 ///
 /// The input directives are NOT echoed back in the result; the caller
 /// already owns them. To get the source merged with the synth
@@ -442,16 +1038,78 @@ where
 ///
 /// `rustledger-validate` applies [`plan_pads`] output to its own booked
 /// inventories in its walk, at the pad (see [`PadPlan`]).
-pub fn process_pads(directives: &[Directive]) -> PadResult {
-    let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
+///
+/// # What the input's order promises
+///
+/// The padding (which pads pad, by how much, dated where) never depends on
+/// the input's order. One thing in the errors does: the order of tied
+/// positions in an "Attempt to pad an entry with cost" message follows the
+/// order beancount first meets each account, which reads the line and the
+/// file ([`SourcePosition`]). Here a directive's place in the input stands
+/// for its position, which is right for one file's stream in source order
+/// (a parse). A surface reporting those errors from a stream in booking
+/// order (a loaded ledger, which puts a `pad` ahead of the same date's notes
+/// and transactions), or from several files, passes the real positions
+/// instead, through [`process_pads_at`], so it answers as the validator
+/// does.
+pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> PadResult {
+    process_entries(
+        directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, d, SourcePosition::at_index(i)))
+            .collect(),
+        tolerance_multiplier,
+    )
+}
+
+/// [`process_pads`] with each directive's [`SourcePosition`].
+///
+/// `positions` (each directive's place in beancount's entry order) runs
+/// parallel to `directives`, for a
+/// caller that reports these errors and keeps locations beside plain
+/// directives (the WASM ledgers).
+///
+/// # Panics
+///
+/// When `positions` is not as long as `directives`: the caller's parallel
+/// lists have come apart.
+#[must_use]
+pub fn process_pads_at(
+    directives: &[Directive],
+    positions: &[SourcePosition],
+    tolerance_multiplier: Decimal,
+) -> PadResult {
+    assert_eq!(
+        directives.len(),
+        positions.len(),
+        "process_pads_at: one position per directive"
+    );
+    process_entries(
+        directives
+            .iter()
+            .zip(positions)
+            .enumerate()
+            .map(|(i, (d, position))| (i, d, *position))
+            .collect(),
+        tolerance_multiplier,
+    )
+}
+
+/// The one body of [`process_pads`] and [`process_pads_at`].
+fn process_entries(
+    mut sorted: Vec<(usize, &Directive, SourcePosition)>,
+    tolerance_multiplier: Decimal,
+) -> PadResult {
+    let date_of: Vec<NaiveDate> = sorted.iter().map(|(_, d, _)| d.date()).collect();
     // Sort by the canonical booking key, not by date alone. Date-only left
     // same-date directives in source order, so a `pad` written above the
     // `balance` it targets was processed first and the balance consumed it --
     // synthesizing a padding transaction beancount does not (#2150). The key
     // puts Balance before Pad, so that balance is seen first and the pad ends
     // up with nothing to satisfy.
-    sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
-    let plan = plan_pads(sorted);
+    sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
+    let plan = plan_pads(sorted, tolerance_multiplier);
 
     let mut padding_transactions = Vec::with_capacity(plan.paddings.len());
     let mut padding_origins = Vec::with_capacity(plan.paddings.len());
@@ -468,6 +1126,16 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
     let mut errors = plan.inventory_errors;
     errors.extend(plan.failed.into_iter().map(|(_, e)| e));
+    // Padding a currency held at cost, once per lot, at the balance, as
+    // beancount reports it.
+    for p in &plan.paddings {
+        if let Some(at_cost) = &p.at_cost {
+            let date = date_of[p.origin.balance];
+            for _ in 0..at_cost.lots {
+                errors.push(PadError::new(date, at_cost.message()).with_account(p.target.clone()));
+            }
+        }
+    }
     // Unused pads (beancount's `Unused Pad entry`).
     errors.extend(plan.unused.into_iter().map(|u| {
         PadError::new(
@@ -487,56 +1155,22 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     }
 }
 
-/// The running totals [`plan_pads`] measures pads against: for every account
-/// a posting or a padding entry names, its units per currency, with the
-/// lexical prefix index a subtree sum needs.
-///
-/// Units only, not an [`rustledger_core::Inventory`]: a pad reads nothing but
-/// the units of one currency. Units alone cannot answer beancount's "Attempt
-/// to pad an entry with cost" check (`ops/pad.py`, any remaining lot at cost
-/// in the padded currency), so #2901 needs a per-(account, currency) count of
-/// open cost lots here, or that check in the validator.
+/// Every account's units per currency from real postings, and the padding
+/// into or out of it, so a padding entry is checked to fit each account it
+/// posts to ([`PadInventories::pad`]). What a pad measures is the pad
+/// group's own running inventory (the private `PadTracker`), not this.
 #[derive(Debug, Default)]
 struct PadInventories {
-    by_account: AccountTotals,
-    /// The keys of `by_account`, sorted, kept in lockstep (keys are never
-    /// removed), for [`rustledger_core::for_each_strict_subaccount`].
-    index: std::collections::BTreeSet<Account>,
+    by_account: FxHashMap<Account, Totals>,
+    /// The padding into or out of each account, every pad group's, kept
+    /// apart from `by_account`: a group measures real postings and its own
+    /// padding only, while the ledger holds them all, which is what an entry
+    /// must fit ([`Self::pad`]).
+    padded: FxHashMap<Account, Totals>,
 }
 
 /// One account's units per currency.
 type Totals = smallvec::SmallVec<[(Currency, Decimal); 2]>;
-
-/// The totals of each account. A newtype so that every read goes through
-/// [`Self::get`] or iteration (`for (account, totals) in &by_account`), both
-/// of which a test counts: whatever walk a subtree sum does, each account it
-/// reads is counted where it is read
-/// (`test_plan_pads_sums_each_balance_over_its_subtree_only`).
-#[derive(Debug, Default)]
-struct AccountTotals(FxHashMap<Account, Totals>);
-
-impl AccountTotals {
-    /// The totals of `account`, counted as one account read.
-    fn get(&self, account: &Account) -> Option<&Totals> {
-        #[cfg(test)]
-        tests::ACCOUNTS_READ.with(|n| n.set(n.get() + 1));
-        self.0.get(account)
-    }
-}
-
-/// Iterating reads every account, each counted. Nothing here iterates: this
-/// is what a scan would go through, so the test sees one.
-impl<'a> IntoIterator for &'a AccountTotals {
-    type Item = (&'a Account, &'a Totals);
-    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.0.iter().inspect(|_| {
-            #[cfg(test)]
-            tests::ACCOUNTS_READ.with(|n| n.set(n.get() + 1));
-        }))
-    }
-}
 
 impl PadInventories {
     /// Add `number` `currency` to `account`, created on first use. A total
@@ -552,50 +1186,41 @@ impl PadInventories {
         currency: &Currency,
         number: Decimal,
     ) -> Result<(), rustledger_core::OverflowError> {
-        // One lookup; the key clone is a reference-count bump (`Account` is
-        // interned).
-        let totals = match self.by_account.0.entry(account.clone()) {
-            std::collections::hash_map::Entry::Occupied(totals) => totals.into_mut(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                self.index.insert(account.clone());
-                slot.insert(Totals::new())
-            }
-        };
-        let overflow = || rustledger_core::OverflowError {
-            currency: currency.clone(),
-        };
-        if let Some((_, total)) = totals.iter_mut().find(|(c, _)| c == currency) {
-            *total = total.checked_add(number).ok_or_else(overflow)?;
-        } else {
-            totals.push((currency.clone(), number));
-        }
-        Ok(())
+        // The key clone is a reference-count bump (`Account` is interned).
+        add_units(
+            self.by_account.entry(account.clone()).or_default(),
+            currency,
+            number,
+        )
     }
 
-    /// The units of `currency` in `account` and its sub-accounts, as a
-    /// `balance` assertion sums them (beancount includes sub-accounts), or
-    /// `None` when the sum leaves the representable range (#1863).
+    /// Record `number` `currency` of padding into `account` (out of it when
+    /// negative), if the account's total in the ledger, its real postings
+    /// and all its padding, stays representable; otherwise nothing changes
+    /// and the overflow is reported (#1863).
     ///
-    /// O(log A + subtree) through the prefix index. Summing over a scan of
-    /// every account ([`rustledger_core::sum_account_and_subaccounts`]) made
-    /// `rledger check`, BQL and the reports quadratic in a ledger with many
-    /// padded balances.
-    fn subtree_units(&self, account: &Account, currency: &Currency) -> Option<Decimal> {
-        let mut total = Some(Decimal::ZERO);
-        let mut add = |totals: &Totals| {
-            if let Some((_, units)) = totals.iter().find(|(c, _)| c == currency) {
-                total = total.and_then(|t| t.checked_add(*units));
-            }
-        };
-        if let Some(totals) = self.by_account.get(account) {
-            add(totals);
+    /// One account, not a subtree.
+    fn pad(
+        &mut self,
+        account: &Account,
+        currency: &Currency,
+        number: Decimal,
+    ) -> Result<(), rustledger_core::OverflowError> {
+        let real = self
+            .by_account
+            .get(account)
+            .map_or(Decimal::ZERO, |totals| units_of(totals, currency));
+        let padded = self.padded.entry(account.clone()).or_default();
+        let fits = real
+            .checked_add(units_of(padded, currency))
+            .and_then(|total| total.checked_add(number))
+            .is_some();
+        if !fits {
+            return Err(rustledger_core::OverflowError {
+                currency: currency.clone(),
+            });
         }
-        rustledger_core::for_each_strict_subaccount(&self.index, account.as_str(), |sub| {
-            if let Some(totals) = self.by_account.get(sub) {
-                add(totals);
-            }
-        });
-        total
+        add_units(padded, currency, number)
     }
 }
 
@@ -630,7 +1255,7 @@ fn create_padding_transaction(
 /// transactions alongside them. Use this when downstream
 /// consumers want both views: `Pad` directives for source-faithful queries
 /// (e.g., BQL `WHERE type = 'pad'`) and the synth transactions for inventory
-/// math.
+/// math. `tolerance_multiplier` is [`process_pads`]'.
 ///
 /// # Sort ordering on date ties
 ///
@@ -662,8 +1287,11 @@ fn create_padding_transaction(
 /// effects because the original `Pad` directives survive and `process_pads`
 /// re-applies them against an inventory that already includes the prior
 /// synth. A `debug_assert!` guards against this in dev builds.
-pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
-    merge_with_padding_owned(directives.to_vec())
+pub fn merge_with_padding(
+    directives: &[Directive],
+    tolerance_multiplier: Decimal,
+) -> Vec<Directive> {
+    merge_with_padding_owned(directives.to_vec(), tolerance_multiplier)
 }
 
 /// [`merge_with_padding`] for a caller that already owns its directives.
@@ -673,7 +1301,10 @@ pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
 /// inline the merge for exactly that reason, and the copy drifted the moment
 /// the rule changed — this is the same saving without the duplicate.
 #[must_use]
-pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
+pub fn merge_with_padding_owned(
+    directives: Vec<Directive>,
+    tolerance_multiplier: Decimal,
+) -> Vec<Directive> {
     // Idempotence: input that already contains synth pad transactions has
     // been merged before (e.g. an embedder queries entries it loaded via
     // load-full, which merges pads — rustledger#1712). Re-running would
@@ -685,7 +1316,7 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
         return directives;
     }
 
-    let result = process_pads(&directives);
+    let result = process_pads(&directives, tolerance_multiplier);
 
     let mut merged: Vec<Directive> = directives;
     merged.sort_by_key(rustledger_core::Directive::date);
@@ -808,7 +1439,8 @@ where
 
 /// Span-preserving variant of [`merge_with_padding`].
 ///
-/// Identical merge behavior, but the input/output keep each directive's
+/// Identical merge behavior (and the same `tolerance_multiplier`), but the
+/// input/output keep each directive's
 /// [`Spanned`] wrapper so downstream consumers (e.g. BQL's `filename`/`lineno`
 /// columns) can resolve real source locations. A pad-synthesized transaction
 /// is located where beancount locates it (#2825): the transaction at its
@@ -822,17 +1454,22 @@ where
 /// Same caveat as [`merge_with_padding`]: re-running on its own output
 /// double-counts pad effects.
 #[must_use]
-pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Spanned<Directive>> {
-    let plain: Vec<Directive> = directives.iter().map(|s| s.value.clone()).collect();
+pub fn merge_with_padding_spanned(
+    directives: &[Spanned<Directive>],
+    tolerance_multiplier: Decimal,
+) -> Vec<Spanned<Directive>> {
     debug_assert!(
-        !plain
+        !directives
             .iter()
-            .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
+            .any(|s| matches!(&s.value, Directive::Transaction(t) if is_synthesized_pad(t))),
         "merge_with_padding_spanned called on input that already contains synth pad transactions; \
          re-running would double-count pad effects",
     );
 
-    let result = process_pads(&plain);
+    // Padding only (this merge discards errors), which never depends on the
+    // input order, so the plain computation serves.
+    let plain: Vec<Directive> = directives.iter().map(|s| s.value.clone()).collect();
+    let result = process_pads(&plain, tolerance_multiplier);
 
     // Placement via the shared [`merge_padding_into_sorted`]; located at the
     // pad and the balance it came from, as beancount locates them.
@@ -863,36 +1500,121 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DEFAULT_TOLERANCE_MULTIPLIER;
     use rust_decimal_macros::dec;
     use rustledger_core::{Balance, Open, Pad};
 
     std::thread_local! {
-        /// Accounts `PadInventories` has read (`AccountTotals`) on this
-        /// thread, for `test_plan_pads_sums_each_balance_over_its_subtree_only`.
-        pub(super) static ACCOUNTS_READ: std::cell::Cell<usize> =
-            const { std::cell::Cell::new(0) };
+        /// Units of work the pad computation did on this thread: a pad
+        /// group a posting updates (`PadTracker::post`) and a position the
+        /// "pad an entry with cost" message prints (`GroupInventory::render`).
+        /// The guards below bound it linearly; a subtree walk or an
+        /// inventory copy per balance makes it quadratic.
+        pub(super) static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    /// Each padded balance is measured over its own subtree, not over every
-    /// account: with `n` accounts each holding a transaction, a pad and a
-    /// balance, the pad computation reads `n` accounts, where a scan per
-    /// balance reads `n * n` and made `rledger check` quadratic (40k such
-    /// accounts took 46 s). Accounts are counted where they are read
-    /// (`AccountTotals`), not where they match, so a scan that adds only the
-    /// matching accounts fails too: verified with `subtree_units` rewritten
-    /// as `for (a, totals) in &self.by_account { if is_subaccount_or_equal(..)
-    /// { add(totals) } }`.
+    /// The work `process_pads` does on `directives`, with its result.
+    fn work(directives: &[Directive]) -> (PadResult, usize) {
+        WORK.with(|c| c.set(0));
+        let result = process_pads(directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        (result, WORK.with(std::cell::Cell::get))
+    }
+
+    /// `n` sub-accounts of `Assets:P`, each given `postings(i)`, then a
+    /// daily `pad Assets:P` before a balance on each sub-account, each a
+    /// different amount of `currency` so every one pads.
+    fn parent_pad_loop(
+        n: u32,
+        currency: &str,
+        mut postings: impl FnMut(u32, &str) -> Vec<Directive>,
+    ) -> Vec<Directive> {
+        let mut directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Equity:O"))];
+        for i in 0..n {
+            directives.extend(postings(i, &format!("Assets:P:C{i:05}")));
+        }
+        let mut day = date(2024, 1, 2);
+        for i in 0..n {
+            let account = format!("Assets:P:C{i:05}");
+            day = day.tomorrow().expect("in range");
+            directives.push(Directive::Pad(Pad::new(day, "Assets:P", "Equity:O")));
+            day = day.tomorrow().expect("in range");
+            directives.push(Directive::Balance(Balance::new(
+                day,
+                &account,
+                Amount::new(Decimal::from(i + 2), currency),
+            )));
+        }
+        directives
+    }
+
+    /// The entry order is built only where it can show (#2901): with no
+    /// posting at cost under a group, no account is ranked; with one, only
+    /// the accounts in a group are, in the order they were met.
+    #[test]
+    fn test_pad_tracker_ranks_only_when_a_group_holds_a_cost() {
+        let target = Account::from("Assets:A");
+        let plain = [
+            moved("Assets:A:X", dec!(1), "XXX", None),
+            moved("Assets:Z", dec!(1), "ZZZ", Some(dec!(2))),
+        ];
+        let mut tracker = PadTracker::new([&target]);
+        tracker.order_if_costs(&plain);
+        for d in &plain {
+            tracker.see_directive(d);
+        }
+        assert!(!tracker.ordered, "a cost outside every group cannot show");
+        assert!(tracker.ranks.is_empty());
+
+        let costed = [
+            moved("Assets:Z", dec!(1), "ZZZ", None),
+            moved("Assets:A:Y", dec!(1), "YYY", Some(dec!(2))),
+            moved("Assets:A:X", dec!(1), "XXX", None),
+        ];
+        let mut tracker = PadTracker::new([&target]);
+        tracker.order_if_costs(&costed);
+        for d in &costed {
+            tracker.see_directive(d);
+        }
+        assert!(tracker.ordered);
+        let mut ranked: Vec<(&str, usize)> = tracker
+            .ranks
+            .iter()
+            .map(|(a, r)| (a.as_str(), *r))
+            .collect();
+        ranked.sort_by_key(|(_, r)| *r);
+        assert_eq!(ranked, [("Assets:A:Y", 0), ("Assets:A:X", 1)]);
+    }
+
+    /// A transaction moving `units` of `currency` into `account`, at a
+    /// per-unit `cost` in USD dated 2024-01-01 when given, from `Equity:O`.
+    fn moved(account: &str, units: Decimal, currency: &str, cost: Option<Decimal>) -> Directive {
+        let mut posting = Posting::new(account, Amount::new(units, currency));
+        if let Some(cost) = cost {
+            posting = posting.with_cost(
+                rustledger_core::CostSpec::empty()
+                    .with_number(rustledger_core::CostNumber::PerUnit { value: cost })
+                    .with_currency("USD")
+                    .with_date(date(2024, 1, 1)),
+            );
+        }
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 1), "t")
+                .with_synthesized_posting(posting)
+                .with_synthesized_posting(Posting::new("Equity:O", Amount::new(-units, currency))),
+        )
+    }
+
+    /// Each posting updates only the pad groups it falls in: `n` accounts
+    /// each holding a transaction, a pad and a balance do `n` units of
+    /// work. A subtree sum per balance over a scan of every account made
+    /// `rledger check` quadratic (40k such accounts took 46 s).
     #[test]
     fn test_plan_pads_sums_each_balance_over_its_subtree_only() {
         let n = 2_000;
-        let mut directives = vec![
-            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
-            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
-        ];
+        let mut directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Equity:O"))];
         for i in 0..n {
             let account = format!("Assets:A{i:05}");
-            directives.push(Directive::Open(Open::new(date(2024, 1, 1), &account)));
-            directives.push(transfer(date(2024, 1, 2), &account, dec!(1)));
+            directives.push(moved(&account, dec!(1), "USD", None));
             directives.push(Directive::Pad(Pad::new(
                 date(2024, 1, 3),
                 &account,
@@ -900,12 +1622,163 @@ mod tests {
             )));
             directives.push(balance(date(2024, 1, 5), &account, dec!(10)));
         }
-        ACCOUNTS_READ.with(|c| c.set(0));
-        let result = process_pads(&directives);
-        let summed = ACCOUNTS_READ.with(std::cell::Cell::get);
+        let (result, work) = work(&directives);
         assert_eq!(result.padding_transactions.len(), n);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(summed, n, "each balance reads only its own account");
+        assert_eq!(
+            work,
+            3 * n,
+            "per posting one inventory add; per padding one lot check and one add"
+        );
+    }
+
+    /// Scenario A of the #2920 review: a parent pad with a balance on each
+    /// of `n` sub-accounts does one group update per posting, where summing
+    /// the subtree at every balance was quadratic (10k: 3 s against main's
+    /// 0.36 s).
+    #[test]
+    fn test_plan_pads_parent_pad_stays_linear() {
+        let n = 400;
+        let directives = parent_pad_loop(n, "USD", |_, account| {
+            vec![moved(account, dec!(1.00), "USD", None)]
+        });
+        let (result, work) = work(&directives);
+        assert_eq!(result.padding_transactions.len(), n as usize);
+        assert_eq!(
+            work,
+            3 * n as usize,
+            "per posting one inventory add; per padding one lot check and one add"
+        );
+    }
+
+    /// Scenario E: two sub-accounts holding 5e28 USD each take the parent's
+    /// running total out of `Decimal`'s range. It carries on in
+    /// `BigDecimal`, so no balance re-sums the subtree (20k took 11.2 s when
+    /// every balance after the overflow did).
+    #[test]
+    fn test_plan_pads_overflowed_group_total_stays_linear() {
+        let n = 300;
+        let big = dec!(50000000000000000000000000000);
+        let mut directives = parent_pad_loop(n, "USD", |_, account| {
+            vec![moved(account, dec!(1.00), "USD", None)]
+        });
+        directives.push(moved("Assets:P:X1", big, "USD", None));
+        directives.push(moved("Assets:P:X2", big, "USD", None));
+        let (result, work) = work(&directives);
+        // The parent's 1e29 cannot be padded against: each balance reports
+        // it rather than padding from a clamped total (#1863).
+        assert!(result.padding_transactions.is_empty());
+        assert_eq!(work, n as usize + 2, "one group update per posting");
+    }
+
+    /// Stricter than Python, on purpose (see `RunningTotals`): the parent's
+    /// total passes through `100000000000000000000000000001`, which
+    /// beancount's 28-digit context rounds, and comes back to
+    /// `50000000000000000000000000001`, which a balance then asserts.
+    /// Beancount pads the rounded-away 1; this keeps the total exact and
+    /// pads nothing.
+    #[test]
+    fn test_plan_pads_keeps_an_overflowed_total_exact() {
+        let big = dec!(50000000000000000000000000000);
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            moved("Assets:P:X1", big, "USD", None),
+            moved("Assets:P:X2", big + dec!(1), "USD", None),
+            moved("Assets:P:X1", -big, "USD", None),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:P", "Equity:O")),
+            balance(date(2024, 1, 3), "Assets:P", big + dec!(1)),
+        ];
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        assert!(
+            result.padding_transactions.is_empty(),
+            "{:?}",
+            result.padding_transactions
+        );
+    }
+
+    /// Scenario F2: every sub-account buys a lot at cost and sells it. The
+    /// group's inventory drops each lot as it nets to zero, so nothing is
+    /// reported and nothing is printed: no work beyond the postings (15.2 s
+    /// at 20k when every balance read every account that ever held a lot).
+    #[test]
+    fn test_plan_pads_sold_lots_stay_linear() {
+        let n = 300;
+        let directives = parent_pad_loop(n, "STK", |_, account| {
+            vec![
+                moved(account, dec!(1.00), "STK", None),
+                moved(account, dec!(1), "STK", Some(dec!(10.00))),
+                moved(account, dec!(-1), "STK", Some(dec!(10.00))),
+            ]
+        });
+        let (result, work) = work(&directives);
+        assert_eq!(result.padding_transactions.len(), n as usize);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            work,
+            5 * n as usize,
+            "three inventory adds per sub-account; per padding one lot check and one add"
+        );
+    }
+
+    /// Scenario F: the lots are kept. They are one lot (the same cost and
+    /// date), so each padding prints a two-position inventory: linear (5.76
+    /// s at 5k when every balance read every account holding a lot).
+    #[test]
+    fn test_plan_pads_kept_lots_stay_linear() {
+        let n = 300;
+        let directives = parent_pad_loop(n, "STK", |_, account| {
+            vec![
+                moved(account, dec!(1.00), "STK", None),
+                moved(account, dec!(1), "STK", Some(dec!(10.00))),
+            ]
+        });
+        let (result, work) = work(&directives);
+        assert_eq!(result.padding_transactions.len(), n as usize);
+        assert_eq!(result.errors.len(), n as usize, "one lot at cost each time");
+        assert!(
+            work <= 6 * n as usize,
+            "two adds per sub-account; per padding a lot check, one add and a two-position print; got {work}"
+        );
+    }
+
+    /// Scenario H, and the plan-side gate: lots at cost outside the group,
+    /// in other currencies and in the padded one, are not the group's. No
+    /// error, nothing printed, no work for them (3.1 s at 5k when the
+    /// message walked every currency at cost in the ledger).
+    #[test]
+    fn test_plan_pads_lots_outside_the_group_cost_nothing() {
+        let n = 300;
+        let mut directives = parent_pad_loop(n, "STK", |_, account| {
+            vec![moved(account, dec!(1.00), "STK", None)]
+        });
+        directives.push(moved("Assets:Broker", dec!(1), "STK", Some(dec!(10.00))));
+        for k in 0..n {
+            directives.push(moved(
+                "Assets:Broker",
+                dec!(1),
+                &format!("K{k:04}X"),
+                Some(dec!(10.00)),
+            ));
+        }
+        let (result, work) = work(&directives);
+        assert_eq!(result.padding_transactions.len(), n as usize);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            work,
+            3 * n as usize,
+            "only the group's own postings, a lot check and an add per padding"
+        );
+        let mut sorted: Vec<(usize, &Directive, SourcePosition)> = directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, d, SourcePosition::at_index(i)))
+            .collect();
+        sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
+        let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);
+        assert!(
+            plan.paddings.iter().all(|p| p.at_cost.is_none()),
+            "no lot at cost under Assets:P"
+        );
     }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -925,7 +1798,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(result.errors.is_empty());
         assert_eq!(result.padding_transactions.len(), 1);
@@ -974,7 +1847,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(result.errors.is_empty());
         assert_eq!(result.padding_transactions.len(), 1);
@@ -1019,7 +1892,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(result.errors.is_empty());
         assert_eq!(result.padding_transactions.len(), 1);
@@ -1056,7 +1929,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(result.errors.is_empty());
         assert_eq!(result.padding_transactions.len(), 1);
@@ -1094,7 +1967,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         // No padding transaction needed when balance already matches, so the
         // pad is unused, as bean-check reports it (`Unused Pad entry`).
@@ -1116,7 +1989,7 @@ mod tests {
             Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert_eq!(result.errors.len(), 1);
         assert!(
@@ -1142,7 +2015,7 @@ mod tests {
     /// The padding amounts `process_pads` synthesizes into `Assets:A`, and its
     /// unused-pad count.
     fn padding_and_unused(directives: &[Directive]) -> (Vec<Decimal>, usize) {
-        let result = process_pads(directives);
+        let result = process_pads(directives, DEFAULT_TOLERANCE_MULTIPLIER);
         let amounts = result
             .padding_transactions
             .iter()
@@ -1225,7 +2098,7 @@ mod tests {
             balance(date(2024, 1, 11), "Assets:A", dec!(100)),
             balance(date(2024, 1, 12), "Assets:A", dec!(200)),
         ];
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
         assert_eq!(result.padding_origins.len(), 1);
         assert_eq!(result.padding_origins[0].pad, 3, "the later pad pads");
         assert_eq!(padding_and_unused(&directives), (vec![dec!(100)], 1));
@@ -1244,7 +2117,7 @@ mod tests {
             )),
         ];
 
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         // Should have: 2 opens + 1 pad + 1 balance + 1 synthetic = 5
         assert_eq!(merged.len(), 5);
@@ -1273,7 +2146,7 @@ mod tests {
                 Amount::new(dec!(1000), "USD"),
             )),
         ];
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
         let synth = result.padding_transactions.into_iter().next().unwrap();
         assert!(
             is_synthesized_pad(&synth),
@@ -1329,7 +2202,7 @@ mod tests {
             )),
         ];
 
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         let synth_idx = merged
             .iter()
@@ -1388,7 +2261,7 @@ mod tests {
         // here.
         let mut directives = directives;
         rustledger_core::sort_directives(&mut directives);
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         let group: Vec<&Directive> = merged
             .iter()
@@ -1448,8 +2321,8 @@ mod tests {
             .map(|d| Spanned::new(d, rustledger_core::Span::new(0, 1)))
             .collect();
 
-        let plain = merge_with_padding(&directives);
-        let merged = merge_with_padding_spanned(&spanned);
+        let plain = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        let merged = merge_with_padding_spanned(&spanned, DEFAULT_TOLERANCE_MULTIPLIER);
 
         let shape = |ds: &[Directive]| -> Vec<&'static str> {
             ds.iter()
@@ -1498,7 +2371,7 @@ mod tests {
             )),
         ];
 
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(
             !merged
@@ -1537,7 +2410,7 @@ mod tests {
             )),
         ];
 
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         let synths = merged
             .iter()
@@ -1566,7 +2439,7 @@ mod tests {
             )),
         ];
 
-        let merged = merge_with_padding(&directives);
+        let merged = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         let synth_idx = merged
             .iter()
@@ -1598,8 +2471,8 @@ mod tests {
                 Amount::new(dec!(1000), "USD"),
             )),
         ];
-        let merged_once = merge_with_padding(&directives);
-        let merged_twice = merge_with_padding(&merged_once);
+        let merged_once = merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        let merged_twice = merge_with_padding(&merged_once, DEFAULT_TOLERANCE_MULTIPLIER);
         assert_eq!(merged_once.len(), merged_twice.len());
     }
 
@@ -1616,7 +2489,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert_eq!(result.padding_transactions.len(), 1);
         assert_eq!(result.padding_transactions[0].flag, 'P');
@@ -1650,7 +2523,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert!(result.errors.is_empty(), "Should have no errors");
         assert_eq!(
@@ -1706,7 +2579,7 @@ mod tests {
             )),
         ];
 
-        let result = process_pads(&directives);
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
 
         // Should only generate one padding transaction (for the first balance)
         assert_eq!(result.padding_transactions.len(), 1);
@@ -1821,7 +2694,7 @@ mod tests {
 
         let mut sorted = directives.clone();
         sorted.sort_by_key(Directive::date);
-        let synths: Vec<Directive> = process_pads(&directives)
+        let synths: Vec<Directive> = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER)
             .padding_transactions
             .into_iter()
             .map(Directive::Transaction)
@@ -1829,7 +2702,10 @@ mod tests {
         assert!(synths.len() > 30, "the shape must actually pad");
         let expected = one_by_one_insert_reference(sorted, synths, Directive::date);
 
-        assert_eq!(merge_with_padding(&directives), expected);
+        assert_eq!(
+            merge_with_padding(&directives, DEFAULT_TOLERANCE_MULTIPLIER),
+            expected
+        );
     }
 
     #[test]
@@ -1862,6 +2738,127 @@ mod tests {
             "merge made {} date lookups for n = {n}, k = {k}; a linear merge \
              makes at most {bound}",
             calls.get(),
+        );
+    }
+
+    /// A difference within the balance's tolerance is not padded, and the
+    /// tolerance follows the ledger's `tolerance_multiplier`: `100.004`
+    /// against `balance 100.00` is within 0.5 * 2 * 0.01 = 0.01, as in
+    /// beancount (`Unused Pad entry`), and beyond a multiplier of 0 (#2901).
+    #[test]
+    fn test_process_pads_within_the_balance_tolerance_pads_nothing() {
+        let directives = vec![
+            transfer(date(2024, 1, 2), "Assets:A", dec!(100.004)),
+            Directive::Pad(Pad::new(date(2024, 1, 3), "Assets:A", "Equity:O")),
+            balance(date(2024, 1, 10), "Assets:A", dec!(100.00)),
+        ];
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        assert!(result.padding_transactions.is_empty());
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(
+            result.errors[0]
+                .message
+                .contains("no corresponding balance")
+        );
+
+        let strict = process_pads(&directives, Decimal::ZERO);
+        assert_eq!(strict.padding_transactions.len(), 1);
+        assert_eq!(
+            strict.padding_transactions[0].postings[0]
+                .amount()
+                .map(|a| a.number),
+            Some(dec!(-0.004))
+        );
+        assert!(strict.errors.is_empty(), "{:?}", strict.errors);
+    }
+}
+
+#[cfg(test)]
+mod tolerance_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// Default `tolerance_multiplier` from `ValidationOptions::default()`
+    /// (also the loader's default via `Options::new()`).
+    fn default_mul() -> Decimal {
+        dec!(0.5)
+    }
+
+    #[test]
+    fn explicit_tolerance_always_wins() {
+        // Even an absurdly-small / absurdly-large explicit tolerance
+        // overrides the scale-derived default. This is the
+        // contract `~ tolerance` on a Balance directive provides.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), Some(dec!(0.001)), default_mul()),
+            dec!(0.001)
+        );
+        assert_eq!(
+            balance_tolerance(dec!(100.00), Some(dec!(50)), default_mul()),
+            dec!(50)
+        );
+    }
+
+    #[test]
+    fn integer_amount_requires_exact_match() {
+        // scale == 0 means the asserted amount has no decimal places.
+        // Python beancount requires an exact match in that case; the
+        // helper returns ZERO to make `difference > 0` strict.
+        assert_eq!(
+            balance_tolerance(dec!(100), None, default_mul()),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn two_decimal_amount_uses_default_quantum() {
+        // For `100.00 USD` with the default multiplier 0.5:
+        //   tolerance = 0.5 * 2 * 0.01 = 0.01
+        // This is the Beancount-spec rule the LSP and the validator
+        // both depend on; if this changes, every balance assertion
+        // shifts pass/fail.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), None, default_mul()),
+            dec!(0.01)
+        );
+    }
+
+    #[test]
+    fn higher_precision_scales_down() {
+        // 4 decimal places: tolerance = 0.5 * 2 * 0.0001 = 0.0001
+        assert_eq!(
+            balance_tolerance(dec!(100.0000), None, default_mul()),
+            dec!(0.0001)
+        );
+    }
+
+    #[test]
+    fn multiplier_one_doubles_default() {
+        // File overrides `option "inferred_tolerance_multiplier" "1.0"`:
+        //   tolerance = 1.0 * 2 * 0.01 = 0.02
+        assert_eq!(balance_tolerance(dec!(100.00), None, dec!(1.0)), dec!(0.02));
+    }
+
+    #[test]
+    fn multiplier_zero_forces_strict_match() {
+        // `option "inferred_tolerance_multiplier" "0.0"` is the
+        // canonical way to force strict equality on a decimal
+        // amount. The helper must yield zero so the validator emits
+        // a diagnostic on any rounding drift.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), None, dec!(0.0)),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn negative_amount_uses_same_scale_logic() {
+        // Tolerance is sign-independent (the validator applies it
+        // against `(actual - expected).abs()`), but the helper does
+        // not flip sign on negative expected: scale() is unsigned.
+        assert_eq!(
+            balance_tolerance(dec!(-100.00), None, default_mul()),
+            dec!(0.01)
         );
     }
 }

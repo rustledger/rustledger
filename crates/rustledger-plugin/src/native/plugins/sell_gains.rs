@@ -69,31 +69,22 @@ impl Amounts {
     }
 }
 
-/// beancount's `CURRENCY_ORDER`, which sorts an inventory's positions for
-/// printing; any other currency sorts after these, by name length.
-const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
-
 impl std::fmt::Display for Amounts {
-    /// As beancount prints an inventory, `(26 USD, 1 EUR)`: sorted by
-    /// `Position.sortkey`, its currency's place in `CURRENCY_ORDER` (else
-    /// 8 + the name's length), then the number.
+    /// As beancount prints an inventory, `(26 USD, 1 EUR)`, through the
+    /// canonical [`rustledger_core::python_inventory_str`] (its
+    /// `Position.sortkey` and stable sort), not a copy of it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut sorted: Vec<&(String, Decimal)> = self.0.iter().collect();
-        sorted.sort_by_key(|(currency, number)| {
-            let order = CURRENCY_ORDER
-                .iter()
-                .position(|c| c == currency)
-                .unwrap_or(8 + currency.len());
-            (order, *number)
-        });
-        f.write_str("(")?;
-        for (i, (currency, number)) in sorted.into_iter().enumerate() {
-            if i > 0 {
-                f.write_str(", ")?;
-            }
-            write!(f, "{number} {currency}")?;
-        }
-        f.write_str(")")
+        let positions: Vec<rustledger_core::Position> = self
+            .0
+            .iter()
+            .map(|(currency, number)| {
+                rustledger_core::Position::simple(rustledger_core::Amount::new(
+                    *number,
+                    currency.as_str(),
+                ))
+            })
+            .collect();
+        f.write_str(&rustledger_core::python_inventory_str(&positions))
     }
 }
 

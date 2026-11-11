@@ -33,6 +33,9 @@ pub enum ErrorCode {
     // E2004 (multiple pads for one balance) was removed in 0.25.0: a pad
     // superseded by a later one is an unused pad (E2003), as in beancount
     // (#2896). The code is retired, not free for reuse.
+    /// E2005: A `pad` pads a currency held at cost (beancount's "Attempt to
+    /// pad an entry with cost").
+    PadWithCost,
 
     // === Transaction Errors (E3xxx) ===
     /// E3001: Transaction does not balance.
@@ -201,6 +204,7 @@ impl ErrorCode {
         Self::BalanceAssertionFailed,
         Self::BalanceToleranceExceeded,
         Self::PadWithoutBalance,
+        Self::PadWithCost,
         Self::TransactionUnbalanced,
         Self::MultipleInterpolation,
         Self::NoPostings,
@@ -235,6 +239,7 @@ impl ErrorCode {
             Self::BalanceAssertionFailed => "E2001",
             Self::BalanceToleranceExceeded => "E2002",
             Self::PadWithoutBalance => "E2003",
+            Self::PadWithCost => "E2005",
             // Transaction errors
             Self::TransactionUnbalanced => "E3001",
             Self::MultipleInterpolation => "E3002",
@@ -313,6 +318,7 @@ impl ErrorCode {
             Self::BalanceAssertionFailed => "Balance assertion failed",
             Self::BalanceToleranceExceeded => "Balance exceeds explicit tolerance",
             Self::PadWithoutBalance => "Pad without a subsequent balance assertion",
+            Self::PadWithCost => "Pad of a currency held at cost",
             Self::TransactionUnbalanced => "Transaction does not balance",
             Self::MultipleInterpolation => "Multiple postings missing amounts for one currency",
             Self::NoPostings => "Transaction has no postings",
@@ -399,6 +405,15 @@ impl ErrorCode {
                  amount makes the NEXT balance assertion true\" — without that \
                  balance it does nothing.\n\nFix: add the `balance` assertion after \
                  the pad, or delete the pad."
+            }
+            Self::PadWithCost => {
+                "A `pad` inserts padding for a `balance` in a currency the padded \
+                 account (or a sub-account) holds at cost.\n\nThe padding has no \
+                 cost: a pad cannot say which lot the difference belongs to. The \
+                 padding is still inserted, and the error is reported once for each \
+                 lot held at cost, as beancount does both.\n\nFix: \
+                 record the purchase or sale that explains the difference with its \
+                 cost, instead of padding it."
             }
             Self::TransactionUnbalanced => {
                 "The weights of a transaction's postings do not sum to zero per \

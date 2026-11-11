@@ -122,13 +122,19 @@ Or use `rledger doctor missing-open` to generate them.
 
 ### E2003: Pad Without Balance Assertion
 
-**Cause**: A `pad` directive never inserted padding (beancount's `Unused Pad entry`): no `balance` assertion follows it, the account already held the asserted amount, or a later `pad` on the same account superseded it. A balance uses only the latest pad before it, once per currency.
+**Cause**: A `pad` directive never inserted padding (beancount's `Unused Pad entry`): no `balance` assertion follows it, the account already held the asserted amount (within the balance's tolerance), or a later `pad` on the same account superseded it. A balance uses only the latest pad before it, once per currency.
 
 **Fix**: Add a balance assertion after the pad, or remove the pad.
 
 ### E2004 (removed in 0.25.0)
 
 Formerly "Multiple Pads for Same Balance". It is no longer reported: as in beancount, a balance uses only the latest pad before it, and a pad superseded by a later one is an unused pad (`E2003`). The code is retired and will not be reused.
+
+### E2005: Pad of a Currency Held at Cost
+
+**Cause**: A `pad` inserted padding for a `balance` in a currency the padded account (or one of its sub-accounts) holds at cost. Padding has no cost, so a pad cannot say which lot the difference belongs to. As in beancount (`Attempt to pad an entry with cost`), the padding is still inserted, and the error is reported once for each lot held at cost.
+
+**Fix**: Record the purchase or sale that explains the difference, with its cost, instead of padding it.
 
 ## Transaction Errors (E3xxx)
 

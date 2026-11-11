@@ -697,6 +697,226 @@ include "accounts.beancount"
         ledger.directives.into_iter().map(|s| s.value).collect()
     }
 
+    /// Drift guard (#2901): a same-date `note` written above a `pad` puts the
+    /// pad's accounts after the note's in beancount's entry order, though the
+    /// booking order puts the pad first. Every surface that reports it
+    /// answers as bean-check 3.2.3 does, `(1 CCC, 1 DDD, ...)`; see
+    /// [`assert_pad_surfaces_agree`].
+    #[test]
+    fn test_pad_at_cost_ties_agree_across_surfaces() {
+        assert_pad_surfaces_agree(
+            "2023-12-31 note Assets:A:C \"n\"\n2023-12-31 pad Assets:Z Assets:A:D\n\
+            2024-01-01 open Assets:A\n2024-01-01 open Assets:A:C\n2024-01-01 open Assets:A:D\n\
+            2024-01-01 open Assets:Z\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+            2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+            2024-02-02 * \"g\"\n  Assets:A:C  1 CCC\n  Assets:A:D  1 DDD\n  Equity:O  -1 CCC\n\
+            \x20 Equity:O  -1 DDD\n2024-02-03 pad Assets:A Equity:O\n\
+            2024-02-10 balance Assets:A 11 STK\n",
+            &["Attempt to pad an entry with cost for balance: \
+               (1 CCC, 1 DDD, 10 STK {10 USD, 2024-02-01})"],
+        );
+    }
+
+    /// Drift guard (#2901): an `open` `auto_accounts` makes has the line the
+    /// plugin numbers it with, the account's place among every account the
+    /// ledger names, and comes ahead of a written `open` on the same line.
+    /// Every surface answers as bean-check 3.2.3 does,
+    /// `(1 B1X, 1 CCC, 1 B2X, 1 DDD, ...)`: `Assets:A:B1` is numbered 1, the
+    /// written `Assets:A:C` is on line 1, `Assets:A:B2` is numbered 2 and
+    /// `Assets:A:D` 4.
+    #[test]
+    fn test_pad_at_cost_ties_with_a_plugins_open_agree_across_surfaces() {
+        assert_pad_surfaces_agree(
+            "2024-02-02 open Assets:A:C\nplugin \"beancount.plugins.auto_accounts\"\n\
+            2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+            2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+            2024-02-02 * \"g\"\n  Assets:A:C  1 CCC\n  Assets:A:D  1 DDD\n\
+            \x20 Assets:A:B1  1 B1X\n  Assets:A:B2  1 B2X\n  Equity:O  -1 CCC\n\
+            \x20 Equity:O  -1 DDD\n  Equity:O  -1 B1X\n  Equity:O  -1 B2X\n\
+            2024-02-03 pad Assets:A Equity:O\n2024-02-10 balance Assets:A 11 STK\n",
+            &["Attempt to pad an entry with cost for balance: \
+               (1 B1X, 1 CCC, 1 B2X, 1 DDD, 10 STK {10 USD, 2024-02-01})"],
+        );
+    }
+
+    /// Every surface that reports `source`'s "Attempt to pad an entry with
+    /// cost" answers `expected`: `rledger check`, the WASM `ParsedLedger`'s
+    /// validation and `expandPads`, and the multi-file `Ledger`'s errors and
+    /// `expandPads`, before and after a cache round trip. The padding itself
+    /// is the same through `balance_view` and the WASM expansions (and
+    /// ffi-wasi's `expand_pads` on a native build).
+    fn assert_pad_surfaces_agree(source: &str, expected: &[&str]) {
+        use rustledger_core::Directive;
+        use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+        use std::path::Path;
+
+        let expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
+        let at_cost = |messages: Vec<String>| -> Vec<String> {
+            messages
+                .into_iter()
+                .filter(|m| m.starts_with("Attempt to pad an entry with cost"))
+                .collect()
+        };
+        let padding = |directives: &[Directive]| -> Vec<String> {
+            directives
+                .iter()
+                .filter_map(|d| match d {
+                    Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t) => {
+                        // Account and units: where a posting is located is
+                        // each surface's own business (#2825).
+                        Some(
+                            t.postings
+                                .iter()
+                                .map(|p| format!("{} {:?}", p.account, p.amount()))
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                        )
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let synths = |result: rustledger_booking::PadResult| -> Vec<Directive> {
+            result
+                .padding_transactions
+                .into_iter()
+                .map(Directive::Transaction)
+                .collect()
+        };
+
+        // `rledger check`: the loader with validation.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file("test.beancount", source);
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("test.beancount"))
+            .expect("loads");
+        let ledger = process(
+            raw,
+            &LoadOptions {
+                validate: true,
+                ..Default::default()
+            },
+        )
+        .expect("processes");
+        let check: Vec<String> = ledger
+            .errors
+            .iter()
+            .filter(|e| e.code == "E2005")
+            .map(|e| e.message.clone())
+            .collect();
+        assert_eq!(check, expected, "rledger check");
+        let view = padding(&ledger.balance_view());
+
+        // The WASM `ParsedLedger`: its validation and `expandPads`.
+        let load = helpers::load_and_book(source);
+        let wasm = helpers::pad_expansion(
+            &load.directives,
+            &helpers::source_positions(&load.directive_spans, &load.source_map),
+            helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
+        );
+        assert_eq!(
+            at_cost(wasm.errors.iter().map(|e| e.message.clone()).collect()),
+            expected,
+            "ParsedLedger expandPads"
+        );
+        assert_eq!(
+            at_cost(
+                helpers::run_validation(&load)
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect(),
+            ),
+            expected,
+            "ParsedLedger validation"
+        );
+        assert_eq!(padding(&synths(wasm)), view, "ParsedLedger padding");
+
+        // The multi-file `Ledger`: its errors and `expandPads`, before and
+        // after a cache round trip.
+        let files: std::collections::HashMap<String, String> =
+            [("test.beancount".to_string(), source.to_string())].into();
+        let Ok(multi) = parsed_ledger::Ledger::from_file_map(files, "test.beancount") else {
+            panic!("the multi-file ledger loads");
+        };
+        let Ok(bytes) = multi.serialize() else {
+            panic!("the ledger serializes");
+        };
+        let Ok(restored) = parsed_ledger::Ledger::from_cache(&bytes) else {
+            panic!("the ledger restores");
+        };
+        for (name, ledger) in [("Ledger", &multi), ("restored Ledger", &restored)] {
+            assert_eq!(at_cost(ledger.error_messages()), expected, "{name} errors");
+            let result = ledger.pad_result();
+            assert_eq!(
+                at_cost(result.errors.iter().map(|e| e.message.clone()).collect()),
+                expected,
+                "{name} expandPads"
+            );
+            assert_eq!(padding(&synths(result)), view, "{name} padding");
+        }
+
+        // ffi-wasi's `expand_pads`, a native-only dependency.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ffi = rustledger_ffi_wasi::helpers::load_source(source);
+            let (expanded, _) = rustledger_ffi_wasi::helpers::expand_pads(
+                ffi.directives,
+                ffi.directive_lines,
+                &0u32,
+                ffi.tolerance_multiplier,
+            );
+            assert_eq!(padding(&expanded), view, "ffi-wasi padding");
+        }
+    }
+
+    /// Drift guard (#2901): the WASM validation reads the ledger's options
+    /// as `rledger check` does. With `tolerance_multiplier` 2, 99.97 held
+    /// against a balance of 100.00 is within the tolerance: bean-check 3.2.3
+    /// reports the pad unused, and nothing without the pad. A default set of
+    /// options pads it, and fails the balance without the pad.
+    #[test]
+    fn test_wasm_validation_reads_the_tolerance_multiplier_as_check_does() {
+        use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+        use std::path::Path;
+
+        let held = "option \"tolerance_multiplier\" \"2\"\n\
+            2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+            2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O\n";
+        let balance = "2024-01-10 balance Assets:A 100.00 USD\n";
+        let padded = format!("{held}2024-01-03 pad Assets:A Equity:O\n{balance}");
+        let unpadded = format!("{held}{balance}");
+        for (source, expected) in [
+            (padded.as_str(), vec!["Unused Pad entry".to_string()]),
+            (unpadded.as_str(), Vec::new()),
+        ] {
+            let mut vfs = VirtualFileSystem::new();
+            vfs.add_file("test.beancount", source);
+            let raw = Loader::new()
+                .with_filesystem(Box::new(vfs))
+                .load(Path::new("test.beancount"))
+                .expect("loads");
+            let check: Vec<String> = process(
+                raw,
+                &LoadOptions {
+                    validate: true,
+                    ..Default::default()
+                },
+            )
+            .expect("processes")
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect();
+            assert_eq!(check, expected, "rledger check");
+            let wasm: Vec<String> = helpers::run_validation(&helpers::load_and_book(source))
+                .into_iter()
+                .map(|e| e.message)
+                .collect();
+            assert_eq!(wasm, check, "ParsedLedger validation");
+        }
+    }
+
     /// Helper: process source through WASM pipeline and return directives.
     fn wasm_process(source: &str) -> Vec<rustledger_core::Directive> {
         let load = helpers::load_and_book(source);
@@ -848,8 +1068,9 @@ include "accounts.beancount"
         let cli = cli_process(source);
         let wasm = wasm_process(source);
 
-        let cli_merged = merge_with_padding(&cli);
-        let wasm_merged = merge_with_padding(&wasm);
+        let cli_merged = merge_with_padding(&cli, rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
+        let wasm_merged =
+            merge_with_padding(&wasm, rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert_eq!(
             cli_merged, wasm_merged,
@@ -947,6 +1168,9 @@ option "operating_currency" "EUR"
             options: processed.options.clone(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

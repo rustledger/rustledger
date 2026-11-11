@@ -79,8 +79,8 @@ pub use decimal::{
 pub use directive::{
     AUTOMATIC_META, Balance, BookingDecision, Close, CommentList, Commodity, Custom, Directive,
     DirectivePriority, Document, Event, MetaMap, MetaValue, Metadata, Note, Open, Pad, Posting,
-    Price, PriceAnnotation, PriceKind, Query, Transaction, booking_sort_key, meta_value_as_bool,
-    parse_bool_word, parse_precision_meta, sort_directives,
+    Price, PriceAnnotation, PriceKind, Query, Transaction, beancount_entry_sort_key,
+    booking_sort_key, meta_value_as_bool, parse_bool_word, parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};
 pub use extract::{
@@ -101,7 +101,7 @@ pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory,
     MergeSpecMismatch, OverflowError, ReductionScope, for_each_strict_subaccount,
-    sum_account_and_subaccounts,
+    python_inventory_str, python_position_str, sum_account_and_subaccounts,
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use metadata::MetadataBuilder;

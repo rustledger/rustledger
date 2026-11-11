@@ -187,7 +187,10 @@ fn test_for_ledger_locates_a_pad_transaction_like_bean_query() {
 ";
     let parsed = rustledger_parser::parse(ledger);
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-    let directives = rustledger_booking::merge_with_padding_spanned(&parsed.directives);
+    let directives = rustledger_booking::merge_with_padding_spanned(
+        &parsed.directives,
+        rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+    );
     let mut map = SourceMap::new();
     let text: SourceText = ledger.into();
     map.add_file("<string>".into(), text);

@@ -205,7 +205,10 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // (#2823). The same constructor as the CLI and the FFI component.
     let source_map = &load.source_map;
     let spanned = crate::helpers::spanned_directives(&load.directives, &load.directive_spans);
-    let directives = merge_with_padding_spanned(&spanned);
+    let directives = merge_with_padding_spanned(
+        &spanned,
+        crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
+    );
     let options = &load.parse_result.options;
     let memo = std::sync::OnceLock::new();
     let mut executor = Executor::for_ledger(
@@ -295,8 +298,6 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
 /// Returns directives with pad-generated transactions included.
 #[wasm_bindgen(js_name = "expandPads")]
 pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::process_pads;
-
     let load = load_and_book(source);
 
     // Return early only on actual errors (parse/booking); warnings must not
@@ -313,8 +314,13 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     // Carry non-fatal load warnings through to the result.
     let mut errors = load.reported_errors();
 
-    // Process pads
-    let pad_result = process_pads(&load.directives);
+    // Process pads, with the kept spans as source locations, as every WASM
+    // surface pads (`helpers::pad_expansion`).
+    let pad_result = crate::helpers::pad_expansion(
+        &load.directives,
+        &crate::helpers::source_positions(&load.directive_spans, &load.source_map),
+        crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
+    );
     errors.extend(
         pad_result
             .errors
@@ -891,7 +897,10 @@ fn query_with_filesystem(
     // Pad-expanded and spanned, so the source columns resolve (#2825); the
     // context carries the validating load's discrepancies (#2823). The same
     // constructor as the CLI and the FFI component.
-    let directives = merge_with_padding_spanned(&ledger.directives);
+    let directives = merge_with_padding_spanned(
+        &ledger.directives,
+        ledger.options.inferred_tolerance_multiplier,
+    );
     let mut executor = Executor::for_ledger(
         &directives,
         &ledger.source_map,

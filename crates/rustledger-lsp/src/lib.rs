@@ -30,6 +30,7 @@ pub mod handlers;
 pub mod ledger_state;
 pub mod main_loop;
 
+mod diagnostics_schedule;
 mod server;
 mod snapshot;
 mod vfs;

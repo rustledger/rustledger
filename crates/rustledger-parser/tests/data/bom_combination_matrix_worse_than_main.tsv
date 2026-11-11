@@ -15,12 +15,19 @@
 #   rledger counts the line alone as beancount does alone;
 # - `like-main-without-bom`: the analog columns (the input with its BOMs
 #   replaced by ordinary characters) are beancount's and rledger's counts;
-# - `inner-bom-under-line-error`, `invalid-account-after-invalid-token`:
-#   alone, rledger is off the same way and at least as far as in context
-#   (or counts the line the same alone, where beancount reports less in
-#   context after the line before), and the errors the cause names are the
-#   difference: a `P0026` for the first, a `P0006` for each error more for
-#   the second;
+# - `inner-bom-under-line-error`: the line has BOMs inside beancount's own
+#   invalid tokens (by beancount's lexer, so not inside an account, which
+#   admits a BOM), and with each made a `$` rledger counts the line as
+#   beancount does;
+# - `bom-account-under-line-diagnostic`: a BOM-led account (by beancount's
+#   lexer) starts on the line, and with each written `Assets:X` rledger
+#   counts the line as beancount does;
+# - `one-diagnostic-per-line`: rledger counts beancount's count less
+#   exactly beancount's grammar errors after the line's first error (a table
+#   column), its one diagnostic standing for that first error;
+# - `invalid-account-after-invalid-token`: alone, rledger is off the same
+#   way and at least as far as in context (or counts the line the same
+#   alone, where beancount reports less in context after the line before);
 # - `bom-glued-to-account`, `mid-line-hash-bang`, and a composite of parts
 #   joined by `&` (`bom-glued-to-account&mid-line-hash-bang`,
 #   `bom-glued-to-account&extra-construct-error`): each part is taken out
@@ -29,7 +36,9 @@
 #   more than the line's `P0026`s; the `#!` / `#+`: what goes with each made
 #   an ordinary invalid run, against beancount's count for that input; the
 #   construct error: main's overcount of the BOM-free analog), each share is
-#   not zero, and together they are exactly the line's difference.
+#   not zero, and together they are exactly the line's difference. The glued
+#   and construct shares are positive; the `#!` / `#+` share is often
+#   negative, as rledger reads it as one token to the end of the line.
 <BOM>g 2024-01-02 * "n" <BOM>Assets:A0\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main was right only by miscounting a BOM
 <BOM>g 2024-01-02 * "n" <BOM>assets:A0\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main was right only by miscounting a BOM
 <BOM>g 2024-01-02 * "n" <BOM>Assets:A0$x\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 2 on main against beancount's 3, as this line counts here: main was right only by miscounting a BOM
@@ -930,12 +939,12 @@ foo\n<BOM><BOM><BOM>assets:A $n0 $n1 x2<BOM>y\n	4	line-after-error-line	4	alone 
 <BOM>12$ 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0~<BOM>1:A\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main came closer only by miscounting a BOM
 <BOM>12$ 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0~<BOM>1:A;c $x\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main came closer only by miscounting a BOM
 <BOM>12$ 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0,<BOM>a-b:C;c $x\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main came closer only by miscounting a BOM
-<BOM>g 2024-01-02 * "n" <BOM>assets:A0<BOM>"s"\n  Assets:A  1 USD\n  Assets:B\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
-<BOM>12$ 2024-01-02 * "n" <BOM>assets:A0<BOM>"s"\n  Assets:A  1 USD\n  Assets:B\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
-<BOM>g 2024-01-02 commodity EUR <BOM>assets:A0<BOM>"s"\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
-<BOM>12$ 2024-01-02 commodity EUR <BOM>assets:A0<BOM>"s"\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
-<BOM>g 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0<BOM>"s"\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
-<BOM>12$ 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0<BOM>"s"\n	3	inner-bom-under-line-error	2	a run with a BOM inside it is left to the line's BOM diagnostic, one error fewer than beancount; alone the line is off the same way (beancount 2, rledger 1), and main's 2 came from miscounting the BOMs
+<BOM>g 2024-01-02 * "n" <BOM>assets:A0<BOM>"s"\n  Assets:A  1 USD\n  Assets:B\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
+<BOM>12$ 2024-01-02 * "n" <BOM>assets:A0<BOM>"s"\n  Assets:A  1 USD\n  Assets:B\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
+<BOM>g 2024-01-02 commodity EUR <BOM>assets:A0<BOM>"s"\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
+<BOM>12$ 2024-01-02 commodity EUR <BOM>assets:A0<BOM>"s"\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
+<BOM>g 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0<BOM>"s"\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
+<BOM>12$ 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0<BOM>"s"\n	3	one-diagnostic-per-line	-	rledger's one diagnostic for the line stands for its first error, the invalid token the line-start BOM run starts; beancount's grammar error after it, at the BOM-led account, is the whole difference (the table's later-grammar column). The BOM after `A0` is inside beancount's ACCOUNT, so this is not an inner BOM. Main's 2 came from reporting the rest of the glued run as a token of its own
 2024-01-02 *\n  <BOM>; c <BOM>Assets:A0\n  Assets:A  1 USD\n  Assets:B\n	4	bom-glued-to-account	2	each BOM glued to an account is a `P0026` here (#2928's design, with its quick fix) and no parse error in beancount; alone the line is off the same way (beancount 2, rledger 3), and main's 2 came from miscounting the BOMs
 2024-01-02 *\n  <BOM>; c <BOM>assets:A0\n  Assets:A  1 USD\n  Assets:B\n	4	bom-glued-to-account	2	each BOM glued to an account is a `P0026` here (#2928's design, with its quick fix) and no parse error in beancount; alone the line is off the same way (beancount 2, rledger 3), and main's 2 came from miscounting the BOMs
 2024-01-02 *\n  <BOM>; c <BOM>Assets:A0 <BOM>Assets:A1\n  Assets:A  1 USD\n  Assets:B\n	4	bom-glued-to-account	2	each BOM glued to an account is a `P0026` here (#2928's design, with its quick fix) and no parse error in beancount; alone the line is off the same way (beancount 2, rledger 4), and main's 2 came from miscounting the BOMs

@@ -96,7 +96,7 @@ the lines before it (beancount's error recovery, #2872).
 
 Output, one line per case, tab-separated:
 
-    <source>  <beancount>  <main>  <beancount analog>  <main analog>  <beancount hash-bang analog>  <beancount alone>
+    <source>  <beancount>  <main>  <beancount analog>  <main analog>  <beancount hash-bang analog>  <beancount alone>  <BOM accounts>  <inner BOMs>  <later grammar>
 
 `<source>` is the input with each U+FEFF written `<BOM>`, each `\\n` written
 `\\\\n`, each `\\r` `\\\\r` and each tab `\\\\t` (no generated input holds a
@@ -104,7 +104,13 @@ backslash or a `<`). Each count column is `line:count` pairs,
 comma-separated, ascending, empty when there is no error; an unclosed
 `pushtag` / `pushmeta` is line 0 on both sides, as in the parity harness.
 `<beancount alone>` lists every line after the head, a zero included, and
-leaves out a line beancount crashes or raises on alone.
+leaves out a line beancount crashes or raises on alone. The last two columns
+say where beancount's own lexer (`lexer.lex_iter_string`) puts the BOMs, as
+byte offsets into the input: `<BOM accounts>` the `ACCOUNT` tokens that start
+with a BOM (`start-end`), `<inner BOMs>` the BOMs inside an invalid token
+past its leading BOMs; so the test reads beancount's token boundaries instead
+of guessing them. `<later grammar>` counts, per line, beancount's grammar
+errors after the line's first error (`later_grammar_cells`).
 Changing the sets here needs nothing in the Rust test: it reads the sources
 from the table.
 """
@@ -120,7 +126,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from beancount.parser import parser
+from beancount.parser import lexer, parser
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -256,6 +262,15 @@ EXTRA = [
     "2024-01-02 *\n  " + BOM + "1:A:B  #+x#t\t{#t$x\n",
     "2024-01-02 price USD 1 " + BOM + ":A\t{1 USD}#t\n",
     "foo\n" + BOM + "assets:A " + BOM + "\n",
+    # Round 12: where beancount's lexer starts an account after a BOM, and
+    # where it swallows the BOM into an invalid token.
+    '2024-01-02 custom "b" 1 ' + BOM + "-:A\t#t" + BOM + "a-b:C@\n",
+    "x $" + BOM + "a:B\n",
+    "x AB_" + BOM + "a:B\n",
+    "x 1.5." + BOM + "a:B\n",
+    "2024-01-02 *\n  ab:" + BOM + "a:B\n",
+    "x -" + BOM + "a:B\n",
+    "x 2024-01-01" + BOM + "a:B\n",
 ]
 
 PROBE_SEED = 2931
@@ -511,6 +526,85 @@ def counts_in_child(parity, is_not_syntax, src):
     return ",".join(f"{line}:{n}" for line, n in sorted(counts.items()))
 
 
+BOM_BYTES = BOM.encode()
+
+
+def later_grammar_cells(parity, is_not_syntax, src):
+    """For each line, how many of beancount's errors on it after its first
+    one are grammar errors (not `Invalid token`): the ones a single
+    diagnostic for the line leaves out. Parsed in a forked child; None when
+    beancount crashes or raises."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            _, errors, _ = parser.parse_string(src)
+            kept = parity.keep_parse_errors(errors, is_not_syntax)
+            payload = json.dumps([[line, kind] for line, kind, _ in kept])
+        except Exception:  # the parser raised: no verdict
+            payload = "null"
+        with os.fdopen(w, "w") as f:
+            f.write(payload)
+        os._exit(0)
+    os.close(w)
+    with os.fdopen(r) as f:
+        payload = f.read()
+    _, status = os.waitpid(pid, 0)
+    if status != 0 or not payload or payload == "null":
+        return None
+    seen, later = set(), {}
+    for line, kind in json.loads(payload):
+        if line in seen and kind != "LexerError":
+            later[line] = later.get(line, 0) + 1
+        seen.add(line)
+    return ",".join(f"{line}:{n}" for line, n in sorted(later.items()))
+
+
+def bom_roles_in_child(src):
+    """Where beancount's own lexer puts the BOMs of `src`, as byte offsets:
+    the `ACCOUNT` tokens that start with a BOM (`start-end`, comma-joined),
+    and the BOMs inside an invalid token past its leading BOMs (comma-joined).
+    Lexed in a forked child, as the C lexer can crash; None when it does, or
+    when a token cannot be placed in the source."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            data = src.encode()
+            accounts, inner = [], []
+            pos = 0
+            for name, _, text, _ in lexer.lex_iter_string(src):
+                if not text:
+                    continue
+                at = data.find(text, pos)
+                if at < 0:
+                    raise ValueError("token not found")
+                pos = at + len(text)
+                if name == "ACCOUNT" and text.startswith(BOM_BYTES):
+                    accounts.append(f"{at}-{pos}")
+                elif name == "error":
+                    lead = len(text) - len(text.lstrip(BOM_BYTES))
+                    k = text.find(BOM_BYTES, lead)
+                    while k >= 0:
+                        inner.append(str(at + k))
+                        k = text.find(BOM_BYTES, k + len(BOM_BYTES))
+            payload = json.dumps([",".join(accounts), ",".join(inner)])
+        except Exception:  # the lexer raised: no verdict
+            payload = "null"
+        with os.fdopen(w, "w") as f:
+            f.write(payload)
+        os._exit(0)
+    os.close(w)
+    with os.fdopen(r) as f:
+        payload = f.read()
+    _, status = os.waitpid(pid, 0)
+    if status != 0 or not payload or payload == "null":
+        return None
+    return json.loads(payload)
+
+
 # A run of BOMs beancount reads as an account's first character: it is
 # followed by an account's continuation characters, a `:` and more.
 BOM_ACCOUNT = re.compile(
@@ -605,11 +699,16 @@ def main():
         if cells is None or analog_cells is None or hash_bang_cells is None:
             print(f"left out, beancount crashed or raised: {src!r}", file=sys.stderr)
             continue
-        rows.append((src, cells, analog_cells, hash_bang_cells, alone_cells(parity, is_not_syntax, src, alone_cache)))
+        roles = bom_roles_in_child(src)
+        later = later_grammar_cells(parity, is_not_syntax, src)
+        if roles is None or later is None:
+            print(f"left out, beancount's lexer crashed or raised: {src!r}", file=sys.stderr)
+            continue
+        rows.append((src, cells, analog_cells, hash_bang_cells, alone_cells(parity, is_not_syntax, src, alone_cache), roles, later))
     main = rledger_cells(args.main_binary, [row[0] for row in rows])
     main_analog = rledger_cells(args.main_binary, [analog(row[0]) for row in rows])
-    for (src, cells, analog_cells, hb, alone), m, ma in zip(rows, main, main_analog):
-        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\t{hb}\t{alone}\n")
+    for (src, cells, analog_cells, hb, alone, (accounts, inner), later), m, ma in zip(rows, main, main_analog):
+        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\t{hb}\t{alone}\t{accounts}\t{inner}\t{later}\n")
 
 
 if __name__ == "__main__":

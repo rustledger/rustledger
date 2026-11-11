@@ -54,9 +54,20 @@ impl DiagnosticsSchedule {
     /// Record a change to `path` at `now`: the document owes a pass, due one
     /// delay from now. A later change pushes the deadline back, which is what
     /// collapses a burst into one pass.
+    ///
+    /// There is deliberately no max-wait cap: a client that keeps sending
+    /// changes faster than the delay gets its diagnostics when it pauses, as
+    /// with rust-analyzer's coalescing and the TypeScript tooling's trailing
+    /// debounce. If continuous typing should ever refresh periodically, the
+    /// cap belongs here: keep the first deadline's origin and clamp to it.
     pub(crate) fn schedule(&mut self, path: AbsPathBuf, uri: Uri, now: Instant) {
         let deadline = now + self.delay;
         self.pending.insert(path, Pending { uri, deadline });
+    }
+
+    /// Drop every pending pass (on `shutdown`).
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
     }
 
     /// Drop the pending pass for `path`, if any. Returns its URI so a caller

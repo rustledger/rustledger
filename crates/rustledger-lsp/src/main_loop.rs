@@ -658,6 +658,9 @@ impl MainLoopState {
         let inner: Result<serde_json::Value, String> = match method.as_str() {
             Shutdown::METHOD => {
                 self.shutdown_requested = true;
+                // After `shutdown` the server must not publish anything
+                // further, so drop the debounced passes still owed.
+                self.diagnostics_schedule.clear();
                 Ok(serde_json::Value::Null)
             }
             Completion::METHOD => self.handle_completion_request(req),
@@ -1966,11 +1969,12 @@ impl MainLoopState {
             // Apply the edit and bump the revision NOW, so every request from
             // here on (hover, completion, definition, ...) sees this text.
             let path = uri_to_path(&uri).ok();
-            if let Some(path) = &path {
-                self.vfs
-                    .write()
-                    .update(path.as_path(), text.clone(), version);
-            }
+            let in_vfs = path.as_ref().is_some_and(|path| {
+                let mut vfs = self.vfs.write();
+                let open = vfs.get(path.as_path()).is_some();
+                vfs.update(path.as_path(), text.clone(), version);
+                open
+            });
             self.bump_revision();
 
             // Diagnostics, on the other hand, wait for the edits to pause
@@ -1979,10 +1983,12 @@ impl MainLoopState {
             // from the VFS when it runs, so it can only ever describe the
             // latest version, never this intermediate one.
             //
-            // A URI with no file path never reaches the VFS, so there is
-            // nothing for a deferred pass to read back; those keep the old
-            // immediate publish from the text in hand.
-            match path {
+            // A document that is not in the VFS leaves a deferred pass nothing
+            // to read back, so it keeps the immediate publish from the text in
+            // hand. That covers a URI with no file path, and a `didChange` with
+            // no `didOpen` before it: a client protocol violation, but one the
+            // server answered with diagnostics before #2940 and still does.
+            match path.filter(|_| in_vfs) {
                 Some(path) => {
                     let now = (self.clock)();
                     self.diagnostics_schedule.schedule(path, uri, now);
@@ -3428,6 +3434,93 @@ mod tests {
             assert!(
                 for_doc(&h.published(), &uri).is_empty(),
                 "nothing may be republished for a closed document"
+            );
+        }
+
+        /// An immediate publish settles a pass pending for the same file. A
+        /// watched-file change inside the debounce window revalidates every
+        /// open buffer from its current text; the pass the edit scheduled
+        /// would only repeat that work.
+        #[test]
+        fn test_revalidation_settles_a_pending_pass() {
+            let mut h = Harness::new();
+            let a = h.uri("a.beancount");
+            let b = h.uri("b.beancount");
+            h.open(&a, &version_text(0));
+            h.open(&b, &version_text(0));
+            h.change(&a, 2, &version_text(4));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            h.advance(DIAGNOSTICS_DEBOUNCE / 2);
+            h.state
+                .on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: h.uri("other.beancount"),
+                        typ: lsp_types::FileChangeType::CHANGED,
+                    }],
+                });
+            assert_eq!(
+                h.state.diagnostics_passes,
+                before + 2,
+                "one per open buffer"
+            );
+            let published = h.published();
+            let pa = for_doc(&published, &a);
+            assert_eq!(pa.len(), 1);
+            assert_eq!(error_lines(pa[0]), vec![4], "revalidated from current text");
+            assert_eq!(
+                h.state.next_diagnostics_deadline(),
+                None,
+                "the revalidation must settle the pass the edit scheduled"
+            );
+
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before + 2, "no redundant pass");
+        }
+
+        /// After `shutdown` nothing more may be published, so the passes still
+        /// owed are dropped.
+        #[test]
+        fn test_shutdown_drops_pending_passes() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.change(&uri, 2, &version_text(1));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            h.state.handle_request(lsp_server::Request::new(
+                lsp_server::RequestId::from(1),
+                Shutdown::METHOD.to_string(),
+                serde_json::Value::Null,
+            ));
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before);
+            assert!(for_doc(&h.published(), &uri).is_empty());
+        }
+
+        /// A `didChange` with no `didOpen` before it is a client protocol
+        /// violation, but the server answered it with diagnostics for the
+        /// text it was given before debouncing existed, and still does,
+        /// immediately: there is no buffer for a deferred pass to read.
+        #[test]
+        fn test_did_change_without_open_publishes_from_given_text() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.change(&uri, 2, &version_text(3));
+
+            assert_eq!(h.state.diagnostics_passes, 1);
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1);
+            assert_eq!(
+                mine[0].diagnostics,
+                reference_diagnostics("a.beancount", &version_text(3))
             );
         }
     }

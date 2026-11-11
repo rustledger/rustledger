@@ -49,9 +49,15 @@ diagnostic vector for the file — and renders one of:
   otherwise produce neutral noise on every code-action-eligible line.
 
 The validator runs the full pipeline (synth-plugins → Early → book →
-regular-plugins → Late) on every `didOpen` / `didChange` / `didSave`,
-producing the same verdict `rledger check` does. The lens follows
-that verdict.
+regular-plugins → Late), producing the same verdict `rledger check`
+does. It runs immediately on `didOpen` and on watched-file changes.
+`didChange` passes are debounced (#2940): the edit is applied at once,
+but the pass runs only after the document has gone 200 ms without
+another change, so a burst of edits costs one pass, computed from the
+final text. `didSave` is never received: the server advertises FULL
+sync with no save option. The lens follows that verdict, and a
+`codeLens` request first runs any pass still pending for its document,
+so it never reads the verdict of text the user has since edited.
 
 The exception is plugins that are not native. The LSP runs only native
 plugins and skips WASM and Python plugins, reporting each skipped plugin

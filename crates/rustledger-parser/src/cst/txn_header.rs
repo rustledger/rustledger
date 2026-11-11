@@ -242,6 +242,90 @@ pub(super) fn first_header_defect_in(
     Some(defect)
 }
 
+/// The payee and narration of a transaction header, read from its tokens in
+/// source order (#2932). The one rule both converters use: red
+/// `convert_transaction` and green `convert_transaction_header`.
+///
+/// `tokens` is the header region, as for [`first_header_defect`]. Each item
+/// is a token's kind and, for a `STRING`, its decoded value (`None` for every
+/// other kind, and for a `STRING` that does not decode, which is skipped as
+/// before). Kinds other than `STRING`, `ERROR_TOKEN`, `TAG` and `LINK` are
+/// ignored.
+///
+/// beancount assigns strings by count: one string is the narration, two are
+/// the payee and the narration. Three or more are an error there (`Too many
+/// strings`); here the last one is the narration and there is no payee, as
+/// before. That rule reads only the strings. It is not enough once an invalid
+/// token (`ERROR_TOKEN`) stands where a string belongs: the transaction is
+/// kept under error recovery, and counting only the surviving strings moved
+/// them to a different field. In `* "p" <bad>` the one string left was read
+/// as the narration, though it was written as the payee.
+///
+/// The rule, so that no string ever changes field:
+///
+/// - An invalid token occupies a string slot only before the first tag or
+///   link. One after a tag or link is in the tag position, not a string
+///   slot, and changes nothing.
+/// - Two or more strings: the strings alone decide, as above. Two strings
+///   already name both fields, so an invalid token between or around them
+///   leaves each where it is: `* <bad> "p" "n"` and `* "p" <bad> "n"` both
+///   give payee `p`, narration `n`.
+/// - One string: it is the payee when an invalid token follows it in the
+///   string slots, which then held the narration, now empty. Otherwise it is
+///   the narration, with or without an invalid token before it. So
+///   `* "p" <bad>` gives payee `p` and an empty narration, and `* <bad> "n"`
+///   gives narration `n`.
+/// - No string: no payee, an empty narration.
+///
+/// The invalid token runs to the next blank, as in beancount's lexer, so a
+/// string glued to it is part of it and no string at all: `* "p" <bad>"y"`
+/// has the one string `p`, followed by an invalid token, so payee `p` and an
+/// empty narration. `y` survives in no field, rather than `p` moving into
+/// the narration.
+///
+/// Only the fields are recovered here. The invalid token is reported by the
+/// lexer whatever this returns, so the error count does not depend on it.
+pub(super) fn header_payee_narration<I>(tokens: I) -> (Option<String>, String)
+where
+    I: IntoIterator<Item = (SyntaxKind, Option<String>)>,
+{
+    let mut count: usize = 0;
+    let mut first: Option<String> = None;
+    let mut second: Option<String> = None;
+    let mut last: Option<String> = None;
+    let mut seen_tag_or_link = false;
+    let mut invalid_after_string = false;
+
+    for (kind, decoded) in tokens {
+        match kind {
+            SyntaxKind::STRING => {
+                let Some(s) = decoded else { continue };
+                count += 1;
+                invalid_after_string = false;
+                match count {
+                    1 => first = Some(s),
+                    2 => second = Some(s),
+                    _ => last = Some(s),
+                }
+            }
+            SyntaxKind::ERROR_TOKEN if !seen_tag_or_link && count > 0 => {
+                invalid_after_string = true;
+            }
+            SyntaxKind::TAG | SyntaxKind::LINK => seen_tag_or_link = true,
+            _ => {}
+        }
+    }
+
+    match (count, first, second) {
+        (1, Some(s), _) if invalid_after_string => (Some(s), String::new()),
+        (1, Some(n), _) => (None, n),
+        (2, p, Some(n)) => (p, n),
+        // 3+: the last string is the narration (falls back to the third).
+        (3.., _, _) => (None, last.unwrap_or_default()),
+        _ => (None, String::new()),
+    }
+}
+
 /// Diagnostic text for a defect. `text` is the source slice of the reported
 /// range — the caller has the source, this module does not.
 ///
@@ -509,6 +593,47 @@ mod tests {
             ])),
             None
         );
+    }
+
+    /// #2932: the slot rule of [`header_payee_narration`], over every shape
+    /// it distinguishes. `S` is a string, `E` an invalid token, `T` a tag.
+    #[test]
+    fn test_header_payee_narration_moves_no_string() {
+        fn s(v: &str) -> (SyntaxKind, Option<String>) {
+            (SyntaxKind::STRING, Some(v.to_string()))
+        }
+        let e = || (SyntaxKind::ERROR_TOKEN, None);
+        let t = || (SyntaxKind::TAG, None);
+        let flag = || (SyntaxKind::STAR, None);
+        let cases: Vec<(Vec<(SyntaxKind, Option<String>)>, Option<&str>, &str)> = vec![
+            // Without an invalid token: beancount's count rule.
+            (vec![flag()], None, ""),
+            (vec![flag(), s("n")], None, "n"),
+            (vec![flag(), s("p"), s("n")], Some("p"), "n"),
+            (vec![flag(), s("a"), s("b"), s("c"), s("d")], None, "d"),
+            // E S: the string is the narration.
+            (vec![flag(), e(), s("n")], None, "n"),
+            // S E: the string keeps the payee slot; the narration is empty.
+            (vec![flag(), s("p"), e()], Some("p"), ""),
+            (vec![flag(), e(), s("p"), e()], Some("p"), ""),
+            // Two strings decide whatever surrounds them.
+            (vec![flag(), e(), s("p"), s("n")], Some("p"), "n"),
+            (vec![flag(), s("p"), e(), s("n")], Some("p"), "n"),
+            (vec![flag(), s("p"), s("n"), e()], Some("p"), "n"),
+            // An invalid token after a tag is in no string slot.
+            (vec![flag(), s("n"), t(), e()], None, "n"),
+            (vec![flag(), s("p"), e(), t()], Some("p"), ""),
+            // Only an invalid token: nothing to place.
+            (vec![flag(), e()], None, ""),
+            // A STRING that does not decode is skipped.
+            (vec![flag(), (SyntaxKind::STRING, None), s("n")], None, "n"),
+        ];
+        for (tokens, payee, narration) in cases {
+            let shape = format!("{tokens:?}");
+            let (p, n) = header_payee_narration(tokens);
+            assert_eq!(p.as_deref(), payee, "{shape}");
+            assert_eq!(n, narration, "{shape}");
+        }
     }
 
     /// Only the FIRST defect is reported: `A:*:B` lexes into five tokens that

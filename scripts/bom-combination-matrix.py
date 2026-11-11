@@ -21,6 +21,11 @@ against it row by row, without needing Python at test time.
           beancount, whose account type
           admits a non-ASCII first character)
        C  a lone capital glued to a BOM       `A<BOM>b{i}`
+       k  a BOM-led account beancount reads   `<BOM>assets:A{i}`
+          only with its BOM (no account of
+          rledger's follows the BOM)
+       T  a BOM-led account with an invalid   `<BOM>Assets:A{i}$x`
+          tail glued to it
 
    Line-start prefixes (`PREFIXES`), put before the line, so before the
    indentation of an indented line:
@@ -29,7 +34,7 @@ against it row by row, without needing Python at test time.
        bom             a BOM glued to whatever starts the line
        glued           a BOM glued to an invalid run, then a space (`<BOM>g `)
        glued-number    a BOM glued to a number, then an invalid run (`<BOM>12$ `)
-       glued-currency  the same with a currency (`<BOM>USD$ `)
+       bom-bom         two BOMs glued to whatever starts the line
 
    Contexts (`CONTEXTS`): the line on its own, after an invalid account, after
    an invalid token, after a number (a grammar error), on a transaction
@@ -59,25 +64,37 @@ builder raise; the script names each one on stderr).
 Run it where beancount 3.2.3 is installed (`nix develop .#bench`, or the
 compat container):
 
-    python3 -I scripts/bom-combination-matrix.py \\
+    python3 -I scripts/bom-combination-matrix.py --main-binary MAIN_BINARY \\
         > crates/rustledger-parser/tests/data/bom_combination_matrix.tsv
+
+Pass `--main-binary` the `parse_error_lines` example built from the main
+branch the matrix is checked against (`cargo build --release -p
+rustledger-loader --no-default-features --example parse_error_lines` there):
+its counts, and both sides' counts for the input with its BOMs replaced by
+ordinary characters (`analog`), let the test tell a line rledger counts
+further from beancount than main only because main miscounted a BOM.
 
 Output, one line per case, tab-separated:
 
-    <source>  <counts>
+    <source>  <beancount>  <main>  <beancount analog>  <main analog>
 
 `<source>` is the input with each U+FEFF written `<BOM>`, each `\\n` written
 `\\\\n`, each `\\r` `\\\\r` and each tab `\\\\t` (no generated input holds a
-backslash or a `<`). `<counts>` is `line:count` pairs, comma-separated,
-ascending, empty when beancount reports nothing. Changing the sets here needs
-nothing in the Rust test: it reads the sources from the table.
+backslash or a `<`). Each count column is `line:count` pairs,
+comma-separated, ascending, empty when there is no error; an unclosed
+`pushtag` / `pushmeta` is line 0 on both sides, as in the parity harness.
+Changing the sets here needs nothing in the Rust test: it reads the sources
+from the table.
 """
 
+import argparse
 import importlib.util
 import itertools
 import json
 import os
 import random
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,6 +115,8 @@ TOKENS = {
     "N": "$n{i}",
     "K": BOM + "Assets:A{i}",
     "C": "A" + BOM + "b{i}",
+    "k": BOM + "assets:A{i}",
+    "T": BOM + "Assets:A{i}$x",
 }
 
 PREFIXES = {
@@ -107,7 +126,8 @@ PREFIXES = {
     # A BOM glued to a token that lexes here, then to an invalid one: one
     # invalid token in beancount, the whole blank-free run.
     "glued-number": BOM + "12$ ",
-    "glued-currency": BOM + "USD$ ",
+    # Two BOMs, so a run of line-start BOMs comes before each token.
+    "bom-bom": BOM + BOM,
 }
 
 # (name, text before the line, the line with a `{T}` slot, text after it)
@@ -152,6 +172,18 @@ EXTRA = [
     "2024-01-02 *\n  " + BOM + "; c\n",
     "2024-01-02 price USD 1 " + BOM + "EUR\n  source: \"x\"\n",
     "2024-01-02 query \"q\" " + BOM + "\"select 1\"\r\n  kk: 1\r\n",
+    BOM + "* " + BOM + "Assets:A\n",
+    BOM + "* x\t" + BOM + "Assets:A\n",
+    "$x " + BOM + "assets:A\n",
+    "$x " + BOM + "1:A\n",
+    "$x " + BOM + ":A\n",
+    "$x " + BOM + "-:A\n",
+    BOM + BOM + "Assets:A$x\n",
+    BOM + "Assets:A x" + BOM + "y\n",
+    BOM + BOM + "Assets:A x" + BOM + "y\n",
+    BOM + ";c " + BOM + "x\n",
+    BOM + "%c " + BOM + "x\n",
+    "2024-01-02 *\r\n  Assets:A  1 A\r\n",
 ]
 
 PROBE_SEED = 2931
@@ -340,10 +372,52 @@ def counts_in_child(parity, is_not_syntax, src):
     return ",".join(f"{line}:{n}" for line, n in sorted(counts.items()))
 
 
+# A run of BOMs beancount reads as an account's first character: it is
+# followed by an account's continuation characters, a `:` and more.
+BOM_ACCOUNT = re.compile(
+    "\ufeff+(?=[A-Za-z0-9\\-\u0080-\U0010ffff]*:[A-Za-z0-9\u0080-\U0010ffff])"
+)
+
+
+def analog(src):
+    """`src` with its BOMs replaced by ordinary characters that lex alike:
+    a run beancount reads into an account by `Ü` (one more account
+    character there too), any other run by `$` (an invalid token's start)."""
+    return re.sub("\ufeff+", "$", BOM_ACCOUNT.sub("Ü", src))
+
+
+def rledger_cells(binary, sources):
+    """The `parse_error_lines` binary's per-line counts for each source, an
+    unclosed `pushtag` / `pushmeta` at line 0 as in the parity harness."""
+    frames = b"".join(
+        f"{i}\n{len(s.encode())}\n".encode() + s.encode() for i, s in enumerate(sources)
+    )
+    out = subprocess.run([binary], input=frames, capture_output=True, check=True)
+    cells = {}
+    for line in out.stdout.decode().splitlines():
+        result = json.loads(line)
+        counts = {}
+        for at, code, _ in result["errors"]:
+            at = 0 if code in ("P0021", "P0023") else at
+            counts[at] = counts.get(at, 0) + 1
+        cells[int(result["id"])] = ",".join(
+            f"{at}:{n}" for at, n in sorted(counts.items())
+        )
+    return [cells[i] for i in range(len(sources))]
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--main-binary",
+        required=True,
+        help="the parse_error_lines example built from main",
+    )
+    args = ap.parse_args()
     parity = load("parity", REPO / "scripts/compat-parse-error-parity.py")
     is_not_syntax = load("matrix", REPO / "scripts/stray-char-matrix.py").is_not_syntax
     seen = set()
+    rows = []
     sources = itertools.chain(
         matrix_cases(), (HEAD + extra for extra in EXTRA), probe_cases()
     )
@@ -352,10 +426,15 @@ def main():
             continue
         seen.add(src)
         cells = counts_in_child(parity, is_not_syntax, src)
-        if cells is None:
+        analog_cells = counts_in_child(parity, is_not_syntax, analog(src))
+        if cells is None or analog_cells is None:
             print(f"left out, beancount crashed or raised: {src!r}", file=sys.stderr)
             continue
-        sys.stdout.write(f"{escape(src)}\t{cells}\n")
+        rows.append((src, cells, analog_cells))
+    main = rledger_cells(args.main_binary, [src for src, _, _ in rows])
+    main_analog = rledger_cells(args.main_binary, [analog(src) for src, _, _ in rows])
+    for (src, cells, analog_cells), m, ma in zip(rows, main, main_analog):
+        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\n")
 
 
 if __name__ == "__main__":

@@ -4937,20 +4937,32 @@ fn bom_token_starts_its_line(before: &str, text: &str) -> bool {
 }
 
 /// Whether the invalid token `text`, starting at byte `start` of `source`, is
-/// a run of BOMs glued to an account (`$x <BOM>Assets:A`), which the lexer
-/// keeps as a token of its own (`logos_lexer::bom_run_before_account`).
-/// beancount reads the run into the account, so it is none of beancount's
-/// invalid tokens: like a BOM that starts its line, it is reported by the
-/// line's `BomInDirectiveBody` alone and counts as no invalid token (#2928).
+/// BOMs beancount reads into an account (`logos_lexer::bom_led_account`):
+/// either a run of BOMs with an account of its own right after it, which the
+/// lexer keeps as a token of its own (`$x <BOM>Assets:A`, and the last BOM of
+/// a run that starts the line), or the BOMs together with the rest of
+/// beancount's account where no account of rledger's follows them
+/// (`$x <BOM>assets:A`). Either way it is none of beancount's invalid tokens:
+/// it is reported by the line's `BomInDirectiveBody` alone and counts as no
+/// invalid token (#2928). The one predicate every count of invalid tokens
+/// asks (`report_invalid_tokens_of_error_line`, `invalid_runs`,
+/// `quiet_after_invalid_tokens`, `holds_an_invalid_token`).
 ///
 /// Constant work past the token unless an account may follow: a token in a
 /// long run of BOMs sees the next BOM and stops there.
-fn is_bom_run_before_account(source: &str, start: usize, text: &str) -> bool {
-    !text.is_empty()
-        && text.chars().all(|c| c == crate::bom::BOM_CHAR)
-        && source.get(start + text.len()..).is_some_and(|rest| {
-            !rest.starts_with(crate::bom::BOM_CHAR) && crate::logos_lexer::starts_with_account(rest)
-        })
+fn is_bom_account_token(source: &str, start: usize, text: &str) -> bool {
+    if !text.starts_with(crate::bom::BOM_CHAR) {
+        return false;
+    }
+    let Some(from) = source.get(start..) else {
+        return false;
+    };
+    if text.chars().all(|c| c == crate::bom::BOM_CHAR) {
+        !from[text.len()..].starts_with(crate::bom::BOM_CHAR)
+            && crate::logos_lexer::account_follows_bom_run(from)
+    } else {
+        crate::logos_lexer::bom_led_account(from).is_some_and(|(_, end)| end == text.len())
+    }
 }
 
 /// Pick the most specific `ParseError` variant for an
@@ -9270,13 +9282,17 @@ pub(super) fn report_invalid_tokens_of_error_line(
     };
     for range in invalid {
         let text = stripped.get(range.clone()).unwrap_or_default();
-        // A run of BOMs glued to an account: no invalid token of beancount's.
-        if is_bom_run_before_account(stripped, range.start, text) {
-            continue;
-        }
+        let bom_account = is_bom_account_token(stripped, range.start, text);
         if is_line_start_bom_token(stripped, range.start, text) {
             bom_diagnostic_spent = true;
-            line_start_boms_end = Some(range.end);
+            // An account of its own after the BOMs ends beancount's token
+            // there (`<BOM><BOM>Assets:A$x` is the account, then `$x`), so
+            // nothing after it is glued to them.
+            line_start_boms_end = (!bom_account).then_some(range.end);
+            continue;
+        }
+        // BOMs beancount reads into an account: none of its invalid tokens.
+        if bom_account {
             continue;
         }
         // In the same blank-free run as the BOMs that start the line, glued
@@ -9360,7 +9376,9 @@ fn invalid_runs(rest: &str) -> Vec<std::ops::Range<usize>> {
             | Token::Shebang(_)
             | Token::EmacsDirective(_) => break,
             _ => {
-                let invalid = matches!(token, Token::Error(_)) || after_lone_capital;
+                // BOMs beancount reads into an account are no invalid token.
+                let invalid = matches!(token, Token::Error(t) if !is_bom_account_token(rest, span.start, t))
+                    || after_lone_capital;
                 match run.as_mut() {
                     Some((range, bad)) => {
                         range.end = span.end;
@@ -9437,7 +9455,7 @@ fn quiet_after_invalid_tokens(
                     if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
                         == K::ERROR_TOKEN
                         && !is_line_start_bom_token(stripped, at, t.text())
-                        && !is_bom_run_before_account(stripped, at, t.text())
+                        && !is_bom_account_token(stripped, at, t.text())
                     {
                         invalid.push(at);
                         // The unread rest of a heading line: the invalid
@@ -9700,10 +9718,10 @@ fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
     use rowan::Language as _;
     let mut stack = vec![node.children()];
     let mut before = "";
-    // A token of BOMs alone, held until the token after it says whether it is
-    // glued to an account (`is_bom_run_before_account`), which makes it none
-    // of beancount's invalid tokens.
-    let mut pending_boms = false;
+    // A token of BOMs alone, held until the token after it says whether an
+    // account of its own follows it (`is_bom_account_token`), which makes it
+    // none of beancount's invalid tokens.
+    let mut pending_boms: Option<&str> = None;
     while let Some(children) = stack.last_mut() {
         match children.next() {
             None => {
@@ -9712,22 +9730,27 @@ fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
             Some(rowan::NodeOrToken::Node(inner)) => stack.push(inner.children()),
             Some(rowan::NodeOrToken::Token(t)) => {
                 let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
-                if std::mem::take(&mut pending_boms) && kind != crate::SyntaxKind::ACCOUNT {
-                    return true;
+                if let Some(boms) = pending_boms.take() {
+                    let joined = format!("{boms}{}", t.text());
+                    if !is_bom_account_token(&joined, 0, boms) {
+                        return true;
+                    }
                 }
                 if kind == crate::SyntaxKind::ERROR_TOKEN
                     && !bom_token_starts_its_line(before, t.text())
                 {
-                    if !t.text().chars().all(|c| c == crate::bom::BOM_CHAR) {
+                    let text = t.text();
+                    if text.chars().all(|c| c == crate::bom::BOM_CHAR) {
+                        pending_boms = Some(text);
+                    } else if !is_bom_account_token(text, 0, text) {
                         return true;
                     }
-                    pending_boms = true;
                 }
                 before = t.text();
             }
         }
     }
-    pending_boms
+    pending_boms.is_some()
 }
 
 /// Report a repeated metadata key on a transaction or a posting, as

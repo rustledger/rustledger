@@ -506,3 +506,30 @@ fn test_parse_line_start_bom_heading_rest_is_not_glued() {
     let result = parse_both(&src);
     assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
 }
+
+/// beancount lets a BOM be an account's first character, so a BOM-led word
+/// its account rule reads is one account there (its name rejected on load),
+/// whether or not an account of rledger's follows the BOM: `<BOM>assets:A`,
+/// `<BOM>1:A`, `<BOM>:A` and `<BOM>-:A` add no parse error after `$x`. It
+/// ends where that account does, so a tail glued to it is one more invalid
+/// token; and a line-start run before one is the line's first token. Each
+/// count is bean-check's.
+#[test]
+fn test_parse_bom_led_account_shapes_count_as_beancount() {
+    for (line, errors) in [
+        (format!("$x {BOM}assets:A"), 1),
+        (format!("$x {BOM}1:A"), 1),
+        (format!("$x {BOM}:A"), 1),
+        (format!("$x {BOM}-:A"), 1),
+        (format!("{BOM}* {BOM}Assets:A"), 1),
+        (format!("{BOM}* x\t{BOM}Assets:A"), 2),
+        (format!("{BOM}{BOM}Assets:A$x"), 2),
+        (format!("{BOM}Assets:A x{BOM}y"), 2),
+        (format!("{BOM}{BOM}Assets:A x{BOM}y"), 2),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+        assert!(bom_errors(&result) >= 1, "{src:?}: {:?}", result.errors);
+    }
+}

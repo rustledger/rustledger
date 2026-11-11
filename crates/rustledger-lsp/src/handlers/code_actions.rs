@@ -179,7 +179,7 @@ fn bom_removal_actions(
     let title = if edits.len() == 1 {
         "Remove BOM (U+FEFF)".to_string()
     } else {
-        format!("Remove {} BOM bytes (U+FEFF)", edits.len())
+        format!("Remove {} BOMs (U+FEFF)", edits.len())
     };
 
     #[allow(clippy::mutable_key_type)]

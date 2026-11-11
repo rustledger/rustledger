@@ -200,3 +200,44 @@ fn included_name_option_does_not_root_its_own_file() {
     let codes: Vec<&str> = ledger.errors.iter().map(|e| e.code.as_str()).collect();
     assert_eq!(codes, ["E1005"], "{:?}", ledger.errors);
 }
+
+/// `documents` in an included file is ignored, as in beancount 3.2.3:
+/// `loader.load_file` gives `documents == []` for it and bean-check exits 0
+/// even when the root is missing. So it is the E7009 warning at its line,
+/// never scanned for documents and never checked for existence (no E7006),
+/// where rledger accumulated it and reported a missing root as an error.
+#[test]
+fn test_load_included_documents_is_ignored() {
+    let t = tree(
+        "2024-01-01 open Assets:A\n",
+        "option \"documents\" \"/nonexistent/rledger-2925-docs\"\n",
+    );
+    let ledger = load(&t.main);
+    let sub = t.sub.display().to_string();
+    assert_eq!(
+        option_diagnostics(&ledger),
+        [("E7009".to_string(), sub, 1, false)]
+    );
+    assert!(ledger.options.documents.is_empty(), "nothing is scanned");
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+}
+
+/// The same root in the top-level file still applies there: one E7006 at
+/// the top-level line (bean-check: one error), none for the include's copy.
+#[test]
+fn test_load_documents_in_both_files_is_one_e7006() {
+    let t = tree(
+        "option \"documents\" \"/nonexistent/rledger-2925-docs\"\n\
+         2024-01-01 open Assets:A\n",
+        "option \"documents\" \"/nonexistent/rledger-2925-docs\"\n",
+    );
+    let ledger = load(&t.main);
+    let (main, sub) = (t.main.display().to_string(), t.sub.display().to_string());
+    assert_eq!(
+        option_diagnostics(&ledger),
+        [
+            ("E7009".to_string(), sub, 1, false),
+            ("E7006".to_string(), main, 2, true),
+        ]
+    );
+}

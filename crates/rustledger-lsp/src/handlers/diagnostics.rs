@@ -190,11 +190,11 @@ fn option_error_severity(error: &LedgerError) -> DiagnosticSeverity {
 /// published on that file, not the main one.
 fn option_error_file_id(error: &LedgerError, source_map: &SourceMap) -> Option<u16> {
     let location = error.location.as_ref()?;
-    let index = source_map
+    let file = source_map
         .files()
         .iter()
-        .position(|file| file.path == location.file)?;
-    u16::try_from(index).ok()
+        .find(|file| file.path == location.file)?;
+    u16::try_from(file.id).ok()
 }
 
 /// The byte length of an `option` line's directive: up to a `;` comment

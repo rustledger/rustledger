@@ -391,8 +391,11 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ## Option Errors (E7xxx)
 
-Every option diagnostic is reported at the file and line of its `option`, as
-`bean-check` reports them, an included file's among them.
+Every option diagnostic is reported at the file and line of its `option`, an
+included file's among them. `bean-check` locates its option errors the same
+way, with one difference: rustledger reports `E7006` (a missing `documents`
+root) at its `option` line, where bean-check reports it at line 0 of the main
+file.
 
 ### E7001: Unknown Option
 
@@ -470,9 +473,11 @@ letters, digits and `-`, e.g. `option "name_equity" "Capital"`.
 ledger, with a value beancount accepts. Most options are taken from the
 top-level file only, so the included value has no effect.
 
-Options that describe the file declaring them still apply from anywhere:
-`operating_currency`, `documents`, `insert_pythonpath`, `display_precision`,
-and `plugin` directives. Everything else, notably `booking_method` and
+The options beancount aggregates across files still apply from anywhere:
+`operating_currency`, `display_precision` and `insert_pythonpath`, and
+`plugin` directives. `documents` is not one of them: as in beancount, an
+included `documents` root is ignored, never scanned for documents or checked
+for existence. Everything else, notably `booking_method` and
 `inferred_tolerance_default`, comes from the top-level ledger, so a sub-ledger
 cannot change how the whole tree books or what counts as balanced.
 

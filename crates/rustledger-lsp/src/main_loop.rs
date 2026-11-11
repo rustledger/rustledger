@@ -658,8 +658,10 @@ impl MainLoopState {
         let inner: Result<serde_json::Value, String> = match method.as_str() {
             Shutdown::METHOD => {
                 self.shutdown_requested = true;
-                // After `shutdown` the server must not publish anything
-                // further, so drop the debounced passes still owed.
+                // Drop the debounced passes still owed: nothing should be
+                // published after `shutdown`. `handle_notification` ignores
+                // document and watched-file notifications from here on, so
+                // none can be scheduled or published again either.
                 self.diagnostics_schedule.clear();
                 Ok(serde_json::Value::Null)
             }
@@ -1675,6 +1677,14 @@ impl MainLoopState {
 
     /// Handle an LSP notification (no response expected).
     fn handle_notification(&mut self, notif: lsp_server::Notification) {
+        // After `shutdown`, the client may send only `exit` (LSP 3.17
+        // §Lifecycle), and the server should not act on anything else. A
+        // document or watched-file notification would otherwise run (or
+        // schedule) a diagnostics pass and publish after shutdown.
+        if self.shutdown_requested && notif.method != "exit" {
+            tracing::debug!("Ignoring {} after shutdown", notif.method);
+            return;
+        }
         // Notifications are handled synchronously - this is critical for correctness
         match notif.method.as_str() {
             DidOpenTextDocument::METHOD => {
@@ -3501,6 +3511,76 @@ mod tests {
             h.state.run_due_diagnostics();
             assert_eq!(h.state.diagnostics_passes, before);
             assert!(for_doc(&h.published(), &uri).is_empty());
+        }
+
+        /// After `shutdown`, document and watched-file notifications are
+        /// ignored, so nothing is scheduled or published; `exit` still works.
+        #[test]
+        fn test_notifications_after_shutdown_are_ignored() {
+            let mut h = Harness::new();
+            let a = h.uri("a.beancount");
+            let b = h.uri("b.beancount");
+            let other = h.uri("other.beancount");
+            h.open(&a, &version_text(0));
+            h.state.handle_request(lsp_server::Request::new(
+                lsp_server::RequestId::from(1),
+                Shutdown::METHOD.to_string(),
+                serde_json::Value::Null,
+            ));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            let notify = |h: &mut Harness, method: &str, params: serde_json::Value| {
+                h.state
+                    .handle_notification(lsp_server::Notification::new(method.to_string(), params));
+            };
+            notify(
+                &mut h,
+                DidOpenTextDocument::METHOD,
+                serde_json::to_value(lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: b.clone(),
+                        language_id: "beancount".to_string(),
+                        version: 1,
+                        text: version_text(1),
+                    },
+                })
+                .expect("params"),
+            );
+            notify(
+                &mut h,
+                DidChangeTextDocument::METHOD,
+                serde_json::to_value(change_params(&a, 2, &version_text(2))).expect("params"),
+            );
+            notify(
+                &mut h,
+                DidChangeWatchedFiles::METHOD,
+                serde_json::to_value(lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: other,
+                        typ: lsp_types::FileChangeType::CHANGED,
+                    }],
+                })
+                .expect("params"),
+            );
+
+            assert_eq!(h.state.diagnostics_passes, before, "no pass after shutdown");
+            assert_eq!(
+                h.state.next_diagnostics_deadline(),
+                None,
+                "nothing scheduled"
+            );
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert!(h.published().is_empty(), "nothing published after shutdown");
+            assert_eq!(
+                h.state.get_document_data(&a).0,
+                version_text(0),
+                "the change was not applied"
+            );
+
+            notify(&mut h, "exit", serde_json::Value::Null);
+            assert_eq!(h.state.pending_exit_code, Some(0), "exit is still handled");
         }
 
         /// A `didChange` with no `didOpen` before it is a client protocol

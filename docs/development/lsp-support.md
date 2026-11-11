@@ -54,7 +54,11 @@ does. It runs immediately on `didOpen` and on watched-file changes.
 `didChange` passes are debounced (#2940): the edit is applied at once,
 but the pass runs only after the document has gone 200 ms without
 another change, so a burst of edits costs one pass, computed from the
-final text. `didSave` is never received: the server advertises FULL
+final text. A `didChange` for a document that has no buffer (a
+non-file URI, or a change with no prior `didOpen`) still publishes
+immediately from the text it carries, since a deferred pass would have
+nothing to read. After `shutdown`, pending passes are dropped and
+document notifications are ignored. `didSave` is never received: the server advertises FULL
 sync with no save option. The lens follows that verdict, and a
 `codeLens` request first runs any pass still pending for its document,
 so it never reads the verdict of text the user has since edited.

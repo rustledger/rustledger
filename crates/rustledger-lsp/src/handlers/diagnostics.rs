@@ -1198,13 +1198,13 @@ pub(crate) struct FileDiagTarget<'a> {
 /// main file) option warnings, and per-file import-review hints. The result is
 /// aligned 1:1 with `targets`.
 ///
-/// `overlay` is the fresh parse of every open buffer (current file included),
-/// applied to the ledger snapshot so unsaved edits are
-/// reflected — the same overlay the current-file [`all_diagnostics`] path
-/// builds. `primary_parse` / `primary_file_id` identify the file being edited,
-/// whose fresh plugin declarations replace the ledger's for that file (mirrors
-/// the single-file path); unopened files are not edited, so their ledger
-/// plugins are already current.
+/// `overlay` is the fresh parse of the open buffers to validate with, applied
+/// to the ledger snapshot so unsaved edits are reflected; which buffers belong
+/// in it is the caller's rule (`MainLoopState::publish_diagnostics`).
+/// `primary_parse` / `primary_file_id` identify the file being edited, whose
+/// fresh plugin declarations replace the ledger's for that file (mirrors the
+/// single-file path); unopened files are not edited, so their ledger plugins
+/// are already current.
 ///
 /// Requires a loaded ledger; falls back to parse-only diagnostics otherwise
 /// (the caller only uses this path for multi-file ledgers).
@@ -1225,21 +1225,16 @@ pub(crate) fn ledger_diagnostics_multi(
 
     // Plugin set for the shared validation and the per-file plugin NOTES
     // (E8006). Start from the ledger's stored plugins, and replace the
-    // primary (edited) file's plugins with its fresh parse ONLY when that file
-    // is part of the ledger AND parsed cleanly (#1813). A buffer broken
-    // mid-edit recovers a partial, empty or wrong `.plugins` list: an
-    // unterminated `plugin "auto_acc` swallows the next line into the plugin
-    // name. Injecting it would drop the plugin from the whole-ledger
-    // validation the unopened files run against, and they would gain phantom
-    // E1001s on each keystroke, in files `rledger check` on that text may not
-    // even load (the include went into the string). The directive overlay is
-    // not held back the same way (#2949): the edited file's own diagnostics
-    // must come from its text, so the caller instead holds back republishing
-    // the unopened files while the edited buffer has a parse error. When the
-    // current buffer isn't a ledger file at all, its plugins must not be
-    // injected either. In both cases keep the ledger's stored plugins.
+    // primary (edited) file's plugins with its fresh parse, parse error or
+    // not: a buffer's own diagnostics are what `rledger check` reports for its
+    // text, plugins included (#2949). The caller passes a primary only when
+    // its parse belongs in this validation: a buffer with a parse error is
+    // left out of the view the OTHER files are validated against (#1813), so
+    // what it recovered (an unterminated `plugin "auto_acc` swallows the next
+    // line into the plugin name) never reaches them. See
+    // `MainLoopState::publish_diagnostics`.
     let merged_plugins: Vec<Plugin> = match primary_file_id {
-        Some(fid) if primary_parse.errors.is_empty() => {
+        Some(fid) => {
             let primary_fid = fid as usize;
             ledger
                 .plugins
@@ -1249,7 +1244,7 @@ pub(crate) fn ledger_diagnostics_multi(
                 .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
                 .collect()
         }
-        _ => ledger.plugins.clone(),
+        None => ledger.plugins.clone(),
     };
     let plugin_ctx = if merged_plugins.is_empty() {
         None
@@ -3090,93 +3085,12 @@ plugin "auto_accounts"
         );
     }
 
-    /// #1813 review: when the CURRENT file's fresh parse is broken, its
-    /// recovered plugins must NOT replace the stored ones in the whole-ledger
-    /// validation the unopened files run against. Otherwise `auto_accounts`
-    /// (declared in the current file) vanishes and the unopened file gets
-    /// phantom E1001s: on every keystroke of `plugin "auto_acc`, whose
-    /// unterminated string swallows the `include` after it, so that
-    /// `rledger check` on the same text never loads `b` at all.
-    #[test]
-    fn broken_current_parse_keeps_stored_plugins_for_cross_file_validation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main = dir.path().join("main.beancount");
-        // b (unopened) uses accounts with no explicit `open`; auto_accounts
-        // (declared in main) must synthesize the opens so there's no E1001.
-        std::fs::write(
-            dir.path().join("b.beancount"),
-            "2024-01-02 * \"x\"\n  Assets:New  10 USD\n  Equity:Opening-Balances  -10 USD\n",
-        )
-        .expect("write b");
-        std::fs::write(&main, "plugin \"auto_accounts\"\ninclude \"b.beancount\"\n")
-            .expect("write main");
-
-        let mut ls = LedgerState::new();
-        ls.load(&main).expect("load ledger");
-        assert!(
-            ls.ledger()
-                .expect("ledger")
-                .plugins
-                .iter()
-                .any(|p| p.name == "auto_accounts"),
-            "fixture must record the auto_accounts plugin"
-        );
-        let (b_id, b_source): (u16, SourceText) = ls
-            .ledger()
-            .expect("ledger")
-            .source_map
-            .files()
-            .iter()
-            .find(|f| f.path.ends_with("b.beancount"))
-            .map(|f| (f.id as u16, f.source.clone()))
-            .expect("b in ledger");
-        let b_parse = parse(&b_source);
-
-        // The current file (main, id 0) parses BROKEN: in the middle of typing
-        // the plugin name (the plugin recovered is named `auto_acc\ninclude `),
-        // and replaced by garbage (no plugin recovered at all).
-        for broken in [
-            "plugin \"auto_acc\ninclude \"b.beancount\"\n",
-            "@@@ not valid beancount\n",
-        ] {
-            let broken_main = parse(broken);
-            assert!(!broken_main.errors.is_empty(), "{broken:?} must be broken");
-            assert!(
-                !broken_main.plugins.iter().any(|p| p.0 == "auto_accounts"),
-                "{broken:?} must not recover auto_accounts (else the test proves nothing)"
-            );
-
-            let targets = [FileDiagTarget {
-                file_id: b_id,
-                source: &b_source,
-                parse: &b_parse,
-            }];
-            let overlay = [(0u16, broken_main.directives.as_slice())];
-            let per_file = ledger_diagnostics_multi(
-                &ls,
-                Some(0),
-                &broken_main,
-                &overlay,
-                &targets,
-                PositionEncoding::Utf16,
-            );
-
-            let b_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
-            assert!(
-                !b_codes.iter().any(|c| c == "E1001"),
-                "{broken:?}: auto_accounts (from the ledger) must still open the \
-                 unopened file's accounts while the current file's parse is broken: \
-                 {b_codes:?}"
-            );
-        }
-    }
-
     /// A parse error in the CURRENT file does not stop the whole-ledger
-    /// validation, for it or for the files it includes (#2949): what parsed in
-    /// the buffer is validated, as `rledger check` validates a file with a
-    /// parse error. `auto_accounts` still opens the accounts the unopened file
-    /// uses (no phantom E1001 there, #1813), and the buffer's unbalanced
-    /// transaction is reported beside its parse error.
+    /// validation of it (#2949): what parsed in the buffer is validated, as
+    /// `rledger check` validates a file with a parse error, so the buffer's
+    /// unbalanced transaction is reported beside its parse error. (Which view
+    /// the OTHER files are validated against is `MainLoopState`'s rule, tested
+    /// there.)
     #[test]
     fn current_parse_error_still_validates_the_ledger() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3193,15 +3107,6 @@ plugin "auto_accounts"
 
         let mut ls = LedgerState::new();
         ls.load(&main).expect("load ledger");
-        let (b_id, b_source): (u16, SourceText) = ls
-            .ledger()
-            .expect("ledger")
-            .source_map
-            .files()
-            .iter()
-            .find(|f| f.path.ends_with("b.beancount"))
-            .map(|f| (f.id as u16, f.source.clone()))
-            .expect("b in ledger");
 
         // The current file (main, id 0), edited: a line that does not parse,
         // and an unbalanced transaction after it.
@@ -3211,19 +3116,11 @@ plugin "auto_accounts"
         let main_parse = parse(main_source);
         assert!(!main_parse.errors.is_empty(), "fixture must be broken");
 
-        let b_parse = parse(&b_source);
-        let targets = [
-            FileDiagTarget {
-                file_id: 0,
-                source: main_source,
-                parse: &main_parse,
-            },
-            FileDiagTarget {
-                file_id: b_id,
-                source: &b_source,
-                parse: &b_parse,
-            },
-        ];
+        let targets = [FileDiagTarget {
+            file_id: 0,
+            source: main_source,
+            parse: &main_parse,
+        }];
         let overlay = [(0u16, main_parse.directives.as_slice())];
         let per_file = ledger_diagnostics_multi(
             &ls,
@@ -3243,10 +3140,9 @@ plugin "auto_accounts"
             main_codes.iter().any(|c| c == "E3001"),
             "the unbalanced transaction after it is validated: {main_codes:?}"
         );
-        let b_codes: Vec<_> = per_file[1].iter().map(get_code).collect();
         assert!(
-            !b_codes.iter().any(|c| c == "E1001"),
-            "auto_accounts must still open the unopened file's accounts: {b_codes:?}"
+            !main_codes.iter().any(|c| c == "E1001"),
+            "auto_accounts, declared in the buffer, opens its accounts: {main_codes:?}"
         );
     }
 
@@ -3689,8 +3585,7 @@ plugin "auto_accounts"
     /// for them here. (`NotBooked` needs an unbooked ledger handed to
     /// validation, which no file can produce; its code is pinned in
     /// rustledger-validate.) `CostPriceCurrencyMismatch` is not here either: a
-    /// file can only reach it with the parse error for the same posting, and
-    /// the LSP holds back booking while a file has parse errors; see
+    /// file can only reach it with the parse error for the same posting; see
     /// `a_written_cost_price_currency_mismatch_buy_one_error_sale_two`.
     #[test]
     fn every_booking_failure_has_one_code_on_both_surfaces() {

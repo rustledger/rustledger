@@ -29,8 +29,8 @@ diagnostic vector for the file — and renders one of:
 - `Balance: X USD` (neutral, no symbol) in any of three user-facing
   conditions:
   - Cold start, before the first `publish_diagnostics` for the file.
-  - Validation was skipped this turn (file > 500 KB or buffer has
-    parse errors elsewhere — see `validation_would_run`).
+  - Validation was skipped this turn (file > 500 KB, see
+    `validation_would_run`; a parse error does not skip it).
   - A non-balance non-HINT diagnostic (e.g., `E1001 AccountNotOpen`
     ERROR, `FutureDate` WARNING) anchors
     on the balance directive's line — the diagnostic explains a

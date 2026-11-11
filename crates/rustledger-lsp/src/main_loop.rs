@@ -2134,10 +2134,11 @@ impl MainLoopState {
         // write lock (needed by the cache-aware iterator) is released
         // before we start the file_id lookups.
         //
-        // We skip:
-        //   - the current file (its fresh parse is already in `result`)
-        //   - any buffer whose fresh parse has errors (keeping the stale
-        //     ledger directives is better than overlaying a partial parse)
+        // We skip the current file (its fresh parse is already in `result`).
+        // A buffer whose fresh parse has errors is overlaid too: what parsed
+        // is validated, as `rledger check` validates a file with a parse
+        // error (#2949), and the buffer's diagnostics are mapped onto its
+        // text, which the stale ledger directives do not match.
         //
         // Each entry returns the canonicalized path + the cached Arc of
         // the parse result, which owns the directives we hand into
@@ -2148,9 +2149,6 @@ impl MainLoopState {
                 .filter_map(|(path, _text, parsed)| {
                     let canonical = path.canonicalize().ok()?;
                     if Some(&canonical) == current_canonical_path.as_ref() {
-                        return None;
-                    }
-                    if !parsed.errors.is_empty() {
                         return None;
                     }
                     Some((canonical, parsed))
@@ -2214,14 +2212,11 @@ impl MainLoopState {
 
         let (diagnostics, cross_file) = if is_multi_file {
             // Shared overlay for the one validation: the current file's fresh
-            // parse (only when it's a ledger file AND clean — overlaying a
-            // partial parse would corrupt validation of the other files) then
+            // parse (when it's a ledger file, parse errors or not, #2949) then
             // every other open buffer.
             let mut overlay: Vec<(u16, &[Spanned<Directive>])> =
                 Vec::with_capacity(1 + other_buffer_overlays.len());
-            if let Some(fid) = current_file_id
-                && result.errors.is_empty()
-            {
+            if let Some(fid) = current_file_id {
                 overlay.push((fid, result.directives.as_slice()));
             }
             overlay.extend_from_slice(&other_buffer_overlays);
@@ -2300,8 +2295,8 @@ impl MainLoopState {
     /// multi-file ledgers.
     ///
     /// Only unopened files are cross-published; open buffers self-publish via
-    /// didOpen/didChange. `overlay` is the fresh parse of every clean open
-    /// buffer (current file included when clean).
+    /// didOpen/didChange. `overlay` is the fresh parse of every open buffer
+    /// (current file included).
     fn multi_file_diagnostics(
         &self,
         ledger_state: &crate::ledger_state::LedgerState,

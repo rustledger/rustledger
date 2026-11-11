@@ -117,19 +117,27 @@ pub fn load_source(source: &str) -> LoadResult {
         validate: false,
         ..Default::default()
     };
+    // The parse errors are taken out before `process`
+    // (`LoadResult::take_parse_errors`), to be reported one by one at their
+    // lines. The entries that did parse are loaded, and validated by
+    // `ledger.validate` / `ledger.load`, as `check` and bean-check validate
+    // them (#2949).
+    let mut parse_failures = Vec::new();
     let ledger = match rustledger_loader::Loader::new()
         .with_filesystem(Box::new(vfs))
         .load(std::path::Path::new("<string>"))
         .map_err(|e| e.to_string())
-        .and_then(|raw| rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string()))
-    {
+        .and_then(|mut raw| {
+            parse_failures = raw.take_parse_errors();
+            rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string())
+        }) {
         Ok(ledger) => ledger,
         Err(e) => {
             // Fatal load/process failure is unexpected for an in-memory source,
             // but surface it rather than panicking. Tag it `validate` (not the
             // default `parse`): a fatal process/plugin failure must not be
-            // wrongly classified as a parse error, which would make the
-            // `ledger.validate`/`query` handlers suppress validation entirely.
+            // wrongly classified as a parse error, which `validate` would count
+            // in its `parse-error-count`.
             return LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
@@ -214,7 +222,21 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
+    let mut errors = Vec::new();
+    let mut error_blocks_queries = Vec::new();
+    for failure in &parse_failures {
+        if let rustledger_loader::LoadError::ParseErrors {
+            errors: parse_errors,
+            ..
+        } = failure
+        {
+            for e in parse_errors {
+                errors.push(Error::new(e.to_string()).with_line(lookup.byte_to_line(e.span.start)));
+                error_blocks_queries.push(failure.blocks_queries());
+            }
+        }
+    }
+    let (ledger_errors, ledger_blocks): (Vec<Error>, Vec<bool>) = ledger
         .errors
         .iter()
         .filter(|e| {
@@ -228,6 +250,8 @@ pub fn load_source(source: &str) -> LoadResult {
         })
         .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
         .unzip();
+    errors.extend(ledger_errors);
+    error_blocks_queries.extend(ledger_blocks);
     let query_refusal = query_refusal_error(&ledger);
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
@@ -557,11 +581,10 @@ fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     if let Some(loc) = &e.location {
         err = err.with_line(loc.line as u32);
     }
-    // The wire `Error` distinguishes only "parse" vs "validate". The
-    // `ledger.validate`/`query` handlers gate semantic validation on
-    // *parse*-phase errors only, so anything that is not a parse error
-    // (booking → "validate", plugin/synth → "plugin") must NOT be reported as
-    // "parse", or it would wrongly suppress validation.
+    // The wire `Error` distinguishes only "parse" vs "validate". Anything
+    // that is not a parse error (booking → "validate", plugin/synth →
+    // "plugin") must NOT be reported as "parse", or `validate` would count it
+    // as one.
     if e.phase != "parse" {
         err = err.validate_phase();
     }

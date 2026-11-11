@@ -455,7 +455,14 @@ use crate::types::{Error, LedgerOptions};
 /// after a booking error, setting the refused transaction aside, so it
 /// reports the `Balance failed` that follows one. An older blob would keep
 /// serving the old errors. (v95 is held by #2931; v96 was never released.)
-pub const CACHE_VERSION: u32 = 97;
+/// v101: loader v69, unchanged. Both payloads move (#2949): a source with a
+/// parse error is booked and validated over the entries that did parse, as
+/// `rledger check` validates it, so a `ParsedLedger` archives those
+/// directives and their validation errors where it archived none, and a
+/// `Ledger` archives each parse error with its code and line where it
+/// archived one line-less `parse errors in <path>`. An older blob would keep
+/// serving the old errors. (v98, v99 and v100 are held by open PRs.)
+pub const CACHE_VERSION: u32 = 101;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

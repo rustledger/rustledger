@@ -7,7 +7,7 @@ use std::path::Path;
 use wasm_bindgen::prelude::*;
 
 use rustledger_core::Directive;
-use rustledger_loader::{FileSystem, LoadError, LoadResult};
+use rustledger_loader::{FileSystem, LoadError};
 use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
@@ -24,30 +24,17 @@ use crate::types::{
 use crate::types::{PluginInfo, PluginResult};
 use crate::utils::LineLookup;
 
-/// Whether a load error stops `validateMultiFile` before it validates.
-///
-/// Not every load error does. `DuplicateInclude` says a file was reached twice
-/// in the include graph; the loader still loaded it exactly once, so the
-/// ledger is complete. It has to be REPORTED (beancount says `Duplicate
-/// filename parsed` and `bean-check` exits 1, as does `rledger check`), and
-/// validation still runs. An include cycle (the file included again was
-/// already read) and an include glob matching nothing (nothing to read) leave
-/// it complete too: the loader's [`LoadError::leaves_ledger_complete`].
-///
-/// This is validation's rule, not the query rule: whether a query answers is
-/// [`LoadError::blocks_queries`] (#2861), which the file-based query
-/// surfaces share.
-fn load_error_is_fatal(error: &LoadError) -> bool {
-    !error.leaves_ledger_complete()
-}
-
-/// Convert [`LoadResult`] errors to detailed Error objects with line/column info.
+/// Convert load errors to detailed Error objects with line/column info,
+/// placed through `source_map` (the load's).
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
-fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
+pub(crate) fn load_errors_to_errors(
+    load_errors: &[LoadError],
+    source_map: &rustledger_loader::SourceMap,
+) -> Vec<Error> {
     let mut errors = Vec::new();
 
-    for load_error in &load_result.errors {
+    for load_error in load_errors {
         match load_error {
             LoadError::ParseErrors {
                 path,
@@ -57,7 +44,7 @@ fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
                 // single-file path (code / phase / hint / file / full span).
                 for parse_error in parse_errors {
                     let span = parse_error.span();
-                    let file = load_result.source_map.get_by_path(path);
+                    let file = source_map.get_by_path(path);
                     let mut err = Error::new(format!("{}: {}", path.display(), parse_error))
                         .with_code(format!("P{:04}", parse_error.kind_code()))
                         .with_phase("parse")
@@ -79,7 +66,7 @@ fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
                 let mut err = Error::new(other.to_string()).with_phase("parse");
                 if let Some(site) = other.include_site() {
                     err = err.with_file(Some(site.file.display().to_string()));
-                    if let Some(file) = load_result.source_map.get(site.file_id as usize) {
+                    if let Some(file) = source_map.get(site.file_id as usize) {
                         let (sl, sc) = file.line_col(site.span.start);
                         let (el, ec) = file.line_col(site.span.end);
                         err = err.with_span((sl as u32, sc as u32), (el as u32, ec as u32));
@@ -579,7 +566,7 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
     };
 
     // Collect load errors with detailed parse error info
-    let mut errors = load_errors_to_errors(&load_result);
+    let mut errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
 
     // Extract options from loader options
     let options = crate::types::LedgerOptions {
@@ -649,7 +636,7 @@ fn validate_with_filesystem(
     let mut loader = Loader::new().with_filesystem(fs);
 
     // Load from entry point
-    let load_result = match loader.load(Path::new(entry_point)) {
+    let mut load_result = match loader.load(Path::new(entry_point)) {
         Ok(result) => result,
         Err(e) => {
             let result = ValidationResult {
@@ -660,15 +647,14 @@ fn validate_with_filesystem(
         }
     };
 
-    // Report every load error, but abort only on one that makes the directive
-    // stream unusable — see `load_error_is_fatal`.
-    let load_errors = load_errors_to_errors(&load_result);
-    if load_result.errors.iter().any(load_error_is_fatal) {
-        return ValidationResult {
-            valid: false,
-            errors: load_errors,
-        };
-    }
+    // Report every load error, then validate whatever loaded: no load error
+    // stops validation, as none stops it in `rledger check`, which reports
+    // them and then runs `process` with them cleared, and in bean-check
+    // (#2949). This used to stop before validating on any load error but a
+    // duplicate include, an include cycle or an empty glob, so one syntax
+    // error, or an include of a missing file, hid every other finding.
+    let mut errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
+    load_result.errors.clear();
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize
@@ -680,15 +666,15 @@ fn validate_with_filesystem(
     let ledger = match process(load_result, &options) {
         Ok(ledger) => ledger,
         Err(e) => {
-            let result = ValidationResult {
+            errors.push(Error::new(format!("Processing error: {e}")));
+            return ValidationResult {
                 valid: false,
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                errors,
             };
-            return result;
         }
     };
 
-    let errors = crate::helpers::reported_ledger_errors(ledger.errors);
+    errors.extend(crate::helpers::reported_ledger_errors(ledger.errors));
 
     ValidationResult {
         // Warnings do not invalidate a ledger; only actual errors do.
@@ -823,7 +809,7 @@ fn query_with_filesystem(
     // (`LoadError::blocks_queries`, #2861). An include of a missing file, an
     // include cycle, a duplicate include or an empty glob is reported beside
     // the rows, as `bean-query` and `rledger query` report it.
-    let load_errors = load_errors_to_errors(&load_result);
+    let load_errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
     if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
             columns: Vec::new(),
@@ -1054,26 +1040,6 @@ mod load_error_tests {
             result.errors
         );
         assert!(!result.valid, "matching bean-check's exit 1");
-    }
-
-    #[test]
-    fn only_unusable_load_errors_are_fatal() {
-        // A duplicate include leaves every file read; a confined path does
-        // not. This predicate is what lets validation run over the first and
-        // stop on the second. (Queries follow `LoadError::blocks_queries`.)
-        assert!(!load_error_is_fatal(&LoadError::DuplicateInclude {
-            path: "shared.beancount".to_string(),
-        }));
-        assert!(!load_error_is_fatal(&LoadError::IncludeCycle {
-            cycle: vec!["a".to_string(), "a".to_string()],
-        }));
-        assert!(!load_error_is_fatal(&LoadError::GlobNoMatch {
-            pattern: "*.bean".to_string(),
-        }));
-        assert!(load_error_is_fatal(&LoadError::PathTraversal {
-            include_path: "../../etc/passwd".to_string(),
-            base_dir: std::path::PathBuf::from("/ledger"),
-        }));
     }
 
     #[test]

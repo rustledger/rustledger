@@ -381,6 +381,28 @@ pub struct LoadResult {
     pub display_context: DisplayContext,
 }
 
+impl LoadResult {
+    /// Take the parse errors ([`LoadError::ParseErrors`]) out of
+    /// [`Self::errors`], for a surface to report one by one, each with its
+    /// code, line and span, before it hands the rest of the load to
+    /// [`process`](fn@crate::process).
+    ///
+    /// A parse error does not stop validation: `process` validates the
+    /// entries that did parse, as `rledger check` (which reports the load
+    /// errors itself, then runs `process` with them cleared) and bean-check
+    /// do (#2949). Left in, `process` reports each file's parse errors as one
+    /// line-less `parse errors in <path>`. Whether they refuse a query is
+    /// still [`LoadError::blocks_queries`], asked of what this returns.
+    #[must_use]
+    pub fn take_parse_errors(&mut self) -> Vec<LoadError> {
+        let (parse_errors, rest) = std::mem::take(&mut self.errors)
+            .into_iter()
+            .partition(|e| matches!(e, LoadError::ParseErrors { .. }));
+        self.errors = rest;
+        parse_errors
+    }
+}
+
 /// A plugin directive.
 #[derive(Debug, Clone)]
 pub struct Plugin {

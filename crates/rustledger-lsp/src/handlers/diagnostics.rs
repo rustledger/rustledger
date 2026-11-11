@@ -802,9 +802,14 @@ const MAX_VALIDATION_FILE_SIZE: usize = 500 * 1024;
 /// to run" (render neutrally, never `✓`). Without it a balance lens
 /// would silently mislabel an unvalidated assertion as passing — the
 /// inverse of the dead-link UX that #1264 closed.
+///
+/// Only the size cap stops it. A parse error does not: the entries that did
+/// parse are validated, as `rledger check` (the validating loader's
+/// `process`) and bean-check validate them (#2949). This used to decline on
+/// any parse error, so one syntax error hid every other finding.
 #[must_use]
-pub(crate) fn validation_would_run(source: &str, parse_result: &ParseResult) -> bool {
-    parse_result.errors.is_empty() && source.len() <= MAX_VALIDATION_FILE_SIZE
+pub(crate) fn validation_would_run(source: &str) -> bool {
+    source.len() <= MAX_VALIDATION_FILE_SIZE
 }
 
 /// Build the effective directive list for validation by overlaying one or
@@ -931,13 +936,14 @@ pub fn all_diagnostics(
     let mut diagnostics = parse_errors_to_diagnostics(result, source, encoding);
 
     // [`validation_would_run`] is the single source of truth for whether
-    // the validator runs (no parse errors AND under the size cap). It's
+    // the validator runs (under the size cap; a parse error does not stop it,
+    // #2949). It's
     // re-used by `handle_code_lens` to render the balance lens neutrally
     // when validation was skipped, instead of mistaking an empty
     // diagnostic vec for "validator approved." Calling it here keeps
     // the two sites structurally locked-step instead of relying on a
     // humans-must-remember comment.
-    if validation_would_run(source, result) {
+    if validation_would_run(source) {
         // Get full directives from ledger state if available, then
         // apply a live overlay of every fresh in-memory parse we have.
         //
@@ -1081,15 +1087,10 @@ pub fn all_diagnostics(
             encoding,
         );
         diagnostics.extend(validation_diagnostics);
-    } else if result.errors.is_empty() && source.len() > MAX_VALIDATION_FILE_SIZE {
-        // The size-specific log is the only signal a human gets when
-        // a giant file silently stops validating. Skipped-because-of-
-        // parse-errors is self-evident: the parse-error diagnostics
-        // are already in `diagnostics`. Guard on `result.errors.is_empty()`
-        // so the log fires ONLY when the size cap is the sole reason —
-        // pre-refactor the outer `if errors.is_empty()` provided the
-        // same gating; replicate it here so an operator chasing the
-        // skip cause isn't pointed at the wrong remediation.
+    } else {
+        // The size cap is the only reason validation is skipped, and this
+        // log is the only signal a human gets when a giant file silently
+        // stops validating.
         tracing::debug!(
             "Skipping validation for large file ({} bytes > {} limit)",
             source.len(),
@@ -1197,8 +1198,8 @@ pub(crate) struct FileDiagTarget<'a> {
 /// main file) option warnings, and per-file import-review hints. The result is
 /// aligned 1:1 with `targets`.
 ///
-/// `overlay` is the fresh parse of every clean open buffer (current file
-/// included when clean), applied to the ledger snapshot so unsaved edits are
+/// `overlay` is the fresh parse of every open buffer (current file included),
+/// applied to the ledger snapshot so unsaved edits are
 /// reflected — the same overlay the current-file [`all_diagnostics`] path
 /// builds. `primary_parse` / `primary_file_id` identify the file being edited,
 /// whose fresh plugin declarations replace the ledger's for that file (mirrors
@@ -1224,18 +1225,14 @@ pub(crate) fn ledger_diagnostics_multi(
 
     // Plugin set for the shared validation and the per-file plugin NOTES
     // (E8006). Start from the ledger's stored plugins, and replace the
-    // primary (edited) file's plugins with its fresh parse ONLY when that file
-    // is part of the ledger AND parsed cleanly — mirroring the directive
-    // overlay's clean-parse guard. A broken current parse recovers a partial
-    // (or empty) `.plugins` list; injecting it would DROP the current file's
-    // plugins from the whole-ledger validation the clean unopened files run
-    // against, producing spurious diagnostics there (e.g. auto_accounts
-    // dropped ⇒ phantom E1001s). When the current buffer isn't a ledger file
-    // at all, its plugins must not be injected either. In both cases keep the
-    // ledger's stored plugins, matching the old per-file path (where the
-    // current file was never the primary in the unopened files' validations).
+    // primary (edited) file's plugins with its fresh parse when that file is
+    // part of the ledger. A parse error does not change that: the buffer's
+    // entries, plugins among them, are what parsed, and they are validated as
+    // `rledger check` validates a file with a parse error (#2949). When the
+    // current buffer isn't a ledger file at all, its plugins must not be
+    // injected; keep the ledger's stored plugins.
     let merged_plugins: Vec<Plugin> = match primary_file_id {
-        Some(fid) if primary_parse.errors.is_empty() => {
+        Some(fid) => {
             let primary_fid = fid as usize;
             ledger
                 .plugins
@@ -1258,14 +1255,12 @@ pub(crate) fn ledger_diagnostics_multi(
     };
 
     // ---- ONE whole-ledger book + validate, but ONLY if some target will use
-    // it. When every target fails `validation_would_run` (all have parse
-    // errors, or all exceed the size cap), the whole-ledger book + plugin +
+    // it. When every target fails `validation_would_run` (all exceed the
+    // size cap), the whole-ledger book + plugin +
     // validate would be thrown away, so skip it entirely rather than block the
     // main loop on discarded work (Copilot review). The expensive directive
     // overlay is built inside this branch too. ----
-    let any_target_validates = targets
-        .iter()
-        .any(|t| validation_would_run(t.source, t.parse));
+    let any_target_validates = targets.iter().any(|t| validation_would_run(t.source));
     let validation = if any_target_validates {
         // Raw, not processed, as in `all_diagnostics` (#2654).
         let full_directives_raw = ledger_state.raw_directives();
@@ -1299,7 +1294,7 @@ pub(crate) fn ledger_diagnostics_multi(
         .iter()
         .map(|t| {
             let mut diags = parse_errors_to_diagnostics(t.parse, t.source, encoding);
-            if validation_would_run(t.source, t.parse) {
+            if validation_would_run(t.source) {
                 diags.extend(map_validation_to_diagnostics(
                     &validation,
                     t.source,
@@ -1307,9 +1302,9 @@ pub(crate) fn ledger_diagnostics_multi(
                     plugin_ctx.as_ref(),
                     encoding,
                 ));
-            } else if t.parse.errors.is_empty() && t.source.len() > MAX_VALIDATION_FILE_SIZE {
+            } else {
                 // Parity with `all_diagnostics`: the only human signal that a
-                // clean-but-too-large file silently skipped validation.
+                // too-large file silently skipped validation.
                 tracing::debug!(
                     "Skipping validation for large file ({} bytes > {} limit)",
                     t.source.len(),
@@ -3052,14 +3047,17 @@ plugin "auto_accounts"
         );
 
         // ...and ZERO validations when every target fails `validation_would_run`
-        // (here: all targets have parse errors), since the result would be
-        // discarded anyway (Copilot review).
-        let bad_source: SourceText = "this is not valid @@@ beancount\n".into();
-        let bad_parse = parse(&bad_source);
+        // (here: all targets exceed the size cap; a parse error no longer stops
+        // validation, #2949), since the result would be discarded anyway
+        // (Copilot review).
+        let bad_source: SourceText = "; padding\n"
+            .repeat(MAX_VALIDATION_FILE_SIZE / 10 + 1)
+            .into();
         assert!(
-            !bad_parse.errors.is_empty(),
-            "fixture must have parse errors"
+            bad_source.len() > MAX_VALIDATION_FILE_SIZE,
+            "fixture must be too large"
         );
+        let bad_parse = parse(&bad_source);
         let bad_targets: Vec<FileDiagTarget<'_>> = files
             .iter()
             .map(|(fid, _)| FileDiagTarget {
@@ -3081,17 +3079,19 @@ plugin "auto_accounts"
         assert_eq!(
             after - before,
             0,
-            "no target can use validation (all have parse errors), so it must not run"
+            "no target can use validation (all are too large), so it must not run"
         );
     }
 
-    /// #1813 review: when the CURRENT file's fresh parse is broken, its plugins
-    /// must NOT be dropped from the whole-ledger validation the clean unopened
-    /// files run against. Otherwise `auto_accounts` (declared in the current
-    /// file) vanishes and the unopened files get phantom E1001s that neither
-    /// the old per-file path nor `rledger check` produce.
+    /// A parse error in the CURRENT file does not stop the whole-ledger
+    /// validation, for it or for the files it includes (#2949): what parsed in
+    /// the buffer is validated, its plugins among it, as `rledger check`
+    /// validates a file with a parse error. The current file's
+    /// `auto_accounts` still opens the accounts the unopened file uses (no
+    /// phantom E1001 there, #1813), and the buffer's unbalanced transaction
+    /// is reported beside its parse error.
     #[test]
-    fn broken_current_parse_keeps_stored_plugins_for_cross_file_validation() {
+    fn current_parse_error_still_validates_the_ledger() {
         let dir = tempfile::tempdir().expect("tempdir");
         let main = dir.path().join("main.beancount");
         // b (unopened) uses accounts with no explicit `open`; auto_accounts
@@ -3106,15 +3106,6 @@ plugin "auto_accounts"
 
         let mut ls = LedgerState::new();
         ls.load(&main).expect("load ledger");
-        // Confirm the ledger recorded auto_accounts.
-        assert!(
-            ls.ledger()
-                .expect("ledger")
-                .plugins
-                .iter()
-                .any(|p| p.name == "auto_accounts"),
-            "fixture must record the auto_accounts plugin"
-        );
         let (b_id, b_source): (u16, SourceText) = ls
             .ledger()
             .expect("ledger")
@@ -3125,35 +3116,51 @@ plugin "auto_accounts"
             .map(|f| (f.id as u16, f.source.clone()))
             .expect("b in ledger");
 
-        // The current file (main, id 0) parses BROKEN — its recovered plugin
-        // list is empty, so injecting it would drop auto_accounts.
-        let broken_main = parse("@@@ not valid beancount\n");
-        assert!(!broken_main.errors.is_empty(), "fixture must be broken");
-        assert!(
-            broken_main.plugins.is_empty(),
-            "broken parse must recover no plugins (else the test proves nothing)"
-        );
+        // The current file (main, id 0), edited: a line that does not parse,
+        // and an unbalanced transaction after it.
+        let main_source = "plugin \"auto_accounts\"\ninclude \"b.beancount\"\ngarbage\n\
+                           2024-01-03 * \"y\"\n  Assets:New  5 USD\n  \
+                           Equity:Opening-Balances  -4 USD\n";
+        let main_parse = parse(main_source);
+        assert!(!main_parse.errors.is_empty(), "fixture must be broken");
 
         let b_parse = parse(&b_source);
-        let targets = [FileDiagTarget {
-            file_id: b_id,
-            source: &b_source,
-            parse: &b_parse,
-        }];
+        let targets = [
+            FileDiagTarget {
+                file_id: 0,
+                source: main_source,
+                parse: &main_parse,
+            },
+            FileDiagTarget {
+                file_id: b_id,
+                source: &b_source,
+                parse: &b_parse,
+            },
+        ];
+        let overlay = [(0u16, main_parse.directives.as_slice())];
         let per_file = ledger_diagnostics_multi(
             &ls,
             Some(0),
-            &broken_main,
-            &[],
+            &main_parse,
+            &overlay,
             &targets,
             PositionEncoding::Utf16,
         );
 
-        let b_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
+        let main_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
+        assert!(
+            main_codes.iter().any(|c| c.starts_with('P')),
+            "the parse error is reported: {main_codes:?}"
+        );
+        assert!(
+            main_codes.iter().any(|c| c == "E3001"),
+            "the unbalanced transaction after it is validated: {main_codes:?}"
+        );
+        let b_codes: Vec<_> = per_file[1].iter().map(get_code).collect();
         assert!(
             !b_codes.iter().any(|c| c == "E1001"),
-            "auto_accounts (from the ledger) must still synthesize opens for the \
-             unopened file even when the current file's parse is broken — got {b_codes:?}"
+            "auto_accounts (from the broken buffer, which still declares it) \
+             must still open the unopened file's accounts: {b_codes:?}"
         );
     }
 
@@ -3756,9 +3763,8 @@ plugin "auto_accounts"
     /// gets the parse error alone, as in beancount. In `rledger check` a sale
     /// gets it and the booking note that rledger did not book the sale
     /// (#2571), the only message saying why a later balance assertion fails.
-    /// The LSP holds back booking and validation while a file has parse
-    /// errors, so there the sale has the parse error alone (and no balance
-    /// assertion failure to explain).
+    /// The LSP books and validates a file with a parse error as `check` does
+    /// (#2949), so it reports the same two.
     #[test]
     fn a_written_cost_price_currency_mismatch_buy_one_error_sale_two() {
         let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
@@ -3769,9 +3775,9 @@ plugin "auto_accounts"
         let sale = "2024-02-01 * \"sell\"\n  Assets:Stock  -5 HOOL {100 USD} @ 90 EUR\n  \
                     Assets:Cash  450 EUR\n  Income:Gains\n\
                     2024-03-01 balance Assets:Stock 5 HOOL\n";
-        for (label, body, expected, expected_lsp) in [
-            ("buy", buy_bad.to_string(), 1, 1),
-            ("sale", format!("{buy_ok}{sale}"), 2, 1),
+        for (label, body, expected) in [
+            ("buy", buy_bad.to_string(), 1),
+            ("sale", format!("{buy_ok}{sale}"), 2),
         ] {
             let source = format!("{head}{body}");
             let dir = tempfile::tempdir().expect("temp dir");
@@ -3835,10 +3841,7 @@ plugin "auto_accounts"
                         || d.message.contains("not booked: its price currency")
                 })
                 .count();
-            assert_eq!(
-                lsp, expected_lsp,
-                "{label}: the LSP's diagnostics: {diags:?}"
-            );
+            assert_eq!(lsp, expected, "{label}: the LSP's diagnostics: {diags:?}");
         }
     }
 

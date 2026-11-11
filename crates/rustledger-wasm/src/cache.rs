@@ -609,6 +609,12 @@ fn prepend_header(magic: [u8; 8], data: &[u8]) -> Vec<u8> {
 /// alignment `rkyv::to_bytes` writes the archive for. The copy is one
 /// `memcpy` of the blob, small beside the deserialization that follows, and
 /// leaves the cache format unchanged.
+///
+/// Memory: while it lives, the copy holds a second blob-sized buffer beside
+/// the caller's bytes (which wasm-bindgen has already copied in) and the
+/// directives being built. Under wasm32 that peak sets the instance's linear
+/// memory high-water mark, and linear memory never shrinks, so restoring a
+/// cache grows the instance by about one more blob size than it did before.
 fn aligned_payload(data: &[u8]) -> rkyv::util::AlignedVec {
     let mut aligned = rkyv::util::AlignedVec::with_capacity(data.len());
     aligned.extend_from_slice(data);

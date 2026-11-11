@@ -2106,6 +2106,40 @@ fn test_query_option_diagnostics_are_located() {
     );
 }
 
+/// `rledger query` escapes an option diagnostic's message, which quotes the
+/// ledger's option value, before a terminal reads it, as the diagnostics
+/// sink's `Diagnostic::to_line` does (#2538, #2925).
+#[test]
+fn test_query_option_diagnostic_message_is_escaped() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.beancount");
+    std::fs::write(
+        &main,
+        "option \"name_equity\" \"cap\u{1b}[31mital\"\n2024-01-01 open Assets:A\n",
+    )
+    .expect("write main");
+    let output = Command::new(&rledger)
+        .args(["query", "--no-cache"])
+        .arg(&main)
+        .arg("SELECT account")
+        .output()
+        .expect("Failed to run rledger query");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("E7008: "))
+        .unwrap_or_else(|| panic!("no E7008 line in:\n{stderr}"));
+    assert!(
+        line.contains("cap\\u{1b}[31mital"),
+        "the value is not escaped in {line:?}"
+    );
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "a raw escape reached stderr:\n{stderr}"
+    );
+}
+
 /// Conversely, a single non-repeatable option must NOT be flagged (no false
 /// positive on the deliberate E7003 strictness).
 #[test]

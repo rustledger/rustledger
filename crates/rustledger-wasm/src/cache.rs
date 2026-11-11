@@ -446,11 +446,12 @@ use crate::types::{Error, LedgerOptions};
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
 /// and held v91 before #2930 took v92. v93 is held by #2931.)
-/// v99: loader v69, unchanged. Both payloads' option diagnostics move
-/// (#2925): each carries its option's line, and a `Ledger`'s its file too, and
-/// an invalid option in an included file is its converter's error
-/// (`E7002`, `E7008`, ...) instead of the `E7009` warning, which is left for
-/// a value the converter accepts. An older blob would keep serving them with
+/// v99: loader v71 (#2925). Both payloads' option diagnostics move: each
+/// carries its option's line, and a `Ledger`'s its file too, and an invalid
+/// option in an included file is its converter's error (`E7002`, `E7008`,
+/// ...) instead of the `E7009` warning, which is left for a value the
+/// converter accepts. The loader also ignores a `documents` option in an
+/// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
 /// no location and the old codes, and a `Ledger` with such an option as
 /// valid. (v95 to v98 are held by other open work.)
 pub const CACHE_VERSION: u32 = 99;
@@ -485,7 +486,7 @@ pub const CACHE_VERSION: u32 = 99;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 69;
+const LOADER_CACHE_VERSION_PIN: u32 = 71;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

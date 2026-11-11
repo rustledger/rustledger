@@ -689,31 +689,35 @@ pub fn run_with_writer<W: Write>(
     let main_file_str = file.display().to_string();
     let mut option_error_count = 0;
     let mut option_warning_count = 0;
-    for warning in &load_result.options.warnings {
-        let is_error = warning.is_error();
+    // Through the loader's canonical mapping, which the LSP, WASM and the FFI
+    // read too: severity, code, phase and location are decided there.
+    for option_error in rustledger_loader::option_warnings_to_errors(&load_result.options.warnings)
+    {
+        let is_error = option_error.severity == rustledger_loader::ErrorSeverity::Error;
         let severity = if is_error { "error" } else { "warning" };
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.
-        let shown = rules.keep(warning.code);
+        let shown = rules.keep(&option_error.code);
         // At the option's own file and line, as bean-check reports it
         // (#2925); the top of the main file only for an option with no site.
-        let (site_file, site_line) = warning
-            .site
+        let site = option_error
+            .location
             .as_ref()
-            .map_or((main_file_str.as_str(), 1), |site| {
-                (site.file.as_str(), site.line)
-            });
+            .map(|loc| (loc.file.display().to_string(), loc.line, loc.column));
         if json_mode && shown {
+            let (site_file, site_line, site_column) = site
+                .clone()
+                .unwrap_or_else(|| (main_file_str.clone(), 1, 1));
             diagnostics.push(JsonDiagnostic {
-                file: site_file.to_string(),
+                file: site_file,
                 line: site_line,
-                column: 1,
+                column: site_column,
                 end_line: site_line,
-                end_column: 1,
+                end_column: site_column,
                 severity: severity.to_string(),
-                phase: warning.phase().to_string(),
-                code: warning.code.to_string(),
-                message: warning.message.clone(),
+                phase: option_error.phase.clone(),
+                code: option_error.code.clone(),
+                message: option_error.message.clone(),
                 hint: None,
                 context: None,
             });
@@ -724,14 +728,14 @@ pub fn run_with_writer<W: Write>(
             // An option's message quotes its value from the ledger (#2538).
             // `file:line: severity[code]: message`, the compact form the
             // other located diagnostics take when no snippet is rendered.
-            let location = warning.site.as_ref().map_or_else(String::new, |site| {
-                format!("{}:{}: ", escape_untrusted_line(&site.file), site.line)
+            let location = site.map_or_else(String::new, |(site_file, site_line, _)| {
+                format!("{}:{site_line}: ", escape_untrusted_line(&site_file))
             });
             writeln!(
                 stdout,
                 "{location}{severity}[{}]: {}",
-                warning.code,
-                escape_untrusted_text(&warning.message)
+                option_error.code,
+                escape_untrusted_text(&option_error.message)
             )?;
         }
         if is_error {

@@ -795,7 +795,7 @@ impl Ledger {
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-                errors.extend(option_warnings_to_errors(&ledger.options.warnings, true));
+                errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
@@ -1146,10 +1146,12 @@ pub mod option_warning_severity_tests {
     /// outlived the agreement.
     #[test]
     fn warnings_stay_warnings_and_errors_stay_errors() {
-        let mapped = option_warnings_to_errors(
-            &[warn("E7009"), warn("E7003"), warn("E7001"), warn("E7002")],
-            true,
-        );
+        let mapped = option_warnings_to_errors(&[
+            warn("E7009"),
+            warn("E7003"),
+            warn("E7001"),
+            warn("E7002"),
+        ]);
         let sev: Vec<_> = mapped.iter().map(|e| e.severity).collect();
         assert_eq!(
             sev,
@@ -1175,7 +1177,7 @@ pub mod option_warning_severity_tests {
     /// WASM text identical to the CLI's for the same warning.
     #[test]
     fn the_code_travels_in_its_own_field() {
-        let mapped = option_warnings_to_errors(&[warn("E7009")], true);
+        let mapped = option_warnings_to_errors(&[warn("E7009")]);
         assert_eq!(mapped[0].code.as_deref(), Some("E7009"));
         assert_eq!(
             mapped[0].phase.as_deref(),
@@ -1211,7 +1213,7 @@ pub mod option_warning_severity_tests {
             booking_method: rustledger_core::BookingMethod::Strict,
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
-            errors: option_warnings_to_errors(&[warn("E7009")], true),
+            errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),
@@ -1239,7 +1241,7 @@ pub mod option_warning_severity_tests {
             booking_method: rustledger_core::BookingMethod::Strict,
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
-            errors: option_warnings_to_errors(&[warn("E7001")], true),
+            errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),

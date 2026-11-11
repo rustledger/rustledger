@@ -3,7 +3,10 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustledger_booking::BookingEngine;
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap, SourceText};
+use rustledger_loader::{
+    ErrorSeverity, LedgerError, LoadOptions, Options as LoaderOptions, Plugin, SourceMap,
+    SourceText,
+};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
 use rustledger_validate::{Severity, ValidationError, ValidationOptions, ValidationSession};
@@ -165,59 +168,85 @@ fn parse_result_to_plugins(
         .collect()
 }
 
-/// LSP severity for an option warning, from the one rule both surfaces share.
+/// LSP severity for an option diagnostic, from the one rule every surface
+/// shares.
 ///
 /// `rledger check` and the LSP each had their own idea of which `E70xx` codes
-/// were fatal, and they disagreed (#2291). The rule now lives on
-/// `OptionWarning`; this only translates it into the LSP's vocabulary.
-fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> DiagnosticSeverity {
-    if warning.is_error() {
-        DiagnosticSeverity::ERROR
-    } else {
-        DiagnosticSeverity::WARNING
+/// were fatal, and they disagreed (#2291). The rule lives on `OptionWarning`
+/// and reaches here through the loader's `option_warnings_to_errors`; this
+/// only translates it into the LSP's vocabulary.
+fn option_error_severity(error: &LedgerError) -> DiagnosticSeverity {
+    match error.severity {
+        ErrorSeverity::Error => DiagnosticSeverity::ERROR,
+        ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
     }
 }
 
-/// The source-map file id of the file an option warning was written in, or
-/// `None` for a warning with no site (or a site the map does not name).
+/// The source-map file id of the file an option diagnostic was written in,
+/// or `None` for one with no location (or a location the map does not name).
 ///
-/// The site is the loader's ([`rustledger_loader::OptionWarning::site`]), so
-/// an option in an included file is published on that file, not the main one.
-fn option_warning_file_id(
-    warning: &rustledger_loader::OptionWarning,
-    source_map: &SourceMap,
-) -> Option<u16> {
-    let site = warning.site.as_ref()?;
+/// The location is the loader's (`OptionWarning::site`, through
+/// `option_warnings_to_errors`), so an option in an included file is
+/// published on that file, not the main one.
+fn option_error_file_id(error: &LedgerError, source_map: &SourceMap) -> Option<u16> {
+    let location = error.location.as_ref()?;
     let index = source_map
         .files()
         .iter()
-        .position(|file| file.path.display().to_string() == site.file)?;
+        .position(|file| file.path == location.file)?;
     u16::try_from(index).ok()
 }
 
-/// An option warning as an LSP diagnostic, at the severity
-/// [`option_warning_severity`] gives it.
+/// The byte length of an `option` line's directive: up to a `;` comment
+/// outside a string, without trailing whitespace.
+fn option_line_extent(text: &str) -> usize {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = text.len();
+    for (i, c) in text.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            ';' if !in_string => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    text[..end].trim_end().len()
+}
+
+/// An option diagnostic (from the loader's `option_warnings_to_errors`) as
+/// an LSP diagnostic, at the severity [`option_error_severity`] gives it.
 ///
-/// With `source`, the text of the file the warning's site is in, the range
-/// covers the `option` line (#2925), as `rledger check` reports its file and
-/// line. Without one, or with no site, it is the top of the file, where these
+/// With `source`, the text of the file the diagnostic's location is in, the
+/// range covers the `option` directive on its line (#2925), without a
+/// trailing `; comment`, as `rledger check` reports its file and line.
+/// Without one, or with no location, it is the top of the file, where these
 /// were all published before they had a location.
-fn option_warning_to_diagnostic(
-    warning: &rustledger_loader::OptionWarning,
+///
+/// Known limitation: the line comes from the loaded ledger, and `source` is
+/// the live buffer. An unsaved edit that adds or removes lines above an
+/// option moves the range off it until the ledger reloads, as it does for
+/// every other diagnostic the loaded ledger locates.
+fn option_error_to_diagnostic(
+    error: &LedgerError,
     source: Option<&str>,
     encoding: PositionEncoding,
 ) -> Diagnostic {
-    let range = warning
-        .site
+    let range = error
+        .location
         .as_ref()
         .zip(source)
-        .and_then(|(site, source)| {
+        .and_then(|(location, source)| {
             let index = LineIndex::new(source, encoding);
-            let line = u32::try_from(site.line.checked_sub(1)?).ok()?;
+            let line = u32::try_from(location.line.checked_sub(1)?).ok()?;
             let start = index.line_start_byte(line)?;
             let text = index.line_text(line)?;
             let (sl, sc) = index.offset_to_position(start);
-            let (el, ec) = index.offset_to_position(start + text.trim_end().len());
+            let (el, ec) = index.offset_to_position(start + option_line_extent(text));
             Some(Range {
                 start: Position::new(sl, sc),
                 end: Position::new(el, ec),
@@ -229,10 +258,10 @@ fn option_warning_to_diagnostic(
         // Not always an error: `rledger check` calls E7003 and E7009
         // warnings, and publishing them as errors put a red squiggle on a
         // file the CLI exits 0 on (#2291).
-        severity: Some(option_warning_severity(warning)),
-        code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
+        severity: Some(option_error_severity(error)),
+        code: Some(lsp_types::NumberOrString::String(error.code.clone())),
         source: Some("rustledger".to_string()),
-        message: warning.message.clone(),
+        message: error.message.clone(),
         related_information: None,
         tags: None,
         code_description: None,
@@ -1159,20 +1188,21 @@ pub fn all_diagnostics(
     // `OptionWarning::is_error` gives them, on the line of the `option` that
     // raised them (#2925).
     //
-    // In multi-file mode, use warnings from the loaded ledger: each one in the
-    // file its option is in, an included file's on that file, and a warning
-    // with no site in the main file, so none is published twice. In
-    // single-file mode (no ledger), validate options from the parse result so
-    // diagnostics still appear before the workspace ledger has loaded.
-    if let Some(ls) = ledger_state
+    // For a file of the loaded ledger, use its warnings: each one in the file
+    // its option is in, an included file's on that file, and one with no
+    // location in the main file, so none is published twice. Otherwise (no
+    // ledger yet, or a buffer the ledger does not include), validate this
+    // buffer's own options from its parse, so diagnostics still appear and
+    // the ledger's are never drawn on an unrelated buffer's lines.
+    if let Some(here) = current_file_id
+        && let Some(ls) = ledger_state
         && let Some(ledger) = ls.ledger()
     {
-        let here = current_file_id.unwrap_or(0);
-        for warning in &ledger.options.warnings {
-            let file_id = option_warning_file_id(warning, &ledger.source_map);
+        for error in rustledger_loader::option_warnings_to_errors(&ledger.options.warnings) {
+            let file_id = option_error_file_id(&error, &ledger.source_map);
             if file_id.unwrap_or(0) == here {
                 let located = file_id.is_some().then_some(source);
-                diagnostics.push(option_warning_to_diagnostic(warning, located, encoding));
+                diagnostics.push(option_error_to_diagnostic(&error, located, encoding));
             }
         }
     } else {
@@ -1204,12 +1234,8 @@ pub fn all_diagnostics(
         // E7010, once every option is set, as the loader raises it (#2408).
         let rooted = opts.rooted_leaf_warnings();
         opts.warnings.extend(rooted);
-        for warning in &opts.warnings {
-            diagnostics.push(option_warning_to_diagnostic(
-                warning,
-                Some(source),
-                encoding,
-            ));
+        for error in rustledger_loader::option_warnings_to_errors(&opts.warnings) {
+            diagnostics.push(option_error_to_diagnostic(&error, Some(source), encoding));
         }
     }
 
@@ -1352,6 +1378,9 @@ pub(crate) fn ledger_diagnostics_multi(
         }
     };
 
+    // The option diagnostics, mapped once for every target.
+    let option_errors = rustledger_loader::option_warnings_to_errors(&ledger.options.warnings);
+
     // ---- Map each target from the shared validation ----
     targets
         .iter()
@@ -1378,11 +1407,11 @@ pub(crate) fn ledger_diagnostics_multi(
             // in and on its line (#2925); one with no site goes in the main
             // file. Each warning lands in exactly one target, so none is
             // published twice across open documents.
-            for warning in &ledger.options.warnings {
-                let file_id = option_warning_file_id(warning, &ledger.source_map);
+            for error in &option_errors {
+                let file_id = option_error_file_id(error, &ledger.source_map);
                 if file_id.unwrap_or(0) == t.file_id {
                     let located = file_id.is_some().then_some(t.source);
-                    diags.push(option_warning_to_diagnostic(warning, located, encoding));
+                    diags.push(option_error_to_diagnostic(error, located, encoding));
                 }
             }
             // Per-file import-review diagnostics.
@@ -4041,7 +4070,7 @@ plugin "auto_accounts"
         .unwrap();
         std::fs::write(
             dir.path().join("sub.beancount"),
-            "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"   \n",
+            "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"   ; a \"quoted; note\"\n",
         )
         .unwrap();
         let main = dir.path().join("main.beancount");
@@ -4122,8 +4151,8 @@ plugin "auto_accounts"
         let mut lsp: Vec<Located> = multi.iter().map(|(l, _)| l.clone()).collect();
         lsp.sort();
         assert_eq!(lsp, check, "ledger_diagnostics_multi");
-        // The range covers the option line up to its last character, not
-        // the trailing whitespace.
+        // The range covers the option directive on its line, not a trailing
+        // `; comment` or the whitespace before it.
         let booking = multi
             .iter()
             .find(|(l, _)| l.0 == "E7009")
@@ -4184,5 +4213,76 @@ plugin "auto_accounts"
             located,
             [("E7001".to_string(), 2), ("E7003".to_string(), 4)]
         );
+    }
+
+    /// A buffer the loaded ledger does not include (`current_file_id` is
+    /// `None`) gets its own options' diagnostics, never the ledger's drawn on
+    /// its lines (#2925 review): the ledger's E7003 at line 3 of its main
+    /// file used to underline this buffer's third line.
+    #[test]
+    fn a_buffer_outside_the_ledger_gets_only_its_own_option_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "option \"title\" \"a\"\n2024-01-01 open Assets:A\noption \"title\" \"b\"\n",
+        )
+        .unwrap();
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        assert!(
+            state
+                .ledger()
+                .unwrap()
+                .options
+                .warnings
+                .iter()
+                .any(|w| w.code == "E7003"),
+            "fixture: the ledger has an option diagnostic"
+        );
+
+        let scratch = "2024-01-01 open Assets:First\n2024-01-02 open Assets:Second\n\
+                       2024-01-03 open Assets:Third\n";
+        let diags = all_diagnostics(
+            &parse(scratch),
+            scratch,
+            Some(&state),
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let options: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| get_code(d).starts_with("E70"))
+            .collect();
+        assert!(options.is_empty(), "{options:?}");
+
+        // Its own options are still checked, at their own lines.
+        let own = "2024-01-01 open Assets:First\noption \"nosuch\" \"x\"\n";
+        let diags = all_diagnostics(
+            &parse(own),
+            own,
+            Some(&state),
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let located: Vec<(String, u32)> = diags
+            .iter()
+            .filter(|d| get_code(d).starts_with("E70"))
+            .map(|d| (get_code(d), d.range.start.line + 1))
+            .collect();
+        assert_eq!(located, [("E7001".to_string(), 2)]);
+    }
+
+    #[test]
+    fn test_option_line_extent_stops_at_a_comment_outside_strings() {
+        assert_eq!(option_line_extent("option \"a\" \"b\""), 14);
+        assert_eq!(option_line_extent("option \"a\" \"b\"   ; note"), 14);
+        assert_eq!(option_line_extent("option \"a\" \"b;c\" ; x"), 16);
+        assert_eq!(option_line_extent("option \"a\" \"b\\\";c\""), 18);
+        assert_eq!(option_line_extent("option \"a\" \"b\"  \r"), 14);
     }
 }

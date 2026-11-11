@@ -1028,14 +1028,31 @@ impl Options {
     }
 
     /// Give each of `warnings` that has no site the site of the `option`
-    /// line it is about ([`Self::site_of`]). For the diagnostics raised after
-    /// the options are set, such as the E7006 of
-    /// [`crate::document_root_warnings`], which reads only the values.
+    /// line it is about. For the diagnostics raised after the options are
+    /// set, such as the E7006 of [`crate::document_root_warnings`], which
+    /// reads only the values.
+    ///
+    /// By occurrence, not by value alone: `warnings` follow the applied
+    /// values in order, one per occurrence, so the n-th warning for an
+    /// `(option, value)` gets the n-th line that applied it. The same
+    /// `documents` root written in two files is two warnings at two sites,
+    /// not both at the last one.
     pub fn locate(&self, warnings: &mut [OptionWarning]) {
+        let mut seen: FxHashMap<(String, String), usize> = FxHashMap::default();
         for warning in warnings {
-            if warning.site.is_none() {
-                warning.site = self.site_of(&warning.option, &warning.value).cloned();
+            if warning.site.is_some() {
+                continue;
             }
+            let nth = seen
+                .entry((warning.option.clone(), warning.value.clone()))
+                .or_insert(0);
+            warning.site = self
+                .value_sites
+                .iter()
+                .filter(|(k, v, _)| *k == warning.option && *v == warning.value)
+                .nth(*nth)
+                .map(|(_, _, site)| site.clone());
+            *nth += 1;
         }
     }
 
@@ -1988,6 +2005,65 @@ mod tests {
         let mut bare = Options::new();
         bare.set("nosuch", "x");
         assert_eq!(bare.warnings[0].site, None);
+    }
+
+    /// The same value applied twice is located at each of its lines, not
+    /// both at the last one (#2925 review).
+    #[test]
+    fn test_locate_is_by_occurrence() {
+        let mut opts = Options::new();
+        opts.set_scoped_at("documents", "missing", true, Some(site("main", 4)));
+        opts.set_scoped_at("documents", "missing", false, Some(site("sub", 2)));
+        let warn = || OptionWarning {
+            code: "E7006",
+            message: String::new(),
+            option: "documents".to_string(),
+            value: "missing".to_string(),
+            site: None,
+        };
+        let mut docs = vec![warn(), warn()];
+        opts.locate(&mut docs);
+        let sites: Vec<Option<OptionSite>> = docs.into_iter().map(|w| w.site).collect();
+        assert_eq!(sites, [Some(site("main", 4)), Some(site("sub", 2))]);
+    }
+
+    /// The canonical mapping every surface reads: severity, code, phase and
+    /// message off the warning, and its site as a point location, column 1.
+    #[test]
+    fn test_option_warnings_to_errors_carries_the_site() {
+        use crate::ErrorSeverity::{Error, Warning};
+        let mut opts = Options::new();
+        opts.set_scoped_at("booking_method", "fifo", true, Some(site("m.bean", 3)));
+        opts.set_scoped_at("title", "a", false, Some(site("s.bean", 1)));
+        opts.set("nosuch", "x");
+        let errors = crate::option_warnings_to_errors(&opts.warnings);
+        let seen: Vec<_> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.code.as_str(),
+                    e.severity,
+                    e.phase.as_str(),
+                    e.location
+                        .as_ref()
+                        .map(|l| (l.file.display().to_string(), l.line, l.column)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("E7002", Error, "parse", Some(("m.bean".to_string(), 3, 1))),
+                (
+                    "E7009",
+                    Warning,
+                    "parse",
+                    Some(("s.bean".to_string(), 1, 1))
+                ),
+                ("E7001", Error, "parse", None),
+            ]
+        );
+        assert_eq!(errors[0].message, opts.warnings[0].message);
     }
 
     /// `option "plugin"` may not be set, as in beancount, from the top-level

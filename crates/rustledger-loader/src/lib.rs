@@ -99,7 +99,7 @@ pub fn is_glob_pattern(path: &str) -> bool {
 pub use process::{
     BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
     LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
-    process,
+    option_warnings_to_errors, process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};

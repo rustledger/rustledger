@@ -198,7 +198,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // loader ran, so these already exist — the single-source path used to drop
     // them on the floor here, which is why E7001/E7002 were invisible on every
     // entry point built on this function (#2299).
-    let option_errors = option_warnings_to_errors(&raw.options.warnings, false);
+    let option_errors = without_files(option_warnings_to_errors(&raw.options.warnings));
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → book → regular-plugins → finalize
@@ -359,61 +359,34 @@ pub fn account_types_from_raw(
     options_from_raw(options).to_account_types()
 }
 
-/// Option warnings as WASM [`Error`]s, carrying the severity, code, and phase
-/// `rledger check` gives them.
+/// Option warnings as WASM [`Error`]s, through the loader's canonical
+/// [`rustledger_loader::option_warnings_to_errors`] and the
+/// `From<LedgerError>` every other loader error takes.
 ///
-/// Severity, code, and phase are all read off the warning rather than decided
-/// here — `is_error()`, `code`, `phase()` — because each one, when a surface
-/// decided it locally instead, drifted:
+/// Nothing about an option diagnostic is decided here: severity, code,
+/// phase, message and location all come from the loader's mapping, which
+/// `rledger check` and the LSP read too (#2291, #2297, #2298, #2299, #2925;
+/// the history is on the loader function).
 ///
-/// - E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
-///   to go out from here as errors, under a comment claiming parity with
-///   `check` and the LSP, so a ledger the CLI called clean arrived carrying
-///   errors (#2291). `is_error` moved onto the warning in #2292.
-/// - The code used to survive only as an `[E7009] ` prefix on the message, so a
-///   consumer wanting to branch on it had to parse it back out of the text that
-///   [`Error::code`] exists to save them from reading (#2297). It moved into the
-///   `code` field, and the prefix was dropped, so the message text now matches
-///   the CLI's for the same warning exactly.
-/// - `phase` was then written as a `"parse"` literal on each surface, which is
-///   the same shape one field over; it moved onto `phase()` in #2298.
-///
-/// Shared, finally, rather than copied: this used to be a private function in
-/// `parsed_ledger.rs` serving only the multi-file path, which is why the
-/// single-source path had nothing to call and reported no option diagnostics at
-/// all (#2299).
-///
-/// The site goes on as the error's line (and the option's file, when
-/// `name_files`), as `rledger check` reports it: column 1, ending on the same
-/// line (#2925). `name_files` is false on the single-source entry points,
-/// whose errors carry no file (see [`Error::file`]); a multi-file ledger
-/// names the file each option is in, an included one among them.
+/// The location is a point, as on every `LedgerError`-derived error: `file`,
+/// `line` and `column` (1) are set when the option has a site, and
+/// `end_line` / `end_column` are null. A multi-file ledger names the file
+/// each option is in, an included one among them; the single-source entry
+/// points drop it with [`without_files`], as their other errors carry none
+/// (see [`Error::file`]).
 ///
 /// [`OptionWarning`]: rustledger_loader::OptionWarning
-pub fn option_warnings_to_errors(
-    warnings: &[rustledger_loader::OptionWarning],
-    name_files: bool,
-) -> Vec<Error> {
-    warnings
-        .iter()
-        .map(|w| {
-            let base = if w.is_error() {
-                Error::new(w.message.clone())
-            } else {
-                Error::warning(w.message.clone())
-            };
-            let mapped = base.with_code(w.code).with_phase(w.phase());
-            match &w.site {
-                Some(site) => {
-                    let line = u32::try_from(site.line).unwrap_or(u32::MAX);
-                    mapped
-                        .with_file(name_files.then(|| site.file.clone()))
-                        .with_span((line, 1), (line, 1))
-                }
-                None => mapped,
-            }
-        })
+pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
+    rustledger_loader::option_warnings_to_errors(warnings)
+        .into_iter()
+        .map(Error::from)
         .collect()
+}
+
+/// `errors` with no `file`, for the single-source entry points, whose errors
+/// name no file (the source is `<string>`); the line stays.
+pub fn without_files(errors: Vec<Error>) -> Vec<Error> {
+    errors.into_iter().map(|e| e.with_file(None)).collect()
 }
 
 /// Validate raw parsed `option` tuples and return the resulting diagnostics.
@@ -443,7 +416,7 @@ pub fn validate_option_tuples(
     // E7010, which needs every option set first, as the loader raises it.
     let rooted = opts.rooted_leaf_warnings();
     opts.warnings.extend(rooted);
-    option_warnings_to_errors(&opts.warnings, false)
+    without_files(option_warnings_to_errors(&opts.warnings))
 }
 
 /// The effective booking method of a single-source ledger, read from its raw

@@ -660,13 +660,22 @@ fn validate_with_filesystem(
         }
     };
 
+    // The option diagnostics, each at its option's file and line, as
+    // `rledger check` reports them (#2925). They were missing here, so an
+    // invalid option in any file of the tree validated clean while `check`
+    // exits 1 on it. Read before anything can return, so a fatal load error
+    // or a processing failure still reports them, as `check` does.
+    let option_errors = option_warnings_to_errors(&load_result.options.warnings);
+
     // Report every load error, but abort only on one that makes the directive
-    // stream unusable — see `load_error_is_fatal`.
+    // stream unusable: see `load_error_is_fatal`.
     let load_errors = load_errors_to_errors(&load_result);
     if load_result.errors.iter().any(load_error_is_fatal) {
+        let mut errors = load_errors;
+        errors.extend(option_errors);
         return ValidationResult {
             valid: false,
-            errors: load_errors,
+            errors,
         };
     }
 
@@ -682,17 +691,14 @@ fn validate_with_filesystem(
         Err(e) => {
             let result = ValidationResult {
                 valid: false,
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                    .chain(option_errors)
+                    .collect(),
             };
             return result;
         }
     };
 
-    // The option diagnostics too, each at its option's file and line, as
-    // `rledger check` reports them (#2925). They were missing here, so an
-    // invalid option in any file of the tree validated clean while `check`
-    // exits 1 on it.
-    let option_errors = option_warnings_to_errors(&ledger.options.warnings, true);
     let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
     errors.extend(option_errors);
 
@@ -1028,6 +1034,30 @@ mod load_error_tests {
         assert_eq!(located.len(), 3, "{:?}", result.errors);
         assert_eq!(located, loader_located(included_option_files()));
         assert!(!result.valid, "E7008 in an include is an error");
+    }
+
+    /// A fatal load error (a missing include) returns early, and the option
+    /// diagnostics still come with it, as `rledger check` reports both.
+    #[test]
+    fn validate_reports_option_errors_beside_a_fatal_load_error() {
+        let files = HashMap::from([(
+            "main.beancount".to_string(),
+            "option \"nosuch\" \"x\"\ninclude \"missing.beancount\"\n".to_string(),
+        )]);
+        let result = validate_with_filesystem(
+            Box::new(VirtualFileSystem::from_files(files)),
+            "main.beancount",
+        );
+        let e7001 = result
+            .errors
+            .iter()
+            .find(|e| e.code.as_deref() == Some("E7001"))
+            .unwrap_or_else(|| panic!("E7001 must be reported: {:?}", result.errors));
+        assert_eq!(
+            (e7001.file.as_deref(), e7001.line, e7001.column),
+            (Some("main.beancount"), Some(1), Some(1))
+        );
+        assert!(!result.valid);
     }
 
     /// A diamond — `shared` reached directly and again through `mid` — that

@@ -641,3 +641,45 @@ fn test_parse_invalid_account_on_bom_free_line_keeps_its_p0006() {
         result.errors
     );
 }
+
+/// The invalid token reported after a `<BOM>*` heading, or in the tail of a
+/// BOM-led account, is the one bean-check names: it starts past the valid
+/// tokens before it (`{#t{#$x` is `$x`, `"s"$x` is `$x`), and at a lone
+/// capital glued to what follows (`1A$x` is `A$x`, `A{#t` is `A{#t`, and
+/// `A{#`, where the lexer reads the capital and the `{#` apart, is `A{#`).
+#[test]
+fn test_parse_bom_line_reports_beancounts_invalid_token_text() {
+    for (line, token) in [
+        (format!("{BOM}* H {{#t{{#$x"), "$x"),
+        (format!("{BOM}* H 1A$x"), "A$x"),
+        (format!("{BOM}* H \"s\"$x"), "$x"),
+        (format!("{BOM}* H A{{#t"), "A{#t"),
+        (format!("{BOM}* H A{{#"), "A{#"),
+        (format!("{BOM}assets:A\"s\"$x"), "$x"),
+        (format!("{BOM}assets:A1A$x"), "$x"),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        let want = format!("unexpected input: invalid token '{token}'");
+        let texts: Vec<&str> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ParseErrorKind::SyntaxError(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, [want.as_str()], "{src:?}: {:?}", result.errors);
+        assert_eq!(result.errors.len(), 2, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// After a `{#` in a `<BOM>*` heading rest the lexer resumes mid-line: a
+/// `#` there is beancount's `HASH`, not a line-start `#` comment, so the
+/// `$x` after `{# ` is still an invalid token (two errors, as bean-check).
+#[test]
+fn test_parse_heading_rest_hash_after_brace_is_not_a_comment() {
+    let src = format!("{HEAD}{BOM}* H {{# $x\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+}

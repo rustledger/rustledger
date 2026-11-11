@@ -89,17 +89,22 @@ ordinary characters (`analog`), let the test tell a line rledger counts
 further from beancount than main only because main miscounted a BOM. The
 last column, beancount's counts with each mid-line `#!` / `#+` made an
 ordinary invalid run (`hash_bang_analog`), lets it tell a line whose whole
-difference is part 2 of #2928.
+difference is part 2 of #2928. The column after it, beancount's count for
+each line alone (`alone_cells`: after the head, under a bare `2024-01-02 *`
+header when indented), lets it tell a line whose difference comes only from
+the lines before it (beancount's error recovery, #2872).
 
 Output, one line per case, tab-separated:
 
-    <source>  <beancount>  <main>  <beancount analog>  <main analog>  <beancount hash-bang analog>
+    <source>  <beancount>  <main>  <beancount analog>  <main analog>  <beancount hash-bang analog>  <beancount alone>
 
 `<source>` is the input with each U+FEFF written `<BOM>`, each `\\n` written
 `\\\\n`, each `\\r` `\\\\r` and each tab `\\\\t` (no generated input holds a
 backslash or a `<`). Each count column is `line:count` pairs,
 comma-separated, ascending, empty when there is no error; an unclosed
 `pushtag` / `pushmeta` is line 0 on both sides, as in the parity harness.
+`<beancount alone>` lists every line after the head, a zero included, and
+leaves out a line beancount crashes or raises on alone.
 Changing the sets here needs nothing in the Rust test: it reads the sources
 from the table.
 """
@@ -183,6 +188,13 @@ CONTEXTS = [
     ("heading", "", BOM + "* Heading {T}", ""),
     # The same after a `{#t`, which beancount lexes as a `{` and a tag.
     ("heading-brace-hash", "", BOM + "* H {{#t {T}", ""),
+    # A BOM-led account line right after a line beancount cannot read, which
+    # its recovery skips in silence (#2872).
+    ("after-error", "foo\n", BOM + "assets:A {T}", ""),
+    # Two differences on one line: a glued BOM with a mid-line `#+`, and a
+    # glued BOM where a price expects its amount, with a construct error.
+    ("glued-hash-bang", TXN_BARE, "  " + BOM + "1:A:B  #+x {T}", LEGS),
+    ("glued-price", "", "2024-01-02 price USD 1 " + BOM + ":A\t{{1 USD}} {T}", ""),
 ]
 
 # Shapes the reviews of #2931 found, after HEAD.
@@ -238,6 +250,12 @@ EXTRA = [
     "2024-01-02 open Assets:C USD \"BAD\"\n  kk: " + BOM + "assets:D\n",
     # Round 10: a BOM-led account where a price expects its amount.
     "2024-01-02 price USD 1 " + BOM + "assets:A1 1\n",
+    # Round 11: a line with two differences, a glued BOM with a mid-line
+    # `#+` and with a construct error main also makes, and a BOM-led
+    # account line after an error line.
+    "2024-01-02 *\n  " + BOM + "1:A:B  #+x#t\t{#t$x\n",
+    "2024-01-02 price USD 1 " + BOM + ":A\t{1 USD}#t\n",
+    "foo\n" + BOM + "assets:A " + BOM + "\n",
 ]
 
 PROBE_SEED = 2931
@@ -515,6 +533,29 @@ def hash_bang_analog(src):
     return re.sub(r"(?<=[^\n])#(?=[!+])", "$", src)
 
 
+def alone_cells(parity, is_not_syntax, src, cache):
+    """beancount's count for each line of `src` after the head, alone: after
+    the head, under a bare `2024-01-02 *` header when indented (the Rust
+    test's `standalone_count`). A line beancount crashes on alone is left
+    out."""
+    out = []
+    lines = src.split("\n")
+    for at in range(3, len(lines) + 1):
+        text = lines[at - 1]
+        if at == len(lines) and not text:
+            break
+        if text not in cache:
+            header = TXN_BARE if text.lstrip(BOM)[:1] in (" ", "\t") else ""
+            cells = counts_in_child(parity, is_not_syntax, HEAD + header + text + "\n")
+            line = 4 if header else 3
+            cache[text] = None if cells is None else dict(
+                (int(a), int(b)) for a, b in (c.split(":") for c in cells.split(",") if c)
+            ).get(line, 0)
+        if cache[text] is not None:
+            out.append(f"{at}:{cache[text]}")
+    return ",".join(out)
+
+
 def rledger_cells(binary, sources):
     """The `parse_error_lines` binary's per-line counts for each source, an
     unclosed `pushtag` / `pushmeta` at line 0 as in the parity harness."""
@@ -546,6 +587,7 @@ def main():
     parity = load("parity", REPO / "scripts/compat-parse-error-parity.py")
     is_not_syntax = load("matrix", REPO / "scripts/stray-char-matrix.py").is_not_syntax
     seen = set()
+    alone_cache = {}
     rows = []
     sources = itertools.chain(
         matrix_cases(),
@@ -563,11 +605,11 @@ def main():
         if cells is None or analog_cells is None or hash_bang_cells is None:
             print(f"left out, beancount crashed or raised: {src!r}", file=sys.stderr)
             continue
-        rows.append((src, cells, analog_cells, hash_bang_cells))
+        rows.append((src, cells, analog_cells, hash_bang_cells, alone_cells(parity, is_not_syntax, src, alone_cache)))
     main = rledger_cells(args.main_binary, [row[0] for row in rows])
     main_analog = rledger_cells(args.main_binary, [analog(row[0]) for row in rows])
-    for (src, cells, analog_cells, hb), m, ma in zip(rows, main, main_analog):
-        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\t{hb}\n")
+    for (src, cells, analog_cells, hb, alone), m, ma in zip(rows, main, main_analog):
+        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\t{hb}\t{alone}\n")
 
 
 if __name__ == "__main__":

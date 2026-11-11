@@ -2083,9 +2083,11 @@ mod tests {
         // a backstop for a rescan the counters do not see (a lookahead that
         // trims the rest of the run itself). Linear, the long run takes about
         // `LONG / SHORT` times the short one; quadratic, the square of that.
-        // The budget allows four times the linear ratio, plus two seconds of
-        // slack, so a quadratic version fails once the budget runs out
-        // instead of hanging.
+        // The short run must take under a second (well under it linear, in a
+        // debug build), so a version quadratic on it fails in seconds; the
+        // long one gets ten times the linear ratio plus five seconds, room
+        // for a busy machine, and a quadratic version fails once that runs
+        // out instead of hanging.
         let shapes = |count: usize| {
             let run = bom.repeat(count);
             let accounts = format!("~{bom}1:A").repeat(count / 2);
@@ -2107,22 +2109,33 @@ mod tests {
             ]
         };
         for (short, long) in shapes(SHORT).into_iter().zip(shapes(LONG)) {
-            let short_took = linear_bom_run_cost(&short);
-            let budget = short_took * u32::try_from(4 * LONG / SHORT).expect("a small ratio")
-                + std::time::Duration::from_secs(2);
-            let (done, wait) = std::sync::mpsc::channel();
             let shape = long.chars().take(12).collect::<String>();
-            std::thread::spawn(move || {
+            let short_took = linear_bom_run_cost(&short);
+            assert!(
+                short_took < std::time::Duration::from_secs(1),
+                "{shape:?}...: {SHORT} BOMs took {short_took:?}: quadratic"
+            );
+            let budget = short_took * u32::try_from(10 * LONG / SHORT).expect("a small ratio")
+                + std::time::Duration::from_secs(5);
+            let (done, wait) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
                 let took = linear_bom_run_cost(&long);
                 // The receiver is gone only once the test has failed.
                 let _ = done.send(took);
             });
-            let took = wait.recv_timeout(budget).unwrap_or_else(|_| {
-                panic!(
+            let took = match wait.recv_timeout(budget) {
+                Ok(took) => took,
+                // The worker panicked (a counter assertion, say): its panic
+                // is the failure, not the time.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
+                    Err(panic) => std::panic::resume_unwind(panic),
+                    Ok(()) => panic!("{shape:?}...: the 1 MB run sent no time"),
+                },
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
                     "{shape:?}...: the 1 MB run took over {budget:?}, against {short_took:?} \
                      for the short one: quadratic"
-                )
-            });
+                ),
+            };
             assert!(took <= budget, "{shape:?}...: {took:?} over {budget:?}");
         }
     }
@@ -2697,5 +2710,17 @@ mod tests {
         for name in ["Assets:\u{e9}clair", "Assets:A_b", "Assets", "1A:B"] {
             assert!(!ok(name), "{name}");
         }
+    }
+
+    /// `new_mid_line` lexes from the middle of a line: no line-start rule
+    /// applies to its first token, so the blanks and the word before it are
+    /// not read as an indentation (`Indent`) ahead of the `#t`.
+    #[test]
+    fn test_token_iter_new_mid_line_applies_no_line_start_rule() {
+        let tokens: Vec<_> = TokenIter::new_mid_line(" x #t", true, 3).collect();
+        assert!(
+            matches!(tokens.as_slice(), [(Token::Tag("#t"), _)]),
+            "{tokens:?}"
+        );
     }
 }

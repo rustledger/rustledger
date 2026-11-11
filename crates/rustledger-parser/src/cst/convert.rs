@@ -9394,13 +9394,12 @@ pub(super) fn report_invalid_tokens_of_error_line(
             {
                 if let Some(blank) = text.find([' ', '\t']) {
                     let rest_start = range.start + blank;
-                    let (runs, comment) = invalid_runs(&text[blank..]);
+                    // The rest runs to the end of the line: a comment in it
+                    // leaves nothing after it to stop.
+                    let (runs, _) = invalid_runs(&text[blank..]);
                     for run in runs {
                         let at = rest_start + run.start..rest_start + run.end;
                         report(at.clone(), &stripped[at], out);
-                    }
-                    if comment {
-                        break;
                     }
                 }
                 continue;
@@ -9466,10 +9465,11 @@ fn invalid_runs(rest: &str) -> (Vec<std::ops::Range<usize>>, bool) {
     let mut tokens = TokenIter::new(rest, true);
     let mut comment = false;
     while let Some((token, span)) = tokens.next() {
-        match token {
+        let (span, error) = match token {
             Token::Whitespace(_) | Token::Newline => {
                 close(&mut run, &mut out);
                 after_lone_capital = false;
+                continue;
             }
             Token::Comment(_)
             | Token::PercentComment(_)
@@ -9478,40 +9478,41 @@ fn invalid_runs(rest: &str) -> (Vec<std::ops::Range<usize>>, bool) {
                 comment = true;
                 break;
             }
+            // The `{` alone; the lexer resumes after it.
             Token::LBraceHash => {
                 let brace_end = span.start + 1;
-                match run.as_mut() {
-                    Some((range, _)) => range.end = brace_end,
-                    None => run = Some((span.start..brace_end, false)),
-                }
-                after_lone_capital = false;
                 tokens = TokenIter::new_mid_line(rest, true, brace_end);
+                (span.start..brace_end, false)
             }
-            _ => {
-                // BOMs beancount reads into an account are no invalid token.
-                let invalid = matches!(token, Token::Error(t) if !is_bom_account_token(rest, span.start, t))
-                    || after_lone_capital;
-                // A run's range starts where beancount's invalid token does,
-                // past the valid tokens before it (`{#t{#$x` is `$x`).
-                let start = if after_lone_capital {
-                    prev_start
-                } else {
-                    span.start
-                };
-                match run.as_mut() {
-                    Some((range, bad)) => {
-                        if invalid && !*bad {
-                            range.start = start;
-                        }
-                        range.end = span.end;
-                        *bad |= invalid;
-                    }
-                    None => run = Some((span.start..span.end, invalid)),
+            // BOMs beancount reads into an account are no invalid token.
+            Token::Error(t) => (
+                span.start..span.end,
+                !is_bom_account_token(rest, span.start, t),
+            ),
+            _ => (span.start..span.end, false),
+        };
+        // A token glued to a lone capital is invalid from the capital on
+        // (`A{#t`, `A$x`).
+        let invalid = error || after_lone_capital;
+        // A run's range starts where beancount's invalid token does, past
+        // the valid tokens before it (`{#t{#$x` is `$x`).
+        let start = if after_lone_capital {
+            prev_start
+        } else {
+            span.start
+        };
+        match run.as_mut() {
+            Some((range, bad)) => {
+                if invalid && !*bad {
+                    range.start = start;
                 }
-                after_lone_capital = matches!(token, Token::Currency(c) if c.len() == 1);
-                prev_start = span.start;
+                range.end = span.end;
+                *bad |= invalid;
             }
+            None => run = Some((span.clone(), invalid)),
         }
+        after_lone_capital = matches!(token, Token::Currency(c) if c.len() == 1);
+        prev_start = span.start;
     }
     close(&mut run, &mut out);
     (out, comment)

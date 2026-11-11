@@ -31,6 +31,12 @@
 //! reason (and, for a recovery cause, the count beancount gives the line
 //! alone, which rledger must match). The update never writes that file, and
 //! refuses to run while a further-than-main line is not in it.
+//!
+//! The invalid tokens rledger names for each input with a BOM are recorded too,
+//! in `data/bom_combination_matrix_texts.tsv`, so a change in the reported
+//! token text fails even where the counts stay. An update that keeps a row's
+//! counts but changes its causes or its token texts also needs
+//! `BOM_MATRIX_RELABEL=1`: a plain update takes in moved counts only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -42,6 +48,18 @@ const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
 const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
 const KNOWN_PATH: &str = "tests/data/bom_combination_matrix_known.tsv";
 const WORSE_THAN_MAIN: &str = include_str!("data/bom_combination_matrix_worse_than_main.tsv");
+const TEXTS: &str = include_str!("data/bom_combination_matrix_texts.tsv");
+const TEXTS_PATH: &str = "tests/data/bom_combination_matrix_texts.tsv";
+
+/// The header of the texts list, which `BOM_MATRIX_UPDATE=1` writes back.
+const TEXTS_HEADER: &str = "\
+# The invalid tokens rledger names for each input of bom_combination_matrix.tsv
+# that holds a BOM and has any, written by tests/bom_combination_matrix.rs with
+# `BOM_MATRIX_UPDATE=1` and checked by it, so a change in the token text it
+# reports shows up even where the counts stay. One per line:
+#
+#   <source after the two `open` lines>  <line>:<token>|<line>:<token>...
+";
 
 /// The lines every generated input starts with (`HEAD` in the script), as
 /// the tables write them.
@@ -58,8 +76,9 @@ const KNOWN_HEADER: &str = "\
 #   <source after the two `open` lines>  <rledger's counts>  <causes>
 #
 # The causes are those of the input's differing lines, joined by `+`; the
-# test assigns each line one (`cause`), and its comments say what each one
-# is. Two come from #2928's own deliberate design, the rest predate it:
+# test assigns each line one (`cause`; one of two parts names both, joined
+# by `&`), and its comments say what each one is. Two come from #2928's
+# own deliberate design, the rest predate it:
 # `line-start-bom-before-comment` (a BOM that starts its line keeps its own
 # extent) and `bom-glued-to-account` (a BOM glued to an account is a `P0026`
 # with its quick fix). A line rledger counts further from beancount than
@@ -240,27 +259,54 @@ fn bom_glued_to_account(line: &str) -> bool {
     })
 }
 
-/// `src` with each run of BOMs that starts an account in beancount (as in
-/// `bom_glued_to_account`), and that account, written as the ordinary
-/// account `Assets:X`: an `ACCOUNT` token to beancount either way.
+/// The length of the account beancount's `ACCOUNT` rule reads at the start
+/// of `s`, whose first character is a BOM (a non-ASCII character, which the
+/// rule admits anywhere): name characters, then one or more `:` components,
+/// each starting with a capital, a digit or a non-ASCII character. `None`
+/// when there is no `:` component.
+fn beancount_account_len(s: &str) -> Option<usize> {
+    let name = |c: char| c.is_ascii_alphanumeric() || c == '-' || !c.is_ascii();
+    let starts = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || !c.is_ascii();
+    let first = s.chars().next()?;
+    let mut end = first.len_utf8();
+    end += s[end..].find(|c: char| !name(c)).unwrap_or(s.len() - end);
+    let mut components = 0;
+    while s[end..].starts_with(':') && s[end + 1..].chars().next().is_some_and(starts) {
+        end += 1;
+        end += s[end..].find(|c: char| !name(c)).unwrap_or(s.len() - end);
+        components += 1;
+    }
+    (components > 0).then_some(end)
+}
+
+/// `src` with each account beancount reads from a run of BOMs (one not glued
+/// to an account character before it) written as the ordinary account
+/// `Assets:X`: an `ACCOUNT` token to beancount either way.
 fn ordinary_accounts(src: &str) -> String {
-    let in_account =
-        |c: char| c.is_ascii_alphanumeric() || c == '-' || c == ':' || (!c.is_ascii() && c != BOM);
+    let in_account = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == ':' || !c.is_ascii();
     let mut out = String::with_capacity(src.len());
     let mut rest = src;
     while let Some(i) = rest.find(BOM) {
-        let after = strip_boms(&rest[i..]);
-        let word = &after[..after.find(|c: char| !in_account(c)).unwrap_or(after.len())];
-        let account = word.find(':').is_some_and(|j| word.len() > j + 1);
-        let skipped = rest.len() - after.len();
         out.push_str(&rest[..i]);
-        let starts = !out.chars().next_back().is_some_and(in_account);
-        if starts && account {
+        let from = &rest[i..];
+        // Glued to an account character before it, the BOM is inside that
+        // word; after a number (`-2.5<BOM>a-b:C`) beancount's longest match
+        // ends the number there and starts an account.
+        let word = &out[out.rfind([' ', '\t', '\n']).map_or(0, |i| i + 1)..];
+        let number = word
+            .trim_start_matches(['-', '+'])
+            .starts_with(|c: char| c.is_ascii_digit())
+            && word
+                .trim_start_matches(['-', '+'])
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == ',');
+        let glued = !number && out.chars().next_back().is_some_and(in_account);
+        if let Some(len) = beancount_account_len(from).filter(|_| !glued) {
             out.push_str("Assets:X");
-            rest = &after[word.len()..];
+            rest = &from[len..];
         } else {
-            out.push_str(&rest[i..skipped]);
-            rest = after;
+            out.push(BOM);
+            rest = &from[BOM.len_utf8()..];
         }
     }
     out.push_str(rest);
@@ -279,23 +325,139 @@ fn account_after_bom(line: &str) -> bool {
     })
 }
 
-/// Per-line counts of one input: beancount's, rledger's, main's, and
+/// Per-line counts of one input: beancount's, rledger's, main's,
 /// beancount's and main's for the input with its BOMs replaced by ordinary
-/// characters.
+/// characters, beancount's with each mid-line `#!` / `#+` made an ordinary
+/// invalid run, and beancount's for each line alone.
 struct Counts {
     bc: BTreeMap<usize, usize>,
     rl: BTreeMap<usize, usize>,
     main: BTreeMap<usize, usize>,
     analog_bc: BTreeMap<usize, usize>,
     analog_main: BTreeMap<usize, usize>,
+    hash_bang_bc: BTreeMap<usize, usize>,
+    /// A line beancount crashed on alone has no entry.
+    bc_alone: BTreeMap<usize, usize>,
     /// rledger's `P0026` and `P0006` errors per line.
     rl_bom: BTreeMap<usize, usize>,
     rl_account: BTreeMap<usize, usize>,
 }
 
+/// One line's difference, as the cause checks read it.
+struct LineFacts<'a> {
+    input: &'a str,
+    text: &'a str,
+    line: usize,
+    bc: usize,
+    rl: usize,
+    analog_bc: usize,
+    analog_main: usize,
+    hash_bang_bc: usize,
+    bc_alone: Option<usize>,
+    boms: usize,
+}
+
+impl LineFacts<'_> {
+    fn new<'a>(input: &'a str, text: &'a str, l: usize, counts: &Counts) -> LineFacts<'a> {
+        let get = |m: &BTreeMap<usize, usize>| m.get(&l).copied().unwrap_or(0);
+        LineFacts {
+            input,
+            text,
+            line: l,
+            bc: get(&counts.bc),
+            rl: get(&counts.rl),
+            analog_bc: get(&counts.analog_bc),
+            analog_main: get(&counts.analog_main),
+            hash_bang_bc: get(&counts.hash_bang_bc),
+            bc_alone: counts.bc_alone.get(&l).copied(),
+            boms: get(&counts.rl_bom),
+        }
+    }
+
+    /// Whether rledger counts the line alone as beancount does alone.
+    fn alone_matches(&self) -> bool {
+        self.bc_alone == Some(standalone_count(self.text))
+    }
+}
+
+/// The parts of a composite cause, `&`-joined in a cause's name.
+const GLUED: &str = "bom-glued-to-account";
+const HASH_BANG: &str = "mid-line-hash-bang";
+const CONSTRUCT: &str = "extra-construct-error";
+const GLUED_HASH_BANG: &str = "bom-glued-to-account&mid-line-hash-bang";
+const GLUED_CONSTRUCT: &str = "bom-glued-to-account&extra-construct-error";
+
+/// Whether `parts` (of `GLUED`, `HASH_BANG`, `CONSTRUCT`, in that order)
+/// explain line `f.line`'s whole difference: each part's share is not zero,
+/// and the shares add up to exactly rledger's count less beancount's. The
+/// parts are taken out one after the other, each share measured on what the
+/// parts before it left:
+///
+/// - `GLUED`: how many errors go when each account beancount reads with its
+///   BOMs is written as the ordinary account `Assets:X` (`ordinary_accounts`,
+///   an `ACCOUNT` to beancount either way, so its count stays): more than
+///   none, and no more than the line's `P0026`s;
+/// - `HASH_BANG`: the line has a mid-line `#!` / `#+`, and its share is how
+///   much of what is left of the difference goes when each is made an
+///   ordinary invalid run (`hash_bang_analog`, against beancount's own count
+///   for that input);
+/// - `CONSTRUCT`: main's own overcount of the BOM-free analog, beancount's
+///   and main's counts for the input with its BOMs replaced by ordinary
+///   characters.
+fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
+    let count = |s: &str| rledger_counts(s).get(&f.line).copied().unwrap_or(0);
+    let mut src = f.input.to_string();
+    let (mut r, mut b) = (f.rl, f.bc);
+    let mut shares = 0;
+    for part in parts {
+        let share = match *part {
+            GLUED => {
+                src = ordinary_accounts(&src);
+                let after = count(&src);
+                let share = signed(r) - signed(after);
+                if share <= 0 || share > signed(f.boms) {
+                    return false;
+                }
+                r = after;
+                share
+            }
+            HASH_BANG => {
+                if !mid_line_hash_bang(f.text) {
+                    return false;
+                }
+                src = hash_bang_analog(&src);
+                let after = count(&src);
+                let share = (signed(r) - signed(b)) - (signed(after) - signed(f.hash_bang_bc));
+                (r, b) = (after, f.hash_bang_bc);
+                share
+            }
+            CONSTRUCT => signed(f.analog_main) - signed(f.analog_bc),
+            _ => return false,
+        };
+        // A construct error only ever adds one.
+        if share == 0 || (*part == CONSTRUCT && share < 0) {
+            return false;
+        }
+        shares += share;
+    }
+    shares == signed(f.rl) - signed(f.bc)
+}
+
+/// Whether, with each account beancount reads with its BOMs written as an
+/// ordinary one, the line loses exactly as many `P0026`s as it counts more
+/// than beancount, and gains a non-BOM error in their place.
+fn glued_boms_replace_construct(f: &LineFacts<'_>) -> bool {
+    let after = rledger_lines(&ordinary_accounts(f.input));
+    let get = |m: &BTreeMap<usize, usize>| m.get(&f.line).copied().unwrap_or(0);
+    let (boms_after, all_after) = (get(&after.bom), get(&after.all));
+    let gone = signed(f.boms) - signed(boms_after);
+    let non_bom = |all: usize, boms: usize| signed(all) - signed(boms);
+    gone == signed(f.rl) - signed(f.bc) && non_bom(all_after, boms_after) > non_bom(f.rl, f.boms)
+}
+
 /// The cause of line `l`'s difference, or `None` when no rule explains it.
 /// `lines` are the input's lines (line `k` is `lines[k - 1]`).
-fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
+fn cause(lines: &[&str], l: usize, counts: &Counts, input: &str) -> Option<&'static str> {
     let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
     let (b, r, m) = (get(&counts.bc, l), get(&counts.rl, l), get(&counts.main, l));
     let line = |k: usize| {
@@ -305,22 +467,54 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
             .unwrap_or("")
     };
     let text = line(l);
+    let facts = LineFacts::new(input, text, l, counts);
     let worse = r.abs_diff(b) > m.abs_diff(b);
     // The errors rledger reports beyond beancount's, and how many of them
     // the named kind could be.
     let extra = r.saturating_sub(b);
-    let (boms, accounts) = (get(&counts.rl_bom, l), get(&counts.rl_account, l));
+    let accounts = get(&counts.rl_account, l);
+    let boms = get(&counts.rl_bom, l);
     // The block's header: the last line before `l` that is not indented.
     let header = (3..l).rev().find(|&k| !indented(line(k))).unwrap_or(3);
     let block_err = (header..l)
         .any(|k| get(&counts.bc, k) > 0 || line(k).trim_start_matches(is_blank).starts_with(BOM));
+    // The recovery causes, by the shape of the lines before `l`. Asked
+    // first, before any cause of the line's own, when the line alone counts
+    // as beancount counts it alone: then the lines before it are the whole
+    // difference (`foo` then `<BOM>assets:A <BOM>`). Otherwise asked after
+    // the line's own causes, as before.
+    let recovery = || {
+        if r <= b || l == 0 {
+            None
+        } else if indented(text) && strip_boms(line(header)).starts_with('*') {
+            // An indented line after a `*` heading: beancount ignores the
+            // heading and reads the line under the directive before it,
+            // rledger reports it.
+            Some("indented-line-after-heading")
+        } else if indented(text) && block_err {
+            // An indented line in a block whose header or an earlier line
+            // beancount could not read (or which starts with a BOM): its
+            // recovery skips the line in silence, rledger reports it (#2872).
+            Some("indented-line-after-error")
+        } else if get(&counts.bc, l - 1) > 0 {
+            // A line right after one beancount could not read: its recovery
+            // reports no grammar error there, rledger does (#2872).
+            Some("line-after-error-line")
+        } else {
+            None
+        }
+    };
     Some(
-        if worse && get(&counts.analog_bc, l) == b && get(&counts.analog_main, l) == r {
+        if let Some(c) = recovery().filter(|_| l > 0 && facts.alone_matches()) {
+            // A recovery cause whose line counts alone as beancount counts it
+            // alone: the lines before it are the whole difference. Asked first.
+            c
+        } else if worse && get(&counts.analog_bc, l) == b && get(&counts.analog_main, l) == r {
             // Further from beancount than main only because main miscounted the
             // BOM: the input with each BOM replaced by an ordinary character (a
             // run beancount reads into an account by `Ü`, any other by `$`) is
-            // counted the same way on main. Asked first: it is checked from the
-            // table, whatever else the line holds.
+            // counted the same way on main. Checked from
+            // the table, whatever else the line holds.
             "like-main-without-bom"
         } else if l == 0 {
             // A `pushtag` / `pushmeta` line with junk after it: beancount's
@@ -340,32 +534,40 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
             // and before the recovery causes, which hold only for a line that
             // counts right on its own.
             "invalid-account-after-invalid-token"
-        } else if r > b && bom_glued_to_account(text) && boms >= extra {
+        } else if let Some(c) = (r != b && bom_glued_to_account(text) && boms > 0)
+            .then(|| {
+                [
+                    (GLUED, &[GLUED][..]),
+                    (GLUED_HASH_BANG, &[GLUED, HASH_BANG][..]),
+                    (GLUED_CONSTRUCT, &[GLUED, CONSTRUCT][..]),
+                ]
+                .into_iter()
+                .find(|(_, parts)| parts_hold(parts, &facts))
+                .map(|(c, _)| c)
+            })
+            .flatten()
+        {
             // BOMs glued to an account (`$x <BOM>Assets:A`): beancount reads them
             // into the account and rejects the name on load; rledger reports the
             // stray BOM (`P0026`, with its quick fix: #2928's own design), one
-            // error more than beancount's parse errors for each: each error
-            // more is matched by a `P0026`.
-            "bom-glued-to-account"
-        } else if r > b && indented(text) && strip_boms(line(header)).starts_with('*') {
-            // An indented line after a `*` heading: beancount ignores the
-            // heading and reads the line under the directive before it, rledger
-            // reports it.
-            "indented-line-after-heading"
-        } else if r > b && indented(text) && block_err {
-            // An indented line in a block whose header or an earlier line
-            // beancount could not read (or which starts with a BOM): its
-            // recovery skips the line in silence, rledger reports it (#2872).
-            "indented-line-after-error"
-        } else if r > b && get(&counts.bc, l - 1) > 0 {
-            // A line right after one beancount could not read: its recovery
-            // reports no grammar error there, rledger does (#2872).
-            "line-after-error-line"
+            // error more than beancount's parse errors for each, verified by
+            // `parts_hold`. With a mid-line `#!` / `#+` on the line, or a
+            // construct error main also reports, both parts are named.
+            c
+        } else if r > b && bom_glued_to_account(text) && glued_boms_replace_construct(&facts) {
+            // The same glued BOMs, on a line their rewrite turns into one
+            // rledger reads with a construct error of its own (a posting's
+            // `unexpected trailing tokens`), so the line's count does not
+            // drop with the rewrite: its `P0026`s do, by exactly the
+            // difference, and one non-BOM error comes in their place.
+            "bom-glued-to-account-in-error-line"
+        } else if let Some(c) = recovery() {
+            c
         } else if mid_line_hash_bang(text) {
             // A `#!` or `#+` in the middle of a line: beancount lexes `#` and
             // `!` / `+`, here it is one token to the end of the line (part 2 of
             // #2928).
-            "mid-line-hash-bang"
+            HASH_BANG
         } else if lone_capital_glued(text) {
             // A lone capital glued to a token, or to the `\r` of a CRLF line:
             // beancount's `CAPITAL` needs a blank after it, so it starts an
@@ -387,10 +589,10 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
         } else if r < b && inner_bom(text) && boms > 0 {
             // A run with a BOM inside it, on a line whose BOM diagnostic already
             // stands for the line's first error, is left to that diagnostic (a
-            // `P0026` on the line): one error fewer than beancount. Reporting it fixes these, and 256 more
-            // fuzz-corpus inputs, but also turns 98 matching ones into
-            // mismatches, each a difference the old count happened to offset,
-            // so it is left for a change of its own.
+            // `P0026` on the line): one error fewer than beancount. Reporting it
+            // fixes these, and 256 more fuzz-corpus inputs, but also turns 98
+            // matching ones into mismatches, each a difference the old count
+            // happened to offset, so it is left for a change of its own.
             "inner-bom-under-line-error"
         } else if r < b {
             // beancount reports a later grammar error after the line's first
@@ -403,11 +605,13 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
             // A pop of a tag or key not pushed (its push failed): beancount
             // reports it, rledger does not.
             "pop-without-push"
-        } else if r > b && r == m {
+        } else if r > b && (r == m || parts_hold(&[CONSTRUCT], &facts)) {
             // rledger reports one more construct-level error (a custom value, a
             // price's link, a header's stray token, a pipe) on a line
-            // beancount's grammar abandons at its first error; the same on main.
-            "extra-construct-error"
+            // beancount's grammar abandons at its first error; the same on main,
+            // or, where a BOM changed main's count, on main for the BOM-free
+            // analog (`price USD 1 <BOM>x {1 USD}#t`).
+            CONSTRUCT
         } else {
             return None;
         },
@@ -418,16 +622,18 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
 type Entry = (String, String);
 
 /// What one table row yields: its known-list entry when it differs from
-/// beancount (`Err` names the lines no rule explains), and its lines rledger
-/// counts further from beancount than main, each with its cause and text.
+/// beancount (`Err` names the lines no rule explains), its lines rledger
+/// counts further from beancount than main, each with its cause and text,
+/// and the texts of its invalid-token errors.
 struct RowResult {
     tail: String,
     entry: Option<Result<Entry, String>>,
     worse: Vec<Worse>,
+    texts: String,
 }
 
 /// A line rledger counts further from beancount than main: its number, cause
-/// and text, and beancount's and rledger's counts there.
+/// and text, and the counts the cause checks read.
 struct Worse {
     line: usize,
     cause: &'static str,
@@ -441,36 +647,77 @@ struct Worse {
     /// (`hash_bang_analog`).
     input: String,
     hash_bang_bc: usize,
+    /// beancount's count for the line alone, when it did not crash.
+    bc_alone: Option<usize>,
     /// rledger's `P0026` and `P0006` errors on this line.
     boms: usize,
     accounts: usize,
 }
 
+impl Worse {
+    fn facts(&self) -> LineFacts<'_> {
+        LineFacts {
+            input: &self.input,
+            text: &self.text,
+            line: self.line,
+            bc: self.bc,
+            rl: self.rl,
+            analog_bc: self.analog_bc,
+            analog_main: self.analog_main,
+            hash_bang_bc: self.hash_bang_bc,
+            bc_alone: self.bc_alone,
+            boms: self.boms,
+        }
+    }
+}
+
+/// The invalid tokens rledger names in `src`, as `line:token` joined by `|`,
+/// so a change in what it reports shows up even where the counts stay.
+fn invalid_token_texts(src: &str) -> String {
+    let mut out = Vec::new();
+    for e in &parse(src).errors {
+        if let ParseErrorKind::SyntaxError(m) = &e.kind
+            && let Some(token) = m.strip_prefix("unexpected input: invalid token ")
+        {
+            let line = src[..e.span.start.min(src.len())].matches('\n').count() + 1;
+            out.push(format!("{line}:{token}"));
+        }
+    }
+    out.join("|")
+}
+
 fn check_row(line: &str) -> RowResult {
     let fields: Vec<&str> = line.split('\t').collect();
-    assert_eq!(fields.len(), 6, "malformed matrix line: {line:?}");
+    assert_eq!(fields.len(), 7, "malformed matrix line: {line:?}");
     let src = fields[0];
     let tail = src
         .strip_prefix(HEAD)
         .unwrap_or_else(|| panic!("matrix input without the head: {src:?}"))
         .to_string();
     let input = unescape(src);
-    let hash_bang_bc = parse_cells(fields[5]);
     let kinds = rledger_lines(&input);
     let counts = Counts {
         bc: parse_cells(fields[1]),
         main: parse_cells(fields[2]),
         analog_bc: parse_cells(fields[3]),
         analog_main: parse_cells(fields[4]),
+        hash_bang_bc: parse_cells(fields[5]),
+        bc_alone: parse_cells(fields[6]),
         rl: kinds.all,
         rl_bom: kinds.bom,
         rl_account: kinds.account,
+    };
+    let texts = if input.contains(BOM) {
+        invalid_token_texts(&input)
+    } else {
+        String::new()
     };
     if counts.rl == counts.bc {
         return RowResult {
             tail,
             entry: None,
             worse: Vec::new(),
+            texts,
         };
     }
     let lines: Vec<&str> = input.split('\n').collect();
@@ -484,7 +731,7 @@ fn check_row(line: &str) -> RowResult {
         if b == r {
             continue;
         }
-        match cause(&lines, l, &counts) {
+        match cause(&lines, l, &counts, &input) {
             Some(c) => {
                 causes.insert(c);
                 if r.abs_diff(b) > m.abs_diff(b) {
@@ -498,7 +745,8 @@ fn check_row(line: &str) -> RowResult {
                         analog_bc: get(&counts.analog_bc, l),
                         analog_main: get(&counts.analog_main, l),
                         input: input.clone(),
-                        hash_bang_bc: get(&hash_bang_bc, l),
+                        hash_bang_bc: get(&counts.hash_bang_bc, l),
+                        bc_alone: counts.bc_alone.get(&l).copied(),
                         boms: get(&counts.rl_bom, l),
                         accounts: get(&counts.rl_account, l),
                     });
@@ -524,6 +772,7 @@ fn check_row(line: &str) -> RowResult {
         tail,
         entry: Some(entry),
         worse,
+        texts,
     }
 }
 
@@ -571,50 +820,38 @@ fn accepted() -> BTreeMap<(&'static str, usize), Accepted<'static>> {
 ///
 /// - recovery (`RECOVERY_CAUSES`): wrong only after the lines before it, so
 ///   alone, after the head (under a bare transaction header when indented),
-///   rledger counts the line as beancount does alone;
+///   rledger counts the line as beancount does alone (the table's count, and
+///   the entry's, which must agree);
 /// - `like-main-without-bom`: the analog columns, beancount's and main's
 ///   counts for the input with its BOMs replaced by ordinary characters,
 ///   are beancount's and rledger's counts here;
+/// - `bom-glued-to-account`, `mid-line-hash-bang`, and a composite of them
+///   or of `bom-glued-to-account` and `extra-construct-error` (parts joined
+///   by `&`): each part verified, and together the line's whole difference
+///   (`parts_hold`);
 /// - the line's own difference (`INTRINSIC_CAUSES`): alone, rledger is off
 ///   from beancount the same way and at least as far as in context, or
 ///   rledger counts the line the same alone and beancount reports less in
 ///   context (its recovery after the line before); and the errors the cause
-///   names are there (`kinds_hold`);
-/// - `mid-line-hash-bang`: with each mid-line `#!` / `#+` made an ordinary
-///   invalid run, rledger counts the line as beancount does.
-///
-/// An accepted line names one cause and must pass that cause's check alone.
-/// A line off for two reasons at once (a mid-line `#+` and a glued BOM, say)
-/// is accepted only when the one cause the rules give accounts for all of
-/// its difference by that check; there is no composite entry.
+///   names are there (`kinds_hold`).
 const RECOVERY_CAUSES: &[&str] = &[
     "indented-line-after-error",
     "indented-line-after-heading",
     "line-after-error-line",
 ];
 const INTRINSIC_CAUSES: &[&str] = &[
-    "bom-glued-to-account",
     "inner-bom-under-line-error",
     "invalid-account-after-invalid-token",
 ];
 
 /// Whether the errors an intrinsic cause names are the difference:
 ///
-/// - `bom-glued-to-account`: every error more than beancount's is a `P0026`,
-///   and with each account beancount reads with its BOMs written as an
-///   ordinary one (`ordinary_accounts`, an `ACCOUNT` to beancount either
-///   way), rledger counts the line as beancount does: the rest of the line
-///   is read right, and only the stray-BOM diagnostics are added;
 /// - `invalid-account-after-invalid-token`: every error more is a `P0006`;
 /// - `inner-bom-under-line-error`: the line's `P0026` is there to stand for
 ///   the run with the BOM inside it.
 fn kinds_hold(cause: &str, w: &Worse) -> bool {
     let extra = w.rl.saturating_sub(w.bc);
     match cause {
-        "bom-glued-to-account" => {
-            let ordinary = rledger_counts(&ordinary_accounts(&w.input));
-            w.boms >= extra && ordinary.get(&w.line).copied().unwrap_or(0) == w.bc
-        }
         "invalid-account-after-invalid-token" => w.accounts >= extra,
         "inner-bom-under-line-error" => w.boms > 0,
         _ => false,
@@ -639,17 +876,19 @@ fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
     if a.cause == "like-main-without-bom" {
         return w.analog_bc == w.bc && w.analog_main == w.rl;
     }
-    if a.cause == "mid-line-hash-bang" {
-        // With each mid-line `#!` / `#+` an ordinary invalid run, rledger
-        // counts the line as beancount does: the `#!` / `#+` (part 2 of
-        // #2928) is the whole difference.
-        let variant = hash_bang_analog(&w.input);
-        let rl = rledger_counts(&variant).get(&w.line).copied().unwrap_or(0);
-        return rl == w.hash_bang_bc;
+    let parts: Vec<&str> = a.cause.split('&').collect();
+    if parts
+        .iter()
+        .all(|p| [GLUED, HASH_BANG, CONSTRUCT].contains(p))
+    {
+        return parts_hold(&parts, &w.facts());
     }
     let Some(bc_alone) = a.standalone else {
         return false;
     };
+    if w.bc_alone.is_some_and(|table| table != bc_alone) {
+        return false;
+    }
     let alone = standalone_count(&w.text);
     if RECOVERY_CAUSES.contains(&a.cause) {
         return alone == bc_alone;
@@ -671,8 +910,8 @@ fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
 }
 
 /// Check every line further from beancount than main against the accepted
-/// list: it must be there, and its accepted cause must hold (`holds`). A
-/// listed line no longer worse is stale.
+/// list: it must be there, with the cause the rules give, and that cause
+/// must hold (`holds`). A listed line no longer worse is stale.
 fn check_worse_than_main(worse: &[(String, Worse)]) -> Vec<String> {
     let accepted = accepted();
     let mut failures = Vec::new();
@@ -713,9 +952,13 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
     let mut computed: Vec<(String, String, String)> = Vec::new();
     let mut worse: Vec<(String, Worse)> = Vec::new();
     let mut failures = Vec::new();
+    let mut texts: Vec<(String, String)> = Vec::new();
     for line in DATA.lines() {
         rows += 1;
         let result = check_row(line);
+        if !result.texts.is_empty() {
+            texts.push((result.tail.clone(), result.texts.clone()));
+        }
         worse.extend(result.worse.into_iter().map(|w| (result.tail.clone(), w)));
         match result.entry {
             None => {}
@@ -742,11 +985,29 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
     );
 
     if std::env::var_os("BOM_MATRIX_UPDATE").is_some() {
+        // An update is for counts that moved. A row whose counts stay but
+        // whose causes or reported token texts change is a change to the
+        // rules or to the text, not to the counts: it needs
+        // `BOM_MATRIX_RELABEL=1` as well, so a weakened rule or a changed
+        // token text is not taken in by a plain update.
+        let relabels = relabeled_rows(&computed, &texts);
+        assert!(
+            relabels.is_empty() || std::env::var_os("BOM_MATRIX_RELABEL").is_some(),
+            "{} row(s) keep their counts but change their causes or token texts; \
+             set BOM_MATRIX_RELABEL=1 too if that is meant:\n{}",
+            relabels.len(),
+            relabels.join("\n")
+        );
         let mut out = KNOWN_HEADER.to_string();
         for (tail, counts, causes) in &computed {
             writeln!(out, "{tail}\t{counts}\t{causes}").expect("write to a String");
         }
         std::fs::write(KNOWN_PATH, out).expect("write the known list");
+        let mut out = TEXTS_HEADER.to_string();
+        for (tail, t) in &texts {
+            writeln!(out, "{tail}\t{t}").expect("write to a String");
+        }
+        std::fs::write(TEXTS_PATH, out).expect("write the texts list");
         return;
     }
 
@@ -779,4 +1040,70 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         gone.join("\n"),
         new.join("\n")
     );
+
+    let recorded: BTreeSet<(&str, &str)> = TEXTS
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+        .map(|l| {
+            l.split_once('\t')
+                .unwrap_or_else(|| panic!("malformed texts line: {l:?}"))
+        })
+        .collect();
+    let current: BTreeSet<(&str, &str)> = texts
+        .iter()
+        .map(|(t, x)| (t.as_str(), x.as_str()))
+        .collect();
+    let gone: Vec<String> = recorded
+        .difference(&current)
+        .map(|(t, x)| format!("- {t}\t{x}"))
+        .collect();
+    let new: Vec<String> = current
+        .difference(&recorded)
+        .map(|(t, x)| format!("+ {t}\t{x}"))
+        .collect();
+    assert!(
+        gone.is_empty() && new.is_empty(),
+        "the invalid-token texts changed (rerun with BOM_MATRIX_UPDATE=1 and read the \
+         diff):\n{}\n{}",
+        gone.join("\n"),
+        new.join("\n")
+    );
+}
+
+/// The rows whose counts are those the lists record but whose causes (known
+/// list) or reported token texts (texts list) differ from them.
+fn relabeled_rows(
+    computed: &[(String, String, String)],
+    texts: &[(String, String)],
+) -> Vec<String> {
+    let known: BTreeMap<&str, (&str, &str)> = KNOWN
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?, (f.next()?, f.next()?)))
+        })
+        .collect();
+    let recorded: BTreeMap<&str, &str> = TEXTS
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+        .filter_map(|l| l.split_once('\t'))
+        .collect();
+    let mut out = Vec::new();
+    for (tail, counts, causes) in computed {
+        if let Some((was_counts, was_causes)) = known.get(tail.as_str())
+            && was_counts == counts
+            && was_causes != causes
+        {
+            out.push(format!("causes {was_causes} -> {causes}: {tail}"));
+        }
+    }
+    for (tail, text) in texts {
+        if let Some(was) = recorded.get(tail.as_str())
+            && was != text
+        {
+            out.push(format!("token texts {was} -> {text}: {tail}"));
+        }
+    }
+    out
 }

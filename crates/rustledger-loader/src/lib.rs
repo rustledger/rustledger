@@ -611,8 +611,9 @@ impl Loader {
         // reported a missing document root that was present, and the same
         // ledger checked clean from inside `sub/` (#1999).
         let base_dir = source_map.files().first().map(SourceFile::dir);
-        let doc_warnings =
+        let mut doc_warnings =
             process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
+        options.locate(&mut doc_warnings);
         options.warnings.extend(doc_warnings);
         // E7010: an account option written as a full name. Here, once every
         // option is set, because `name_*` can follow the account options in
@@ -723,8 +724,9 @@ impl Loader {
         // books or what counts as balanced (#2151).
         let top_level = self.include_stack.len() == 1;
         for (key, value, span) in result.options {
-            // Where the option is, so a rejection that refuses queries
-            // (`Options::query_refusal`) can name its line.
+            // Where the option is: every diagnostic it raises carries this
+            // file and line, as beancount's do (#2925), and so does a
+            // rejection that refuses queries (`Options::query_refusal`).
             let site = source_map.get(file_id).map(|file| OptionSite {
                 file: file.path.display().to_string(),
                 line: file.line_col(span.start).0,

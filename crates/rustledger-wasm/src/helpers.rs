@@ -150,7 +150,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             .collect();
 
         let options = extract_options(&parse_result.options);
-        let option_errors = validate_option_tuples(&parse_result.options);
+        let option_errors = validate_option_tuples(&parse_result.options, &lookup);
 
         return ProcessedLedger {
             directives: Vec::new(),
@@ -177,7 +177,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         Ok(raw) => raw,
         Err(e) => {
             let options = extract_options(&parse_result.options);
-            let option_errors = validate_option_tuples(&parse_result.options);
+            let option_errors = validate_option_tuples(&parse_result.options, &lookup);
             return ProcessedLedger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
@@ -198,7 +198,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // loader ran, so these already exist — the single-source path used to drop
     // them on the floor here, which is why E7001/E7002 were invisible on every
     // entry point built on this function (#2299).
-    let option_errors = option_warnings_to_errors(&raw.options.warnings);
+    let option_errors = option_warnings_to_errors(&raw.options.warnings, false);
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → book → regular-plugins → finalize
@@ -383,8 +383,17 @@ pub fn account_types_from_raw(
 /// single-source path had nothing to call and reported no option diagnostics at
 /// all (#2299).
 ///
+/// The site goes on as the error's line (and the option's file, when
+/// `name_files`), as `rledger check` reports it: column 1, ending on the same
+/// line (#2925). `name_files` is false on the single-source entry points,
+/// whose errors carry no file (see [`Error::file`]); a multi-file ledger
+/// names the file each option is in, an included one among them.
+///
 /// [`OptionWarning`]: rustledger_loader::OptionWarning
-pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
+pub fn option_warnings_to_errors(
+    warnings: &[rustledger_loader::OptionWarning],
+    name_files: bool,
+) -> Vec<Error> {
     warnings
         .iter()
         .map(|w| {
@@ -393,7 +402,16 @@ pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) 
             } else {
                 Error::warning(w.message.clone())
             };
-            base.with_code(w.code).with_phase(w.phase())
+            let mapped = base.with_code(w.code).with_phase(w.phase());
+            match &w.site {
+                Some(site) => {
+                    let line = u32::try_from(site.line).unwrap_or(u32::MAX);
+                    mapped
+                        .with_file(name_files.then(|| site.file.clone()))
+                        .with_span((line, 1), (line, 1))
+                }
+                None => mapped,
+            }
         })
         .collect()
 }
@@ -408,15 +426,24 @@ pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) 
 ///
 /// [`Options`]: rustledger_loader::Options
 /// [`Options::set`]: rustledger_loader::Options::set
-pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Span)]) -> Vec<Error> {
+pub fn validate_option_tuples(
+    options: &[(String, String, rustledger_parser::Span)],
+    lookup: &LineLookup,
+) -> Vec<Error> {
     let mut opts = rustledger_loader::Options::new();
-    for (key, value, _span) in options {
-        opts.set(key, value);
+    for (key, value, span) in options {
+        // Each option's line, as the loader gives it; the file is not named
+        // on these single-source entry points.
+        let site = rustledger_loader::OptionSite {
+            file: String::new(),
+            line: lookup.byte_to_line_col(span.start).0 as usize,
+        };
+        opts.set_scoped_at(key, value, true, Some(site));
     }
     // E7010, which needs every option set first, as the loader raises it.
     let rooted = opts.rooted_leaf_warnings();
     opts.warnings.extend(rooted);
-    option_warnings_to_errors(&opts.warnings)
+    option_warnings_to_errors(&opts.warnings, false)
 }
 
 /// The effective booking method of a single-source ledger, read from its raw
@@ -765,15 +792,16 @@ mod option_diagnostic_tests {
     #[test]
     fn validate_option_tuples_raises_on_an_unknown_option() {
         let parsed = parse_beancount(BAD_OPTION);
-        let errors = validate_option_tuples(&parsed.options);
+        let errors = validate_option_tuples(&parsed.options, &LineLookup::new(BAD_OPTION));
         assert!(codes(&errors).contains(&"E7001"), "got {errors:?}");
     }
 
     #[test]
     fn validate_option_tuples_is_quiet_on_a_valid_option() {
-        let parsed = parse_beancount("option \"title\" \"My Ledger\"\n");
+        let src = "option \"title\" \"My Ledger\"\n";
+        let parsed = parse_beancount(src);
         assert!(
-            validate_option_tuples(&parsed.options).is_empty(),
+            validate_option_tuples(&parsed.options, &LineLookup::new(src)).is_empty(),
             "a valid option must not produce a diagnostic"
         );
     }
@@ -785,6 +813,15 @@ mod option_diagnostic_tests {
     /// raised on a *value*, which is a different arm than E7001's unknown key.
     #[test]
     fn both_paths_agree_for_every_option_code() {
+        // The line too: both paths give each option diagnostic its option's
+        // line (#2925), and neither names a file on this single-source path.
+        type Seen = (
+            Option<String>,
+            String,
+            Severity,
+            Option<u32>,
+            Option<String>,
+        );
         let cases: &[(&str, &str)] = &[
             ("E7001", "option \"nonsense_option\" \"x\"\n"),
             ("E7002", "option \"booking_method\" \"not_a_method\"\n"),
@@ -794,16 +831,25 @@ mod option_diagnostic_tests {
             ("none", "option \"title\" \"t\"\n"),
         ];
 
-        let seen = |errors: &[Error]| -> Vec<(Option<String>, String, Severity)> {
+        let seen = |errors: &[Error]| -> Vec<Seen> {
             errors
                 .iter()
-                .map(|e| (e.code.clone(), e.message.clone(), e.severity))
+                .map(|e| {
+                    (
+                        e.code.clone(),
+                        e.message.clone(),
+                        e.severity,
+                        e.line,
+                        e.file.clone(),
+                    )
+                })
                 .collect()
         };
 
         for (expected, opt) in cases {
             let src = format!("{opt}2024-01-01 open Assets:Cash USD\n");
-            let recomputed = validate_option_tuples(&parse_beancount(&src).options);
+            let recomputed =
+                validate_option_tuples(&parse_beancount(&src).options, &LineLookup::new(&src));
             let from_loader = load_and_book(&src).option_errors;
 
             assert_eq!(
@@ -819,6 +865,10 @@ mod option_diagnostic_tests {
                     codes(&recomputed).contains(expected),
                     "fixture must actually raise {expected}; got {:?}",
                     codes(&recomputed)
+                );
+                assert!(
+                    recomputed.iter().all(|e| e.line.is_some_and(|l| l >= 1)),
+                    "every option diagnostic has its line: {recomputed:?}"
                 );
             }
         }

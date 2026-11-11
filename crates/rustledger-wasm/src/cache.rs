@@ -446,7 +446,14 @@ use crate::types::{Error, LedgerOptions};
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
 /// and held v91 before #2930 took v92. v93 is held by #2931.)
-pub const CACHE_VERSION: u32 = 94;
+/// v99: loader v69, unchanged. Both payloads' option diagnostics move
+/// (#2925): each carries its option's line, and a `Ledger`'s its file too, and
+/// an invalid option in an included file is its converter's error
+/// (`E7002`, `E7008`, ...) instead of the `E7009` warning, which is left for
+/// a value the converter accepts. An older blob would keep serving them with
+/// no location and the old codes, and a `Ledger` with such an option as
+/// valid. (v95 to v98 are held by other open work.)
+pub const CACHE_VERSION: u32 = 99;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -1022,7 +1029,7 @@ option "operating_currency" "USD"
             query_refused: false,
         })
         .unwrap();
-        bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CACHE_VERSION + 1).to_le_bytes());
         assert!(
             deserialize_ledger(&bytes)
                 .unwrap_err()

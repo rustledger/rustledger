@@ -12,7 +12,7 @@ use rustledger_plugin::PluginManager;
 // The canonical advisory-only predicate lives in `rustledger-validate` so that
 // `check` (which hides these, mirroring bean-check) and `lint` share one source
 // of truth for which codes are advisory.
-use rustledger_plugin::escape_untrusted_text;
+use rustledger_plugin::{escape_untrusted_line, escape_untrusted_text};
 use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -695,12 +695,20 @@ pub fn run_with_writer<W: Write>(
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.
         let shown = rules.keep(warning.code);
+        // At the option's own file and line, as bean-check reports it
+        // (#2925); the top of the main file only for an option with no site.
+        let (site_file, site_line) = warning
+            .site
+            .as_ref()
+            .map_or((main_file_str.as_str(), 1), |site| {
+                (site.file.as_str(), site.line)
+            });
         if json_mode && shown {
             diagnostics.push(JsonDiagnostic {
-                file: main_file_str.clone(),
-                line: 1,
+                file: site_file.to_string(),
+                line: site_line,
                 column: 1,
-                end_line: 1,
+                end_line: site_line,
                 end_column: 1,
                 severity: severity.to_string(),
                 phase: warning.phase().to_string(),
@@ -714,9 +722,14 @@ pub fn run_with_writer<W: Write>(
             }
         } else if !args.quiet && shown {
             // An option's message quotes its value from the ledger (#2538).
+            // `file:line: severity[code]: message`, the compact form the
+            // other located diagnostics take when no snippet is rendered.
+            let location = warning.site.as_ref().map_or_else(String::new, |site| {
+                format!("{}:{}: ", escape_untrusted_line(&site.file), site.line)
+            });
             writeln!(
                 stdout,
-                "{severity}[{}]: {}",
+                "{location}{severity}[{}]: {}",
                 warning.code,
                 escape_untrusted_text(&warning.message)
             )?;

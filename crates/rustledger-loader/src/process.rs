@@ -2018,6 +2018,9 @@ pub fn document_root_warnings(
             ),
             option: "documents".to_string(),
             value: value.clone(),
+            // Located by `Options::locate`, which knows where each value was
+            // written; this function sees only the values.
+            site: None,
         })
         .collect()
 }

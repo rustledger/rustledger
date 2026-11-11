@@ -391,6 +391,9 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ## Option Errors (E7xxx)
 
+Every option diagnostic is reported at the file and line of its `option`, as
+`bean-check` reports them, an included file's among them.
+
 ### E7001: Unknown Option
 
 **Cause**: Unrecognized option name.
@@ -464,14 +467,25 @@ letters, digits and `-`, e.g. `option "name_equity" "Capital"`.
 ### E7009: Option in an Included File Is Ignored
 
 **Cause**: An option was set in an `include`d file rather than the top-level
-ledger. Most options are taken from the top-level file only, so the included
-value has no effect.
+ledger, with a value beancount accepts. Most options are taken from the
+top-level file only, so the included value has no effect.
 
 Options that describe the file declaring them still apply from anywhere:
 `operating_currency`, `documents`, `insert_pythonpath`, `display_precision`,
 and `plugin` directives. Everything else, notably `booking_method` and
 `inferred_tolerance_default`, comes from the top-level ledger, so a sub-ledger
 cannot change how the whole tree books or what counts as balanced.
+
+An included option is still checked, as beancount checks it when it parses the
+included file: an invalid value is its own error (`E7002`, `E7008`, ...) at the
+included file's line, not this warning, so `rledger check` exits 1 on it as
+`bean-check` does. A deprecated option is `E7004` there too.
+
+One deliberate difference from beancount: an included file's `name_*` option
+does not root that file's own accounts. beancount checks account roots while it
+parses each file, with that file's options, so `option "name_equity" "Capital"`
+followed by `open Capital:Z` in the same included file loads. rustledger keeps
+the top-level file's roots for the whole tree, so that `open` is `E1005`.
 
 **Fix**: Move the option to the top-level ledger if it should govern, or remove
 it if the sub-ledger only needed it when loaded standalone.

@@ -114,7 +114,9 @@ fn fingerprint(ledger: &Ledger) -> Fingerprint {
     Fingerprint {
         directives,
         documents,
-        options: ledger.options.clone(),
+        // What the options mean, not where they are written: a merge or
+        // split moves `option` lines to other files and lines (#2925).
+        options: ledger.options.without_locations(),
         plugins,
         errors,
         booking_method: format!("{:?}", ledger.booking_method),

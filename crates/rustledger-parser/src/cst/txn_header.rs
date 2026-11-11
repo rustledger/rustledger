@@ -341,9 +341,9 @@ impl HeaderStrings {
 /// - No string: no payee, an empty narration.
 ///
 /// The flag is the first token after the date that is not a string, a tag, a
-/// link or an invalid token: a transaction node only opens on a flag token
-/// or on one of those (`parser::identify_directive`), so no range is needed
-/// to tell it apart. A later date is an ordinary token.
+/// link or an invalid token: a transaction node only opens on a flag token,
+/// a string, a tag or a link (`parser::identify_directive`), so no range is
+/// needed to tell it apart. A later date is an ordinary token.
 ///
 /// Only the fields are recovered here. The invalid token is reported by the
 /// lexer whatever this returns, so the error count does not depend on it.
@@ -674,6 +674,9 @@ mod tests {
             (vec![date, star, s, t, l], H::Narration(0)),
             // No flag (#2905): the strings are read the same.
             (vec![date, s, bad], H::Payee(0)),
+            // No flag, an invalid token first: it is never the flag, so it
+            // stands before the string and the count rule stands.
+            (vec![date, bad, s, bad], H::Narration(0)),
             // Before the string: it stands in the payee's place.
             (vec![date, star, bad, s], H::Narration(0)),
             // After the string: the string keeps the payee's place.

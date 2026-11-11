@@ -332,7 +332,10 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     // Python can build that exponent: its context allows a final exponent
     // from `MIN_ETINY` to `MAX_EMAX`, so `0e1000000000000000000` is an error
     // in beancount and here.
-    if digits.bytes().all(|b| b == b'0' || b == b'.') {
+    if digits.bytes().all(|b| {
+        note_digits_scanned(1);
+        b == b'0' || b == b'.'
+    }) {
         let places = digits.split_once('.').map_or(0, |(_, frac)| frac.len());
         let places = i128::try_from(places).map_err(|_| not_held())?;
         let final_exponent = exponent.unwrap_or(0) - places;
@@ -403,12 +406,23 @@ fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
     let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
     let mut scale = i64::try_from(frac_part.len()).ok()?.checked_sub(exponent)?;
     let coefficient: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).collect();
-    let Some(first) = coefficient.iter().position(|&b| b != b'0') else {
+    note_digits_scanned(coefficient.len());
+    let Some(first) = coefficient.iter().position(|&b| {
+        note_digits_scanned(1);
+        b != b'0'
+    }) else {
         // Zero: keep the written scale, as far as a `Decimal` holds one.
         return Decimal::try_from_i128_with_scale(0, u32::try_from(scale.clamp(0, 28)).ok()?).ok();
     };
     let significant = &coefficient[first..];
-    let trailing_zeros = significant.iter().rev().take_while(|&&b| b == b'0').count();
+    let trailing_zeros = significant
+        .iter()
+        .rev()
+        .take_while(|&&b| {
+            note_digits_scanned(1);
+            b == b'0'
+        })
+        .count();
     // Trailing zeros that must go before the rest can fit: the scale past
     // 28, and the digits past the 29 a 96-bit coefficient can have.
     let len = i64::try_from(significant.len()).ok()?;
@@ -418,6 +432,7 @@ fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
     }
     let mut kept = significant.len() - usize::try_from(must_pop).ok()?;
     scale -= must_pop;
+    note_digits_scanned(kept);
     let mut n: i128 = std::str::from_utf8(&significant[..kept])
         .ok()?
         .parse()
@@ -438,6 +453,27 @@ fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
     }
     Decimal::try_from_i128_with_scale(n, u32::try_from(scale).ok()?).ok()
 }
+
+#[cfg(test)]
+thread_local! {
+    /// In tests, the digits [`exact_decimal`] and [`parse_beancount_decimal`]
+    /// have scanned on this thread: how the tests bound their work without
+    /// timing it (#2948).
+    static DIGITS_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `n` digits scanned by [`exact_decimal`] or
+/// [`parse_beancount_decimal`], in `DIGITS_SCANNED`.
+#[cfg(test)]
+fn note_digits_scanned(n: usize) {
+    DIGITS_SCANNED.with(|scanned| scanned.set(scanned.get() + n));
+}
+
+/// Outside tests, scanning a digit counts nothing (see the test build's
+/// version, which counts the work for the tests).
+#[cfg(not(test))]
+#[inline]
+const fn note_digits_scanned(_n: usize) {}
 
 /// Whether `c` is whitespace to Python's `str.isspace`, which `str.strip` and
 /// `Decimal(str)` strip: Unicode `White_Space` (what `char::is_whitespace`
@@ -2550,24 +2586,40 @@ mod tests {
 
     /// `exact_decimal` is linear in the value's length: the value is untrusted
     /// ledger text, and the LSP reads it on every edit. A version that
-    /// rescanned the leading zeros per trailing zero took 30 s here.
+    /// rescanned the leading zeros per trailing zero took 30 s on 160,000
+    /// zeros a side.
+    ///
+    /// Counts the digits scanned rather than timing the calls, so a loaded
+    /// machine cannot fail it and a quadratic scan cannot pass it (#2948):
+    /// each call may scan each digit of its input at most three times, where
+    /// a quadratic scan of these inputs scans millions.
     #[test]
-    fn test_exact_decimal_is_linear_on_long_input() {
-        let zeros = "0".repeat(160_000);
+    fn test_exact_decimal_linear_digit_scans_on_long_input() {
+        /// The digits `read` scans, checked against `input`'s length.
+        fn assert_linear<'a, T>(input: &'a str, read: impl FnOnce(&'a str) -> T) -> T {
+            DIGITS_SCANNED.with(|scanned| scanned.set(0));
+            let result = read(input);
+            let scanned = DIGITS_SCANNED.with(std::cell::Cell::get);
+            // At least one scan per digit, so a guard whose counters were
+            // dropped fails rather than passing at zero.
+            let digits = input.bytes().filter(u8::is_ascii_digit).count();
+            assert!(
+                (digits..=3 * input.len()).contains(&scanned),
+                "scanned {scanned} digits for a {}-byte input",
+                input.len()
+            );
+            result
+        }
+
+        let zeros = "0".repeat(4_000);
         let value = format!("USD:{zeros}1{zeros}");
+        assert!(assert_linear(&value, parse_tolerance_map).is_err());
         let multiplier = format!("{zeros}1{zeros}");
-        let start = std::time::Instant::now();
-        assert!(parse_tolerance_map(&value).is_err());
-        assert!(parse_beancount_decimal(&multiplier).is_err());
+        assert!(assert_linear(&multiplier, parse_beancount_decimal).is_err());
         let fraction = format!("USD:0.{zeros}");
         assert_eq!(
-            parse_tolerance_map(&fraction).map(|(_, d)| d.scale()),
+            assert_linear(&fraction, parse_tolerance_map).map(|(_, d)| d.scale()),
             Ok(28)
-        );
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "took {:?}",
-            start.elapsed()
         );
     }
 

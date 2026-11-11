@@ -1488,3 +1488,270 @@ mod option_warning_severity_tests {
         );
     }
 }
+
+/// Every directive type, and every value a `custom` directive or a metadata
+/// entry can hold, survives `serialize` / `fromCache` on both cached types
+/// (#2934).
+///
+/// A `custom` directive or any metadata entry archives a `MetaValue`, whose
+/// `Int(i64)` variant gives it 8-byte alignment. The blob's 12-byte header
+/// left the archive at offset 12, so every such value sat 4 bytes off its
+/// alignment and `fromCache` threw `Deserialization failed: unaligned
+/// pointer`. The round trip only ever ran on ledgers without either, so
+/// nothing caught it.
+///
+/// These run natively under `cargo test` and in node under `wasm-pack test
+/// --node`, where the bytes reach `fromCache` through a JS `Uint8Array`.
+#[cfg(test)]
+mod cache_round_trip_tests {
+    use super::*;
+
+    /// One ledger per directive type, per metadata value type and per
+    /// `custom` value type, and ledgers with each kind of error.
+    const CASES: &[(&str, &str)] = &[
+        ("empty", ""),
+        (
+            "open and close",
+            "2024-01-01 open Assets:Bank USD,EUR \"FIFO\"\n2024-12-31 close Assets:Bank\n",
+        ),
+        (
+            "commodity",
+            "2024-01-01 commodity USD\n  name: \"US Dollar\"\n",
+        ),
+        (
+            "transaction",
+            "2024-01-01 open Assets:Bank USD\n2024-01-01 open Assets:Stock\n\
+2024-01-01 open Expenses:Food USD\n\
+2024-01-02 * \"Shop\" \"Lunch\" #trip ^receipt-1\n  Expenses:Food  5.00 USD\n  Assets:Bank\n\
+2024-01-03 ! \"Broker\"\n  Assets:Stock  10 HOOL {100.00 USD} @ 101.00 USD\n  Assets:Bank  -1000.00 USD\n",
+        ),
+        (
+            "balance and pad",
+            "2024-01-01 open Assets:Bank USD\n2024-01-01 open Equity:Opening\n\
+2024-01-01 pad Assets:Bank Equity:Opening\n2024-01-02 balance Assets:Bank 100.00 USD\n",
+        ),
+        (
+            "price",
+            "2024-01-01 commodity HOOL\n2024-01-02 price HOOL 101.50 USD\n",
+        ),
+        (
+            "note, document, event, query",
+            "2024-01-01 open Assets:Bank\n2024-01-02 note Assets:Bank \"called them\"\n\
+2024-01-03 document Assets:Bank \"statement.pdf\"\n2024-01-04 event \"location\" \"Paris\"\n\
+2024-01-05 query \"cash\" \"SELECT account\"\n",
+        ),
+        ("custom with no values", "2024-01-01 custom \"budget\"\n"),
+        (
+            "custom string",
+            "2024-01-01 custom \"budget\" \"monthly\"\n",
+        ),
+        ("custom date", "2024-01-01 custom \"budget\" 2024-02-01\n"),
+        ("custom bool", "2024-01-01 custom \"budget\" TRUE\n"),
+        ("custom number", "2024-01-01 custom \"budget\" 2.5\n"),
+        ("custom integer", "2024-01-01 custom \"budget\" 42\n"),
+        ("custom amount", "2024-01-01 custom \"budget\" 100.00 USD\n"),
+        (
+            "custom account",
+            "2024-01-01 open Expenses:Food\n2024-01-01 custom \"budget\" Expenses:Food\n",
+        ),
+        (
+            "custom every value",
+            // `concat!` rather than `\` continuations, which would strip the
+            // indentation that makes a line metadata.
+            concat!(
+                "2024-01-01 open Expenses:Food\n",
+                "2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 2024-02-01 TRUE 42 2.5 ",
+                "100.00 USD\n",
+                "  memo: \"meta on a custom\"\n",
+            ),
+        ),
+        (
+            "metadata every value",
+            concat!(
+                "2024-01-01 open Assets:Bank USD\n",
+                "  text: \"s\"\n",
+                "  acct: Assets:Bank\n",
+                "  cur: USD\n",
+                "  tag: #t\n",
+                "  day: 2024-01-02\n",
+                "  num: 2.5\n",
+                "  int: 42\n",
+                "  flag: FALSE\n",
+                "  amt: 1.00 USD\n",
+                "  empty:\n",
+                "2024-01-02 * \"x\"\n",
+                "  txn: 1\n",
+                "  Assets:Bank  1.00 USD\n",
+                "    post: \"p\"\n",
+                "  Assets:Bank  -1.00 USD\n",
+            ),
+        ),
+        (
+            "validation error",
+            "2024-01-01 open Assets:Bank USD\n2024-01-02 balance Assets:Bank 5.00 USD\n\
+2024-01-03 custom \"budget\" Assets:Bank 1.00 USD\n",
+        ),
+        (
+            "parse error",
+            "2024-01-01 open Assets:Bank USD\n  note: \"x\"\n2024-13-45 open Assets:Bad\n\
+2024-01-02 custom \"budget\" 1\n",
+        ),
+        (
+            "option error",
+            "option \"nonsense_option\" \"x\"\n2024-01-01 custom \"budget\" \"x\"\n",
+        ),
+    ];
+
+    /// `src` restores from cache as both `ParsedLedger` and `Ledger`, with the
+    /// same directives, errors and options as the ledger that wrote it.
+    fn assert_round_trips(name: &str, src: &str) {
+        let fresh = ParsedLedger::new(src);
+        let bytes = fresh
+            .serialize()
+            .unwrap_or_else(|_| panic!("{name}: ParsedLedger.serialize failed"));
+        // Decode once through the payload function first: its error is a
+        // `String`, which reads natively, where a `JsError` cannot.
+        if let Err(e) = cache::deserialize_parsed(&bytes) {
+            panic!("{name}: ParsedLedger.fromCache: {e}");
+        }
+        let restored = ParsedLedger::from_cache(&bytes, src)
+            .unwrap_or_else(|_| panic!("{name}: ParsedLedger.fromCache failed"));
+        assert_eq!(
+            restored.directives, fresh.directives,
+            "{name}: ParsedLedger directives"
+        );
+        for (what, a, b) in [
+            ("parse errors", &restored.parse_errors, &fresh.parse_errors),
+            (
+                "option errors",
+                &restored.option_errors,
+                &fresh.option_errors,
+            ),
+            (
+                "validation errors",
+                &restored.validation_errors,
+                &fresh.validation_errors,
+            ),
+        ] {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "{name}: ParsedLedger {what}"
+            );
+        }
+        assert_eq!(
+            format!("{:?}", restored.options),
+            format!("{:?}", fresh.options),
+            "{name}: ParsedLedger options"
+        );
+        assert_eq!(
+            restored.query_refused, fresh.query_refused,
+            "{name}: ParsedLedger query_refused"
+        );
+
+        let entry = "main.beancount";
+        let fresh =
+            Ledger::from_file_map(HashMap::from([(entry.to_string(), src.to_string())]), entry)
+                .unwrap_or_else(|e| panic!("{name}: Ledger load: {e}"));
+        let bytes = fresh
+            .serialize()
+            .unwrap_or_else(|_| panic!("{name}: Ledger.serialize failed"));
+        if let Err(e) = cache::deserialize_ledger(&bytes) {
+            panic!("{name}: Ledger.fromCache: {e}");
+        }
+        let restored = Ledger::from_cache(&bytes)
+            .unwrap_or_else(|_| panic!("{name}: Ledger.fromCache failed"));
+        assert_eq!(
+            restored.directives, fresh.directives,
+            "{name}: Ledger directives"
+        );
+        assert_eq!(
+            format!("{:?}", restored.errors),
+            format!("{:?}", fresh.errors),
+            "{name}: Ledger errors"
+        );
+        assert_eq!(
+            restored.directive_positions, fresh.directive_positions,
+            "{name}: Ledger directive positions"
+        );
+        assert_eq!(
+            format!("{:?}", restored.options),
+            format!("{:?}", fresh.options),
+            "{name}: Ledger options"
+        );
+        assert_eq!(
+            restored.query_refused, fresh.query_refused,
+            "{name}: Ledger query_refused"
+        );
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn every_directive_and_value_type_survives_the_cache_round_trip() {
+        for (name, src) in CASES {
+            // A parse error empties `ParsedLedger`'s directives, so a fixture
+            // that failed to parse by accident would cover nothing.
+            let parsed = ParsedLedger::new(src);
+            assert_eq!(
+                parsed.parse_errors.is_empty(),
+                *name != "parse error",
+                "{name}: unexpected parse errors {:?}",
+                parsed.parse_errors
+            );
+            assert_eq!(
+                parsed.directives.is_empty(),
+                *name == "empty" || *name == "parse error",
+                "{name}: the fixture must load directives"
+            );
+            assert_round_trips(name, src);
+        }
+    }
+
+    /// Every `.beancount` file in the repository's test corpora round-trips,
+    /// each loaded on its own. Native only: node has no file system to walk.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_corpus_ledger_survives_the_cache_round_trip() {
+        fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().is_some_and(|x| x == "beancount") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        collect(&root.join("tests"), &mut files);
+        collect(&root.join("examples"), &mut files);
+        files.sort();
+        assert!(
+            files.len() > 100,
+            "the corpus is missing: found {} files under {}",
+            files.len(),
+            root.display()
+        );
+
+        let mut with_custom = 0;
+        for path in &files {
+            let bytes =
+                std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            // A few fixtures are deliberately not UTF-8; JS hands `fromCache` a
+            // string, so read them as it would.
+            let src = String::from_utf8_lossy(&bytes);
+            if src.contains(" custom ") {
+                with_custom += 1;
+            }
+            assert_round_trips(&path.display().to_string(), &src);
+        }
+        assert!(
+            with_custom > 0,
+            "the corpus must hold a `custom` directive to cover #2934"
+        );
+    }
+}

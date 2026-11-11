@@ -984,8 +984,15 @@ pub fn load_cache_entry_in(main_file: &Path, env: &CacheEnv) -> Option<CacheEntr
         return None;
     }
 
-    // Read data
-    let mut data = vec![0u8; header.data_len as usize];
+    // Read data, straight into a buffer aligned for every archived type.
+    // `rkyv::from_bytes` reads the archive in place, and `ArchivedMetaValue`
+    // (every `custom` value and metadata entry) needs 8-byte alignment. A
+    // `Vec<u8>` promises only 1; it worked because the system allocator
+    // happens to hand back 16-aligned blocks, which nothing guarantees (the
+    // WASM cache, whose archive sits after its header, failed on exactly this:
+    // #2934). The file format is unchanged.
+    let mut data = rkyv::util::AlignedVec::<16>::new();
+    data.resize(usize::try_from(header.data_len).ok()?, 0);
     file.read_exact(&mut data).ok()?;
 
     // Deserialize
@@ -1326,6 +1333,45 @@ mod tests {
         assert_eq!(loaded.plugins[0].name, "test_plugin");
         assert_eq!(loaded.plugins[0].config, Some("config".to_string()));
         assert_eq!(loaded.files.len(), 1);
+    }
+
+    /// `custom` values and metadata, which archive `MetaValue` (8-byte
+    /// aligned), survive a save and a load (#2934). The WASM cache failed on
+    /// exactly these; this one reads its archive into an aligned buffer so it
+    /// cannot, whatever the allocator hands back.
+    #[test]
+    fn test_save_load_cache_entry_custom_and_metadata() {
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
+        let beancount_file = temp_dir.path().join("custom.beancount");
+        let source = "2024-01-01 open Assets:Bank USD\n  text: \"s\"\n  int: 42\n  day: 2024-01-02\n\
+2024-01-02 custom \"budget\" Assets:Bank \"monthly\" 2024-02-01 TRUE 42 2.5 1.00 USD\n";
+        fs::write(&beancount_file, source).expect("write the ledger");
+
+        let (directives, errors) = rustledger_parser::parse_directives(source);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            directives
+                .iter()
+                .any(|d| matches!(d.value, Directive::Custom(_))),
+            "the fixture must hold a custom directive"
+        );
+        let entry = CacheEntry {
+            directives,
+            options: CachedOptions::from(&Options::new()),
+            plugins: vec![],
+            files: vec![beancount_file.to_string_lossy().to_string()],
+        };
+
+        save_cache_entry_in(&beancount_file, &entry, &no_env()).expect("save failed");
+        let loaded = load_cache_entry_in(&beancount_file, &no_env()).expect("load failed");
+
+        let values = |e: &CacheEntry| {
+            e.directives
+                .iter()
+                .map(|d| d.value.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&loaded), values(&entry));
     }
 
     #[test]

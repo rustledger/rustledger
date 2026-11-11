@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use rustledger_core::{
     Amount, CostNumber, CostSpec, Directive, Inventory, NaiveDate, Position, Posting, Transaction,
+    python_inventory_str,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -176,65 +177,6 @@ impl OrderedBalance {
     /// Python's `str(Inventory)` of this balance; see [`python_inventory_str`].
     fn render(&self) -> String {
         python_inventory_str(&self.positions)
-    }
-}
-
-/// Python's `str(Inventory)`: `(55.00 USD, 10 AAPL {150.00 USD,
-/// 2024-01-03})`, SORTED by beancount's `Position.sortkey`, not in the
-/// balance's own order. The key is a currency rank (USD, EUR, JPY, CAD,
-/// GBP, AUD, NZD, CHF first; any other currency `8 + len(code)`), then the
-/// cost number, the cost currency and the units. The sort is stable, as
-/// Python's is. So bean-query names `(-55.00 USD, 50.00 EUR)` while
-/// listing the EUR posting first.
-///
-/// Shared by the `C` conversions narration and BQL's `str()` (#2822), so
-/// the two renderings of one inventory cannot drift.
-pub(super) fn python_inventory_str<'a>(
-    positions: impl IntoIterator<Item = &'a Position>,
-) -> String {
-    const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
-    let rank = |currency: &str| {
-        CURRENCY_ORDER
-            .iter()
-            .position(|c| *c == currency)
-            .unwrap_or(CURRENCY_ORDER.len() + currency.len())
-    };
-    let mut sorted: Vec<&Position> = positions.into_iter().collect();
-    sorted.sort_by(|a, b| {
-        let key = |p: &Position| {
-            (
-                rank(p.units.currency.as_str()),
-                p.cost
-                    .as_ref()
-                    .map_or(rustledger_core::Decimal::ZERO, |c| c.number),
-                p.cost
-                    .as_ref()
-                    .map_or_else(String::new, |c| c.currency.to_string()),
-                p.units.number,
-            )
-        };
-        key(a).cmp(&key(b))
-    });
-    let positions: Vec<String> = sorted.into_iter().map(python_position_str).collect();
-    format!("({})", positions.join(", "))
-}
-
-/// Python's `str(Position)`: `10 AAPL {150.00 USD, 2024-01-03, "lot"}`, the
-/// cost with no space inside its braces (the bean-query CELL renderer, and
-/// [`Position`]'s `Display`, write `{ 150.00 USD}` instead).
-pub(super) fn python_position_str(p: &Position) -> String {
-    match &p.cost {
-        None => p.units.to_string(),
-        Some(cost) => {
-            let mut parts = vec![format!("{} {}", cost.number, cost.currency)];
-            if let Some(date) = cost.date {
-                parts.push(date.to_string());
-            }
-            if let Some(label) = &cost.label {
-                parts.push(format!("\"{label}\""));
-            }
-            format!("{} {{{}}}", p.units, parts.join(", "))
-        }
     }
 }
 

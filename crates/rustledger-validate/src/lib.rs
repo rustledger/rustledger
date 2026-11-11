@@ -23,6 +23,7 @@
 //! | E2002 | Balance exceeds explicit tolerance |
 //! | E2003 | Pad without subsequent balance |
 //! | E2004 | Retired in 0.25.0 (was: multiple pads for one balance) |
+//! | E2005 | Pad of a currency held at cost |
 //! | E3001 | Transaction does not balance |
 //! | E3002 | Multiple missing amounts in transaction |
 //! | E3003 | Transaction has no postings |
@@ -50,7 +51,6 @@ mod validators;
 mod booking_record_tests;
 
 pub use error::{ErrorCode, Severity, ValidationError, is_advisory_only_code};
-pub use validators::balance::balance_tolerance;
 
 /// Which phase of two-phase validation to run.
 ///
@@ -202,6 +202,46 @@ pub struct ValidationOptions {
     /// re-raising the very `NoMatchingLot`/`AmbiguousMatch` errors
     /// the booker just decided to skip under `NONE` (issue #1182).
     pub default_booking_method: BookingMethod,
+    /// Where a located directive comes in beancount's entry order, from its
+    /// file id and byte offset: its line (`(date, type, lineno)`) and its
+    /// file's place in the load, which breaks a tie on the line. The order
+    /// decides the order a pad group meets its accounts, and so the order of
+    /// tied positions in an "Attempt to pad an entry with cost" (#2901).
+    ///
+    /// Without it, a source directive's byte offset stands in for its line
+    /// (it orders one file's directives as their lines do), and a plugin's
+    /// directive is line 0: the line a plugin gave it is kept in the source
+    /// map, which this crate does not see.
+    pub source_lines: Option<SourceLines>,
+}
+
+/// A located directive's place in beancount's entry order from its file id
+/// and byte offset; see [`ValidationOptions::source_lines`].
+#[derive(Clone)]
+pub struct SourceLines(
+    std::sync::Arc<dyn Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync>,
+);
+
+impl SourceLines {
+    /// Wrap `position_of`, which gives the position of byte `offset` of file
+    /// `file_id`.
+    pub fn new(
+        position_of: impl Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync + 'static,
+    ) -> Self {
+        Self(std::sync::Arc::new(position_of))
+    }
+
+    /// The position of byte `offset` of file `file_id`.
+    #[must_use]
+    pub fn position(&self, file_id: u16, offset: usize) -> rustledger_booking::SourcePosition {
+        (self.0)(file_id, offset)
+    }
+}
+
+impl std::fmt::Debug for SourceLines {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SourceLines(..)")
+    }
 }
 
 impl Default for ValidationOptions {
@@ -225,6 +265,7 @@ impl Default for ValidationOptions {
             tolerance_multiplier: Decimal::new(5, 1), // 0.5
             inferred_tolerance_default: FxHashMap::default(),
             default_booking_method: BookingMethod::default(),
+            source_lines: None,
         }
     }
 }
@@ -313,6 +354,13 @@ impl ValidationOptions {
         self.default_booking_method = method;
         self
     }
+
+    /// Set [`Self::source_lines`].
+    #[must_use]
+    pub fn with_source_lines(mut self, source_lines: SourceLines) -> Self {
+        self.source_lines = Some(source_lines);
+        self
+    }
 }
 
 /// The padding the late walk applies: `rustledger_booking::plan_pads` over
@@ -332,6 +380,12 @@ pub(crate) struct PadState {
     padding: FxHashMap<usize, Vec<rustledger_booking::PlannedPadding>>,
     /// The `pad`s that insert no padding, by index.
     unused: FxHashSet<usize>,
+    /// Beancount's "pad an entry with cost" for each `balance` the plan
+    /// padded a currency held at cost for, with the padded account, by the
+    /// balance's index in the late stream. The plan derives it from each pad
+    /// group's own inventory (`rustledger_booking::PaddedAtCost`); the walk
+    /// only reports it, at the balance.
+    at_cost: FxHashMap<usize, Vec<(Account, rustledger_booking::PaddedAtCost)>>,
     /// Pad amounts that could not be computed or applied, by the index of
     /// the `balance` they were for.
     failed: FxHashMap<usize, rustledger_booking::PadError>,
@@ -356,7 +410,15 @@ impl PadState {
     /// those from the validator's own inventories.
     fn load(&mut self, plan: rustledger_booking::PadPlan) {
         self.padding.clear();
-        for padding in plan.paddings {
+        self.at_cost.clear();
+        for mut padding in plan.paddings {
+            // Moved, not copied: the padding entry keeps no use for it.
+            if let Some(at_cost) = padding.at_cost.take() {
+                self.at_cost
+                    .entry(padding.origin.balance)
+                    .or_default()
+                    .push((padding.target.clone(), at_cost));
+            }
             self.padding
                 .entry(padding.origin.pad)
                 .or_default()
@@ -370,6 +432,16 @@ impl PadState {
     /// `balance` at `index` (#1863), if any.
     pub(crate) fn failure_of(&self, index: usize) -> Option<&rustledger_booking::PadError> {
         self.failed.get(&index)
+    }
+
+    /// The "pad an entry with cost" of the padding inserted for the
+    /// `balance` at `index`, one per pad group that padded a currency it
+    /// held at cost.
+    pub(crate) fn at_cost_of(
+        &self,
+        index: usize,
+    ) -> &[(Account, rustledger_booking::PaddedAtCost)] {
+        self.at_cost.get(&index).map_or(&[], Vec::as_slice)
     }
 
     /// The padding entries of the `pad` at `index`.
@@ -793,7 +865,50 @@ fn validate_phase_inner<D: ValidatableDirective>(
             .iter()
             .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
     {
-        let plan = rustledger_booking::plan_pads(keyed.iter().map(|(_, i, d)| (*i, d.directive())));
+        // Each directive's place in beancount's entry order
+        // (`ValidationOptions::source_lines`). Without the source map's
+        // positions, a source directive's byte offset stands in for its line
+        // (it orders one file as its lines do) and any other located
+        // directive (a plugin's) is line 0; one with no location keeps its
+        // place. Looked up only when the plan reads them: a line table per
+        // file and a lookup per directive is work a ledger with no lot at
+        // cost under a pad would pay for nothing.
+        let lines = state.options.source_lines.clone();
+        let reads_positions = rustledger_booking::pad_plan_reads_positions(
+            keyed.iter().map(|(_, _, d)| d.directive()),
+        );
+        let plan = rustledger_booking::plan_pads(
+            keyed.iter().map(|(_, i, d)| {
+                if !reads_positions {
+                    return (
+                        *i,
+                        d.directive(),
+                        rustledger_booking::SourcePosition::at_index(*i),
+                    );
+                }
+                let position = d.span_info().map_or(
+                    rustledger_booking::SourcePosition::at_index(*i),
+                    |(span, file_id)| {
+                        lines.as_ref().map_or_else(
+                            || {
+                                if rustledger_core::is_source_file_id(file_id) {
+                                    // After line 0, as any source line is.
+                                    rustledger_booking::SourcePosition::in_file(
+                                        span.start + 1,
+                                        file_id,
+                                    )
+                                } else {
+                                    rustledger_booking::SourcePosition::from_plugin(0)
+                                }
+                            },
+                            |lines| lines.position(file_id, span.start),
+                        )
+                    },
+                );
+                (*i, d.directive(), position)
+            }),
+            state.options.tolerance_multiplier,
+        );
         state.pads.load(plan);
     }
 

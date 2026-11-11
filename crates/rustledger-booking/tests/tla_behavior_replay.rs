@@ -184,7 +184,10 @@ fn replay_every_pad_behavior() {
             );
         }
 
-        let result = process_pads(&directives);
+        let result = process_pads(
+            &directives,
+            rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+        );
         // The implementation (beancount-aligned) reports each pad that never
         // padded as an error. Assert EXACTLY those errors: any other error,
         // or a missing or extra unused-pad error, is a divergence.

@@ -351,18 +351,23 @@ impl NativePlugin for CurrencyAccountsPlugin {
             ));
         }
 
-        // Insert Open directives for newly-created currency accounts (skip existing).
-        let mut new_open_accounts: Vec<String> = created_accounts
+        // Insert Open directives for newly-created currency accounts (skip
+        // existing), in sorted order, each numbered by its place among the
+        // created accounts, as beancount's `enumerate(sorted(new_accounts))`
+        // numbers it: the number is its `lineno`, which beancount's entry
+        // order reads (#2901).
+        let mut new_accounts: Vec<String> = created_accounts.into_iter().collect();
+        new_accounts.sort();
+        for (index, account) in new_accounts
             .into_iter()
-            .filter(|account| !existing_opens.contains(account))
-            .collect();
-        new_open_accounts.sort();
-        for account in new_open_accounts {
+            .enumerate()
+            .filter(|(_, account)| !existing_opens.contains(account))
+        {
             ops.push(PluginOp::Insert(DirectiveWrapper {
                 directive_type: "open".to_string(),
                 date: earliest_date.clone(),
                 filename: Some("<currency_accounts>".to_string()),
-                lineno: None,
+                lineno: Some(u32::try_from(index).unwrap_or(u32::MAX)),
                 data: DirectiveData::Open(OpenData {
                     account,
                     currencies: vec![],
@@ -870,5 +875,54 @@ mod currency_accounts_tests {
                 );
             }
         }
+    }
+
+    /// A created open is numbered by its account's place among every account
+    /// the plugin created, opened ones included, as beancount's
+    /// `enumerate(sorted(new_accounts))` numbers it (#2901): with `EUR`
+    /// already open, `USD`'s open is line 1, which beancount's entry order
+    /// reads.
+    #[test]
+    fn test_created_open_is_numbered_by_its_sorted_place() {
+        let plugin = CurrencyAccountsPlugin::new();
+        let existing_open = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: "Equity:CurrencyAccounts:EUR".to_string(),
+                currencies: vec![],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+        let mut p1 = posting("Assets:Bank:EUR", "-100", "EUR");
+        p1.price = Some(price_usd("1.10"));
+        let input = PluginInput {
+            directives: vec![
+                existing_open,
+                txn_wrapper(
+                    "2024-01-15",
+                    "Exchange",
+                    vec![p1, posting("Assets:Bank:USD", "110", "USD")],
+                ),
+            ],
+            options: default_options(),
+            config: None,
+        };
+        let input_dirs = input.directives.clone();
+        let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
+        let created: Vec<(&str, Option<u32>)> = directives
+            .iter()
+            .filter_map(|d| match &d.data {
+                DirectiveData::Open(o) if d.filename.as_deref() == Some("<currency_accounts>") => {
+                    Some((o.account.as_str(), d.lineno))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, [("Equity:CurrencyAccounts:USD", Some(1))]);
     }
 }

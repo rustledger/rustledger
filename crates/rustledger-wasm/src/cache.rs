@@ -430,11 +430,28 @@ use crate::types::{Error, LedgerOptions};
 /// `E7005` instead of `E7004`, the two dead tolerance options are `E7001`, and
 /// the tolerance maps accept `A:B:0.01` and reject `USD:-0.01`. An older blob
 /// would keep serving the old errors. (v91 is held by #2920.)
-/// v93: loader v70, PARSER OUTPUT changed (#2928). A BOM in the middle of a
+/// v94: loader v69, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
+/// gained `tolerance_multiplier`, which the padding a query inserts measures a
+/// balance's tolerance with, and `directive_lines` and `directive_file_ranks`,
+/// each directive's line and its file's place in the load, for the pad
+/// expansion's entry order (#2901); an older blob has none of them. And both
+/// payloads' error lists move: a pad pads for a balance on a sub-account and
+/// counts only its own padding, a difference within the balance's tolerance
+/// is not padded (an `Unused Pad entry`), and padding a currency held at cost
+/// is `E2005`; a `ParsedLedger`'s validation errors also carry their own
+/// lines, columns and spans, as it validates with its spans, and it validates
+/// with the ledger's options (`tolerance_multiplier` among them), as
+/// `rledger check` does. The `open`s `auto_accounts` and `currency_accounts`
+/// make are at new lines (their place in the plugin's sorted list, as in
+/// beancount), so the archived lines and error locations for them move.
+/// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
+/// and held v91 before #2930 took v92.)
+/// v95: loader v70, PARSER OUTPUT changed (#2928). A BOM in the middle of a
 /// line starts an invalid token that runs to the next blank, as in beancount,
 /// so a quote after it opens no string; an older blob would keep serving such
-/// a file with its old errors and values.
-pub const CACHE_VERSION: u32 = 93;
+/// a file with its old errors and values. (v93 was never released: #2931
+/// held it before #2920 took v94.)
+pub const CACHE_VERSION: u32 = 95;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -520,6 +537,18 @@ pub struct LedgerPayload {
     /// under `option "booking_method" "NONE"` would replay as STRICT and
     /// refuse `BALANCES` (#2386). A string for the same reason as above.
     pub booking_method: String,
+    /// The `tolerance_multiplier` option (`Decimal`'s `Display` form), which
+    /// the padding a query inserts measures a balance's tolerance with
+    /// (#2901). A string for the same reason as above.
+    pub tolerance_multiplier: String,
+    /// Each directive's line as beancount numbers it, parallel to
+    /// `directives`, for the pad expansion's entry order (#2901): a restored
+    /// ledger has no spans to read them from.
+    pub directive_lines: Vec<u32>,
+    /// Each directive's file's place in the load, parallel to `directives`
+    /// (`rustledger_booking::SourcePosition::file_rank`), which breaks a tie
+    /// on the line in that order.
+    pub directive_file_ranks: Vec<u32>,
     /// `[previous_balances, previous_earnings, previous_conversions,
     /// current_earnings, current_conversions, conversion_currency]`, what
     /// `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401, #2406). Plain
@@ -880,6 +909,9 @@ mod tests {
                 "Expenses".to_string(),
             ],
             booking_method: "NONE".to_string(),
+            tolerance_multiplier: "0.25".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: vec![
                 "Eigenkapital:Anfang".to_string(),
                 "Eigenkapital:Vorjahr".to_string(),
@@ -898,6 +930,7 @@ mod tests {
         assert_eq!(restored.options.operating_currencies, ["USD"]);
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
         assert_eq!(restored.booking_method, "NONE");
+        assert_eq!(restored.tolerance_multiplier, "0.25");
         assert_eq!(
             restored.summary_account_names,
             [
@@ -958,6 +991,9 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -983,6 +1019,9 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -1026,6 +1065,9 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

@@ -36,6 +36,11 @@ impl NativePlugin for AutoAccountsPlugin {
             match &wrapper.data {
                 DirectiveData::Open(data) => {
                     opened_accounts.insert(data.account.clone());
+                    // Named, as beancount's `get_accounts_use_map` counts an
+                    // `open`: it takes a place in the numbering below.
+                    account_first_use
+                        .entry(data.account.clone())
+                        .or_insert_with(|| wrapper.date.clone());
                 }
                 DirectiveData::Transaction(txn) => {
                     for posting in &txn.postings {
@@ -88,19 +93,24 @@ impl NativePlugin for AutoAccountsPlugin {
             }
         }
 
-        // Generate open directives for accounts without explicit open
-        // Sort accounts for deterministic ordering (matches Python beancount behavior)
-        let mut accounts_to_open: Vec<_> = account_first_use
-            .iter()
-            .filter(|(account, _)| !opened_accounts.contains(*account))
-            .collect();
-        accounts_to_open.sort_by_key(|(account, _)| *account);
+        // Generate open directives for accounts without explicit open, in
+        // sorted order. Each is numbered by the account's place among ALL
+        // the accounts the ledger names, opened ones included, as
+        // beancount's `enumerate(sorted(accounts_first.items()))` numbers
+        // it: the number is its `lineno`, which beancount's entry order reads
+        // (#2901).
+        let mut accounts: Vec<_> = account_first_use.iter().collect();
+        accounts.sort_by_key(|(account, _)| *account);
+        let accounts_to_open = accounts
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (account, _))| !opened_accounts.contains(*account));
 
         // Start with Keep ops for every input directive (preserves spans).
         let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
 
         // Insert synthesized Open directives for accounts without explicit open.
-        for (index, (account, date)) in accounts_to_open.into_iter().enumerate() {
+        for (index, (account, date)) in accounts_to_open {
             ops.push(PluginOp::Insert(DirectiveWrapper {
                 directive_type: "open".to_string(),
                 date: date.clone(),

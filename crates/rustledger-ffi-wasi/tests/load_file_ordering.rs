@@ -203,7 +203,12 @@ fn the_pad_expanded_stream_is_also_globally_sorted() {
         .zip(loaded.directive_files.iter().cloned())
         .collect();
     let synth_tag = (0u32, "<synthesized>".to_string());
-    let (expanded, expanded_tags) = expand_pads(loaded.directives, tags, &synth_tag);
+    let (expanded, expanded_tags) = expand_pads(
+        loaded.directives,
+        tags,
+        &synth_tag,
+        loaded.tolerance_multiplier,
+    );
 
     assert_eq!(
         expanded.len(),

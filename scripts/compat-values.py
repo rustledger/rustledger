@@ -777,7 +777,7 @@ RLEDGER_CODE_FAMILIES: list[tuple[str, str]] = [
     (r"^P\d{4}$", "parse"),
     (r"^E1\d{3}$", "account"),
     (r"^E200[12]$", "balance_assertion"),
-    (r"^E200[34]$", "pad"),
+    (r"^E200[345]$", "pad"),
     (r"^E3\d{3}$", "transaction_balance"),
     (r"^E4\d{3}$", "booking"),
     # The booking phase's own code, which is a WORD not a number: what a

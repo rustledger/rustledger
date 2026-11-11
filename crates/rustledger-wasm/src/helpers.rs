@@ -59,7 +59,9 @@ pub fn validation_error_to_wasm(
                 .or_else(|| e.context.clone()),
         )
         .with_file(file);
-    if let Some(span) = e.span {
+    // A span is a place in the one source text (file id 0) only; one a
+    // plugin's directive carries (a placeholder id) says nothing about it.
+    if let Some(span) = e.span.filter(|_| e.file_id.is_none_or(|id| id == 0)) {
         out = out.with_span(
             lookup.byte_to_line_col(span.start),
             lookup.byte_to_line_col(span.end),
@@ -260,7 +262,7 @@ pub fn has_fatal(errors: &[Error]) -> bool {
 
 /// Run validation on a loaded ledger and return validation errors.
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
-    use rustledger_validate::{ValidationOptions, ValidationSession};
+    use rustledger_validate::ValidationSession;
 
     // Skip validation only when loading produced a genuine *error* (parse or
     // booking failure) — those make the directive stream unsound to validate.
@@ -287,10 +289,32 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // 2999-12-31 is a valid Gregorian date, so `naive_date` is always `Some`.
     #[allow(clippy::unwrap_used)]
     let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
-    let session = ValidationSession::new(ValidationOptions::default());
-    let (session, mut errors) = session.run_early(&load.directives, today);
-    let (session, late_errs) = session.run_late(&load.directives, today);
-    errors.extend(late_errs);
+    // The options `rledger check` validates with, from the ledger's own
+    // (the canonical `validation_options_from_options`): a default set
+    // ignored `tolerance_multiplier`, so a balance a pad left within the
+    // ledger's tolerance was reported as one `check` passes (#2901). And the
+    // source map's positions, for beancount's entry order.
+    let session = ValidationSession::new(
+        rustledger_loader::validation_options_from_options(&options_from_raw(
+            &load.parse_result.options,
+        ))
+        .with_source_lines(rustledger_loader::source_lines(&load.source_map)),
+    );
+    // With the kept spans, as `rledger check` and the FFI validate: the pad
+    // rule reads them as beancount's line order, so an "Attempt to pad an
+    // entry with cost" lists tied positions as they do (#2901).
+    let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
+        let spanned = spanned_directives(&load.directives, &load.directive_spans);
+        let (session, mut errors) = session.run_early_spanned(&spanned, today);
+        let (session, late_errs) = session.run_late_spanned(&spanned, today);
+        errors.extend(late_errs);
+        (session, errors)
+    } else {
+        let (session, mut errors) = session.run_early(&load.directives, today);
+        let (session, late_errs) = session.run_late(&load.directives, today);
+        errors.extend(late_errs);
+        (session, errors)
+    };
     errors.extend(session.finalize());
 
     errors
@@ -419,6 +443,16 @@ pub fn summary_accounts_from_raw(
     rustledger_query::executor::SummaryAccounts::from_options(&options_from_raw(options))
 }
 
+/// The `tolerance_multiplier` a single-source ledger's raw option tuples
+/// set, which the padding a query inserts measures a balance's tolerance with
+/// (#2901). Read through the loader's [`rustledger_loader::Options`], like
+/// [`booking_method_from_raw`].
+pub fn tolerance_multiplier_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_core::Decimal {
+    options_from_raw(options).inferred_tolerance_multiplier
+}
+
 /// The loader's [`rustledger_loader::Options`] for raw option tuples, applied
 /// in order through [`rustledger_loader::Options::set`] so its parse and
 /// last-wins rules hold.
@@ -460,6 +494,42 @@ pub fn spanned_directives(
     spans: &[DirectiveSpan],
 ) -> Vec<rustledger_core::Spanned<Directive>> {
     rustledger_query::executor::spanned_from_parts(directives, spans)
+}
+
+/// The pad expansion every WASM surface answers with: `directives` padded
+/// with each one's place in beancount's entry order
+/// ([`rustledger_booking::process_pads_at`]), so an "Attempt to pad an entry
+/// with cost" lists tied positions in the order the validation does
+/// (#2901). `positions` runs parallel to `directives`: [`source_positions`]
+/// of the kept spans, or a restored ledger's kept positions. A ledger
+/// restored from a cache that kept none pads by its stream order.
+#[must_use]
+pub fn pad_expansion(
+    directives: &[Directive],
+    positions: &[rustledger_booking::SourcePosition],
+    tolerance_multiplier: rustledger_core::Decimal,
+) -> rustledger_booking::PadResult {
+    if positions.len() == directives.len() {
+        rustledger_booking::process_pads_at(directives, positions, tolerance_multiplier)
+    } else {
+        rustledger_booking::process_pads(directives, tolerance_multiplier)
+    }
+}
+
+/// The positions [`pad_expansion`] reads, from the kept spans and the
+/// source map they index, as the validation reads them
+/// ([`rustledger_loader::source_lines`]): a source directive's line and
+/// file, and a plugin's directive at the line the plugin gave it.
+#[must_use]
+pub fn source_positions(
+    spans: &[DirectiveSpan],
+    source_map: &rustledger_loader::SourceMap,
+) -> Vec<rustledger_booking::SourcePosition> {
+    let lines = rustledger_loader::source_lines(source_map);
+    spans
+        .iter()
+        .map(|(span, file_id)| lines.position(*file_id, span.start))
+        .collect()
 }
 
 /// The source map a query over an unnamed in-memory source reads its source

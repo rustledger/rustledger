@@ -772,6 +772,9 @@ impl Ledger {
         let booking_method = load_result
             .options
             .effective_booking_method(load_options.booking_method);
+        // The option diagnostics, read before `process` consumes the options,
+        // so both arms below report them, as `validate_with_filesystem` does.
+        let option_errors = option_warnings_to_errors(&load_result.options.warnings);
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
@@ -795,7 +798,7 @@ impl Ledger {
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-                errors.extend(option_warnings_to_errors(&ledger.options.warnings));
+                errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
@@ -830,7 +833,9 @@ impl Ledger {
                 booking_method,
                 summary_accounts,
                 tolerance_multiplier,
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                    .chain(option_errors)
+                    .collect(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: true,
                 created_tables: std::cell::RefCell::default(),

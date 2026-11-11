@@ -2078,6 +2078,34 @@ fn test_check_option_diagnostics_are_located_like_the_loader() {
     );
 }
 
+/// `rledger query` prints the option diagnostics with their file and line,
+/// through the same mapping as `check` (#2925).
+#[test]
+fn test_query_option_diagnostics_are_located() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.beancount");
+    let sub = dir.path().join("sub.beancount");
+    std::fs::write(
+        &main,
+        "include \"sub.beancount\"\n2024-01-01 open Assets:A\n",
+    )
+    .expect("write main");
+    std::fs::write(&sub, "\noption \"name_equity\" \"capital\"\n").expect("write sub");
+    let output = Command::new(&rledger)
+        .args(["query", "--no-cache"])
+        .arg(&main)
+        .arg("SELECT account")
+        .output()
+        .expect("Failed to run rledger query");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let want = format!("{}:2: E7008: ", sub.display());
+    assert!(
+        stderr.lines().any(|l| l.starts_with(&want)),
+        "missing {want:?} in:\n{stderr}"
+    );
+}
+
 /// Conversely, a single non-repeatable option must NOT be flagged (no false
 /// positive on the deliberate E7003 strictness).
 #[test]

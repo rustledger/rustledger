@@ -55,9 +55,14 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// Everything else is taken from the TOP-LEVEL file only. The split is by what
 /// an option governs, not by one blanket rule (#2151):
 ///
-/// * These describe the file that declares them. A sub-ledger naming its own
-///   operating currency or document root is describing itself, not overriding
-///   its includer, so they accumulate.
+/// * These are the ones beancount 3.2.3 aggregates across files
+///   (`loader.aggregate_options_map`): `operating_currency` is merged,
+///   `display_precision` goes into the merged `dcontext`, and
+///   `insert_pythonpath` becomes `pythonpath`. A sub-ledger naming its own
+///   operating currency is describing itself, not overriding its includer.
+///   `documents` is not among them: beancount keeps only the top-level
+///   file's, so an included root is ignored (E7009) and never scanned or
+///   checked for existence (#2925).
 /// * Everything else defines global computation or the ledger's identity.
 ///   `booking_method` decides which lot a sale consumes and
 ///   `inferred_tolerance_default` decides what counts as balanced, so letting
@@ -85,7 +90,6 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// did.
 const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "operating_currency",
-    "documents",
     "insert_pythonpath",
     "display_precision",
 ];
@@ -1035,8 +1039,8 @@ impl Options {
     /// By occurrence, not by value alone: `warnings` follow the applied
     /// values in order, one per occurrence, so the n-th warning for an
     /// `(option, value)` gets the n-th line that applied it. The same
-    /// `documents` root written in two files is two warnings at two sites,
-    /// not both at the last one.
+    /// `documents` root written on two lines of the top-level file is two
+    /// warnings at two lines, not both at the last one.
     pub fn locate(&self, warnings: &mut [OptionWarning]) {
         let mut seen: FxHashMap<(String, String), usize> = FxHashMap::default();
         for warning in warnings {
@@ -2013,7 +2017,7 @@ mod tests {
     fn test_locate_is_by_occurrence() {
         let mut opts = Options::new();
         opts.set_scoped_at("documents", "missing", true, Some(site("main", 4)));
-        opts.set_scoped_at("documents", "missing", false, Some(site("sub", 2)));
+        opts.set_scoped_at("documents", "missing", true, Some(site("main", 9)));
         let warn = || OptionWarning {
             code: "E7006",
             message: String::new(),
@@ -2024,7 +2028,50 @@ mod tests {
         let mut docs = vec![warn(), warn()];
         opts.locate(&mut docs);
         let sites: Vec<Option<OptionSite>> = docs.into_iter().map(|w| w.site).collect();
-        assert_eq!(sites, [Some(site("main", 4)), Some(site("sub", 2))]);
+        assert_eq!(sites, [Some(site("main", 4)), Some(site("main", 9))]);
+    }
+
+    /// E7010 is about the value the option ends with, so it is at the last
+    /// line that set it, even when an earlier line set the same value.
+    #[test]
+    fn test_rooted_leaf_warning_is_at_the_last_line_that_set_it() {
+        let mut opts = Options::new();
+        for line in [2, 5] {
+            opts.set_scoped_at(
+                "account_previous_balances",
+                "Equity:Open",
+                true,
+                Some(site("m", line)),
+            );
+        }
+        let rooted = opts.rooted_leaf_warnings();
+        assert_eq!(rooted.len(), 1);
+        assert_eq!(rooted[0].code, "E7010");
+        assert_eq!(rooted[0].site, Some(site("m", 5)));
+    }
+
+    /// The same options written at other lines (or in other files, as
+    /// `rledger merge` and `split` move them) are the same once their
+    /// locations are dropped, diagnostics and a rejected `booking_method`
+    /// included; and differ while they have them.
+    #[test]
+    fn test_without_locations_drops_every_site() {
+        let build = |file: &str, offset: usize| {
+            let mut opts = Options::new();
+            opts.set_scoped_at("nosuch", "x", true, Some(site(file, 1 + offset)));
+            opts.set_scoped_at("booking_method", "fifo", true, Some(site(file, 2 + offset)));
+            opts.set_scoped_at("title", "t", true, Some(site(file, 3 + offset)));
+            opts
+        };
+        let (before, after) = (build("ledger.beancount", 0), build("flat.beancount", 7));
+        assert_ne!(before, after);
+        assert_ne!(before.warnings, after.warnings);
+        assert_eq!(before.without_locations(), after.without_locations());
+        let stripped = before.without_locations();
+        assert!(stripped.warnings.iter().all(|w| w.site.is_none()));
+        assert_eq!(stripped.warnings.len(), 2, "{:?}", stripped.warnings);
+        assert!(stripped.rejected_booking_method.unwrap().site.is_none());
+        assert!(stripped.value_sites.is_empty());
     }
 
     /// The canonical mapping every surface reads: severity, code, phase and
@@ -2093,16 +2140,20 @@ mod tests {
         let mut opts = Options::new();
         opts.set_scoped("operating_currency", "USD", true);
         opts.set_scoped("operating_currency", "EUR", false);
+        opts.set_scoped("display_precision", "EUR:0.001", false);
         opts.set_scoped("documents", "docs-from-include", false);
 
         assert!(
             opts.operating_currency.iter().any(|c| c == "EUR"),
             "an included operating_currency must still be collected",
         );
-        assert!(
-            opts.documents.iter().any(|d| d == "docs-from-include"),
-            "an included documents root must still be collected",
-        );
+        assert_eq!(opts.display_precision.get("EUR"), Some(&3));
+        // Not `documents`: beancount 3.2.3 keeps only the top-level file's
+        // (`load_file` gives `documents == []` for an included root), so it
+        // is ignored with E7009, like every other scoped option (#2925).
+        assert!(opts.documents.is_empty());
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7009"]);
     }
 
     #[test]

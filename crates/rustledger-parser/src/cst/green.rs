@@ -1328,9 +1328,8 @@ fn emit_error_node_line(
     }
     let Some(ls) = line_start else { return };
     let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
-    let line_text = stripped.get(ls..end).unwrap_or("");
     let stray_bom = has_stray_bom(invalid, stripped);
-    let primary = classify_recovery_error(line_text, stray_bom, span);
+    let primary = classify_recovery_error(stripped, ls..end, invalid, stray_bom, span);
     let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
     out.push(primary);
     if !primary_is_bom && stray_bom {

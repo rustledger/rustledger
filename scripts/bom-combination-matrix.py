@@ -29,6 +29,9 @@ against it row by row, without needing Python at test time.
        t  the same for an account beancount   `<BOM>assets:A{i}$x`
           reads only with its BOM
 
+   and, alone on a line (`TAIL_TOKENS`), that account with a tail that makes
+   its end observable: `<BOM>"s"`, `~<BOM>1:A`, `<BOM>x`.
+
    Line-start prefixes (`PREFIXES`), put before the line, so before the
    indentation of an indented line:
 
@@ -43,7 +46,8 @@ against it row by row, without needing Python at test time.
    header, a posting, a metadata line, a metadata line holding an invalid
    account, a directive's header, after a date alone, a metadata line under a
    header with no narration, and an indented line whose first token is glued
-   to a BOM after the indentation (a run, and a `;`).
+   to a BOM after the indentation (a run, and a `;`), and a `<BOM>*` heading
+   line.
 
 2. Hand-picked inputs (`EXTRA`): each shape a review of #2931 found, so that
    each stays pinned whatever the generators above cover.
@@ -55,6 +59,12 @@ against it row by row, without needing Python at test time.
    with indented metadata and posting lines, with CRLF line endings or none at
    the end of the file now and then. It holds whatever the hand-made sets
    miss, so a future count change anywhere shows up in the test.
+
+4. A second seeded probe (`account_probe_cases`, seed `ACCOUNT_PROBE_SEED`):
+   a BOM-led account as beancount reads it, after each kind of line start
+   (none, one or two BOMs, an invalid token, a `<BOM>*` heading, a custom
+   directive, an indented line, a metadata value), followed by one to three
+   tails glued to it or after a blank.
 
 The counts are beancount's parse errors only, filtered exactly as the
 parse-error parity harness (`scripts/compat-parse-error-parity.py`) filters
@@ -74,11 +84,14 @@ branch the matrix is checked against (`cargo build --release -p
 rustledger-loader --no-default-features --example parse_error_lines` there):
 its counts, and both sides' counts for the input with its BOMs replaced by
 ordinary characters (`analog`), let the test tell a line rledger counts
-further from beancount than main only because main miscounted a BOM.
+further from beancount than main only because main miscounted a BOM. The
+last column, beancount's counts with each mid-line `#!` / `#+` made an
+ordinary invalid run (`hash_bang_analog`), lets it tell a line whose whole
+difference is part 2 of #2928.
 
 Output, one line per case, tab-separated:
 
-    <source>  <beancount>  <main>  <beancount analog>  <main analog>
+    <source>  <beancount>  <main>  <beancount analog>  <main analog>  <beancount hash-bang analog>
 
 `<source>` is the input with each U+FEFF written `<BOM>`, each `\\n` written
 `\\\\n`, each `\\r` `\\\\r` and each tab `\\\\t` (no generated input holds a
@@ -122,6 +135,14 @@ TOKENS = {
     "t": BOM + "assets:A{i}$x",
 }
 
+# Tails after a BOM-led account beancount reads only with its BOM, each
+# making the split at the account's end observable; matrix singles only.
+TAIL_TOKENS = {
+    "s": BOM + "assets:A{i}" + BOM + "\"s\"",
+    "u": BOM + "assets:A{i}~" + BOM + "1:A",
+    "x": BOM + "assets:A{i}" + BOM + "x",
+}
+
 PREFIXES = {
     "plain": "",
     "bom": BOM,
@@ -151,6 +172,9 @@ CONTEXTS = [
     # A BOM after the indentation, glued to a run, and glued to a `;`.
     ("indent-bom", TXN_BARE, "  " + BOM + "b {T}", LEGS),
     ("indent-bom-comment", TXN_BARE, "  " + BOM + "; c {T}", LEGS),
+    # A `<BOM>*` heading line, whose rest beancount lexes after the first
+    # blank.
+    ("heading", "", BOM + "* Heading {T}", ""),
 ]
 
 # Shapes the reviews of #2931 found, after HEAD.
@@ -301,11 +325,13 @@ def matrix_cases():
         itertools.product(TOKENS, repeat=n) for n in range(3)
     ))
     long = list(itertools.product("LIN", repeat=3))
+    tails = [(k,) for k in TAIL_TOKENS]
+    tokens = {**TOKENS, **TAIL_TOKENS}
     for _, before, line, after in CONTEXTS:
         for prefix in PREFIXES.values():
-            for kinds in short + long:
-                tokens = " ".join(TOKENS[k].format(i=i) for i, k in enumerate(kinds))
-                text = (prefix + line.format(T=tokens)).rstrip(" ")
+            for kinds in short + long + tails:
+                words = " ".join(tokens[k].format(i=i) for i, k in enumerate(kinds))
+                text = (prefix + line.format(T=words)).rstrip(" ")
                 if not text:
                     continue
                 yield HEAD + before + text + "\n" + after
@@ -352,6 +378,71 @@ def probe_cases():
         if rng.random() < 0.8:
             body += eol
         yield HEAD + body
+
+
+ACCOUNT_PROBE_SEED = 909931
+ACCOUNT_PROBE_COUNT = 2000
+
+# BOM-led accounts, as beancount reads them (`<BOM>` as the first character),
+# with and without an account of rledger's after the BOMs.
+ACCOUNT_PROBE_FORMS = [
+    BOM + "Assets:A",
+    BOM + "assets:A",
+    BOM + "1:A",
+    BOM + "1:A:B",
+    BOM + ":A",
+    BOM + "-:A",
+    BOM + "a-b:C",
+    BOM + BOM + "kk:" + BOM,
+    BOM + BOM + "assets:A",
+    "Heading" + BOM + "a-b:C",
+    BOM + "Ü:A",
+]
+# What follows them, glued or after a blank.
+ACCOUNT_PROBE_TAILS = [
+    "$x",
+    BOM + "\"s\"",
+    "~" + BOM + "1:A",
+    BOM + "x",
+    ";c\t" + BOM + "1.5",
+    "#t",
+    BOM + "%",
+    "{",
+    ",Ü:A",
+    "T#!",
+    "\"x\"",
+    ".b",
+    "'b",
+    BOM,
+    "^l",
+    "@",
+    "!",
+    "  1" + BOM + "2",
+    "\t-2.5",
+    BOM + "a-b:C",
+]
+ACCOUNT_PROBE_PREFIXES = [
+    "",
+    BOM,
+    BOM + BOM,
+    "$x ",
+    BOM + "* Heading",
+    BOM + "* ",
+    "2024-01-02 custom \"b\" 1 ",
+    "2024-01-02 *\n  ",
+    "2024-01-02 *\n  kk: ",
+]
+
+
+def account_probe_cases():
+    """A second seeded probe: a BOM-led account after each kind of line
+    start, followed by one to three tails, glued to it or after a blank."""
+    rng = random.Random(ACCOUNT_PROBE_SEED)
+    for _ in range(ACCOUNT_PROBE_COUNT):
+        text = rng.choice(ACCOUNT_PROBE_PREFIXES) + rng.choice(ACCOUNT_PROBE_FORMS)
+        for _ in range(rng.choice([1, 2, 3])):
+            text += rng.choice(["", "", " ", "\t"]) + rng.choice(ACCOUNT_PROBE_TAILS)
+        yield HEAD + text + "\n"
 
 
 def escape(src):
@@ -406,6 +497,14 @@ def analog(src):
     return re.sub("\ufeff+", "$", BOM_ACCOUNT.sub("Ü", src))
 
 
+def hash_bang_analog(src):
+    """`src` with each `#!` / `#+` that does not start its line made `$!` /
+    `$+`, an ordinary invalid run on both sides: rledger reads a mid-line
+    `#!` / `#+` as one token to the end of the line (part 2 of #2928), so
+    counting this input tells whether that is a line's whole difference."""
+    return re.sub(r"(?<=[^\n])#(?=[!+])", "$", src)
+
+
 def rledger_cells(binary, sources):
     """The `parse_error_lines` binary's per-line counts for each source, an
     unclosed `pushtag` / `pushmeta` at line 0 as in the parity harness."""
@@ -439,7 +538,10 @@ def main():
     seen = set()
     rows = []
     sources = itertools.chain(
-        matrix_cases(), (HEAD + extra for extra in EXTRA), probe_cases()
+        matrix_cases(),
+        (HEAD + extra for extra in EXTRA),
+        probe_cases(),
+        account_probe_cases(),
     )
     for src in sources:
         if src in seen:
@@ -447,14 +549,15 @@ def main():
         seen.add(src)
         cells = counts_in_child(parity, is_not_syntax, src)
         analog_cells = counts_in_child(parity, is_not_syntax, analog(src))
-        if cells is None or analog_cells is None:
+        hash_bang_cells = counts_in_child(parity, is_not_syntax, hash_bang_analog(src))
+        if cells is None or analog_cells is None or hash_bang_cells is None:
             print(f"left out, beancount crashed or raised: {src!r}", file=sys.stderr)
             continue
-        rows.append((src, cells, analog_cells))
-    main = rledger_cells(args.main_binary, [src for src, _, _ in rows])
-    main_analog = rledger_cells(args.main_binary, [analog(src) for src, _, _ in rows])
-    for (src, cells, analog_cells), m, ma in zip(rows, main, main_analog):
-        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\n")
+        rows.append((src, cells, analog_cells, hash_bang_cells))
+    main = rledger_cells(args.main_binary, [row[0] for row in rows])
+    main_analog = rledger_cells(args.main_binary, [analog(row[0]) for row in rows])
+    for (src, cells, analog_cells, hb), m, ma in zip(rows, main, main_analog):
+        sys.stdout.write(f"{escape(src)}\t{cells}\t{m}\t{analog_cells}\t{ma}\t{hb}\n")
 
 
 if __name__ == "__main__":

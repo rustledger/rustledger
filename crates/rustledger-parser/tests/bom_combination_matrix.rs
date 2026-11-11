@@ -75,6 +75,24 @@ fn unescape(src: &str) -> String {
         .replace("\\t", "\t")
 }
 
+/// `src` with each `#!` or `#+` that does not start its line made `$!` / `$+`,
+/// an ordinary invalid run on both sides (`hash_bang_analog` in the script).
+fn hash_bang_analog(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut prev: Option<char> = None;
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mid_line = prev.is_some_and(|p| p != '\n');
+        if c == '#' && mid_line && matches!(chars.peek(), Some('!' | '+')) {
+            out.push('$');
+        } else {
+            out.push(c);
+        }
+        prev = Some(c);
+    }
+    out
+}
+
 /// `line:count` cells back to a map.
 fn parse_cells(cells: &str) -> BTreeMap<usize, usize> {
     cells
@@ -181,12 +199,15 @@ fn inner_bom(line: &str) -> bool {
         .any(|w| w[1] == BOM && w[0] != BOM && !is_blank(w[0]))
 }
 
-/// A word that starts with BOMs and goes on to a `:` and more: BOMs
-/// beancount reads into an account.
+/// A run of BOMs that starts an account in beancount: not after an account
+/// character, and followed, before the next blank, by a `:` and more.
 fn bom_glued_to_account(line: &str) -> bool {
-    words(line).any(|w| {
-        let rest = strip_boms(w);
-        w.starts_with(BOM) && rest.find(':').is_some_and(|i| rest.len() > i + 1)
+    let in_account = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == ':' || !c.is_ascii();
+    line.char_indices().any(|(i, c)| {
+        let starts = c == BOM && !line[..i].chars().next_back().is_some_and(in_account);
+        let rest = strip_boms(&line[i..]);
+        let word = &rest[..rest.find(is_blank).unwrap_or(rest.len())];
+        starts && word.find(':').is_some_and(|j| word.len() > j + 1)
     })
 }
 
@@ -230,94 +251,95 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
     let header = (3..l).rev().find(|&k| !indented(line(k))).unwrap_or(3);
     let block_err = (header..l)
         .any(|k| get(&counts.bc, k) > 0 || line(k).trim_start_matches(is_blank).starts_with(BOM));
-    Some(if l == 0 {
-        // A `pushtag` / `pushmeta` line with junk after it: beancount's
-        // grammar never pushes, so it reports no unclosed push at the end of
-        // the file (line 0); rledger keeps the push.
-        "failed-push-still-pushed"
-    } else if date_alone(text) || date_alone(line(l - 1)) {
-        // A date alone on a line: beancount reports its `unexpected EOL` on
-        // the next line.
-        "eol-reported-on-next-line"
-    } else if r > b && account_after_bom(text) {
-        // An invalid account (non-ASCII first character) after a BOM token
-        // on the line gets rledger's `P0006` as well as the BOM diagnostic,
-        // where beancount reports nothing more for the statement. Asked
-        // before `bom-glued-to-account`, whose BOM may lead that account,
-        // and before the recovery causes, which hold only for a line that
-        // counts right on its own.
-        "invalid-account-after-invalid-token"
-    } else if r > b && bom_glued_to_account(text) {
-        // BOMs glued to an account (`$x <BOM>Assets:A`): beancount reads them
-        // into the account and rejects the name on load; rledger reports the
-        // stray BOM (`P0026`, with its quick fix: #2928's own design), one
-        // error more than beancount's parse errors for each.
-        "bom-glued-to-account"
-    } else if r > b && indented(text) && strip_boms(line(header)).starts_with('*') {
-        // An indented line after a `*` heading: beancount ignores the
-        // heading and reads the line under the directive before it, rledger
-        // reports it.
-        "indented-line-after-heading"
-    } else if r > b && indented(text) && block_err {
-        // An indented line in a block whose header or an earlier line
-        // beancount could not read (or which starts with a BOM): its
-        // recovery skips the line in silence, rledger reports it (#2872).
-        "indented-line-after-error"
-    } else if r > b && get(&counts.bc, l - 1) > 0 {
-        // A line right after one beancount could not read: its recovery
-        // reports no grammar error there, rledger does (#2872).
-        "line-after-error-line"
-    } else if worse && get(&counts.analog_bc, l) == b && get(&counts.analog_main, l) == r {
-        // Further from beancount than main only because main miscounted the
-        // BOM: the input with each BOM replaced by an ordinary character (a
-        // run beancount reads into an account by `Ü`, any other by `$`) is
-        // counted the same way on main. Mostly a later grammar error after
-        // the line's first invalid token, which beancount reports and
-        // rledger, one diagnostic per line, does not.
-        "like-main-without-bom"
-    } else if mid_line_hash_bang(text) {
-        // A `#!` or `#+` in the middle of a line: beancount lexes `#` and
-        // `!` / `+`, here it is one token to the end of the line (part 2 of
-        // #2928).
-        "mid-line-hash-bang"
-    } else if lone_capital_glued(text) {
-        // A lone capital glued to a token, or to the `\r` of a CRLF line:
-        // beancount's `CAPITAL` needs a blank after it, so it starts an
-        // invalid token there; here it lexes as a currency or a flag.
-        "lone-capital-glued-to-tokens"
-    } else if r < b && text.starts_with(BOM) && strip_boms(text).starts_with([';', '%']) {
-        // A BOM that starts its line keeps its own extent (#2928's
-        // deliberate line-start rule, for concatenated files), so a `;` or
-        // `%` after it starts a comment that hides the rest of the line,
-        // where beancount's invalid token runs through it and lexes on.
-        "line-start-bom-before-comment"
-    } else if r < b && inner_bom(text) {
-        // A run with a BOM inside it, on a line whose BOM diagnostic already
-        // stands for the line's first error, is left to that diagnostic: one
-        // error fewer than beancount. Reporting it fixes these, and 256 more
-        // fuzz-corpus inputs, but also turns 98 matching ones into
-        // mismatches, each a difference the old count happened to offset,
-        // so it is left for a change of its own.
-        "inner-bom-under-line-error"
-    } else if r < b {
-        // beancount reports a later grammar error after the line's first
-        // error, rledger one diagnostic for the line.
-        "one-diagnostic-per-line"
-    } else if ["poptag", "popmeta"]
-        .iter()
-        .any(|p| strip_boms(text).starts_with(p))
-    {
-        // A pop of a tag or key not pushed (its push failed): beancount
-        // reports it, rledger does not.
-        "pop-without-push"
-    } else if r > b && r == m {
-        // rledger reports one more construct-level error (a custom value, a
-        // price's link, a header's stray token, a pipe) on a line
-        // beancount's grammar abandons at its first error; the same on main.
-        "extra-construct-error"
-    } else {
-        return None;
-    })
+    Some(
+        if worse && get(&counts.analog_bc, l) == b && get(&counts.analog_main, l) == r {
+            // Further from beancount than main only because main miscounted the
+            // BOM: the input with each BOM replaced by an ordinary character (a
+            // run beancount reads into an account by `Ü`, any other by `$`) is
+            // counted the same way on main. Asked first: it is checked from the
+            // table, whatever else the line holds.
+            "like-main-without-bom"
+        } else if l == 0 {
+            // A `pushtag` / `pushmeta` line with junk after it: beancount's
+            // grammar never pushes, so it reports no unclosed push at the end of
+            // the file (line 0); rledger keeps the push.
+            "failed-push-still-pushed"
+        } else if date_alone(text) || date_alone(line(l - 1)) {
+            // A date alone on a line: beancount reports its `unexpected EOL` on
+            // the next line.
+            "eol-reported-on-next-line"
+        } else if r > b && account_after_bom(text) {
+            // An invalid account (non-ASCII first character) after a BOM token
+            // on the line gets rledger's `P0006` as well as the BOM diagnostic,
+            // where beancount reports nothing more for the statement. Asked
+            // before `bom-glued-to-account`, whose BOM may lead that account,
+            // and before the recovery causes, which hold only for a line that
+            // counts right on its own.
+            "invalid-account-after-invalid-token"
+        } else if r > b && bom_glued_to_account(text) {
+            // BOMs glued to an account (`$x <BOM>Assets:A`): beancount reads them
+            // into the account and rejects the name on load; rledger reports the
+            // stray BOM (`P0026`, with its quick fix: #2928's own design), one
+            // error more than beancount's parse errors for each.
+            "bom-glued-to-account"
+        } else if r > b && indented(text) && strip_boms(line(header)).starts_with('*') {
+            // An indented line after a `*` heading: beancount ignores the
+            // heading and reads the line under the directive before it, rledger
+            // reports it.
+            "indented-line-after-heading"
+        } else if r > b && indented(text) && block_err {
+            // An indented line in a block whose header or an earlier line
+            // beancount could not read (or which starts with a BOM): its
+            // recovery skips the line in silence, rledger reports it (#2872).
+            "indented-line-after-error"
+        } else if r > b && get(&counts.bc, l - 1) > 0 {
+            // A line right after one beancount could not read: its recovery
+            // reports no grammar error there, rledger does (#2872).
+            "line-after-error-line"
+        } else if mid_line_hash_bang(text) {
+            // A `#!` or `#+` in the middle of a line: beancount lexes `#` and
+            // `!` / `+`, here it is one token to the end of the line (part 2 of
+            // #2928).
+            "mid-line-hash-bang"
+        } else if lone_capital_glued(text) {
+            // A lone capital glued to a token, or to the `\r` of a CRLF line:
+            // beancount's `CAPITAL` needs a blank after it, so it starts an
+            // invalid token there; here it lexes as a currency or a flag.
+            "lone-capital-glued-to-tokens"
+        } else if r < b && text.starts_with(BOM) && strip_boms(text).starts_with([';', '%']) {
+            // A BOM that starts its line keeps its own extent (#2928's
+            // deliberate line-start rule, for concatenated files), so a `;` or
+            // `%` after it starts a comment that hides the rest of the line,
+            // where beancount's invalid token runs through it and lexes on.
+            "line-start-bom-before-comment"
+        } else if r < b && inner_bom(text) {
+            // A run with a BOM inside it, on a line whose BOM diagnostic already
+            // stands for the line's first error, is left to that diagnostic: one
+            // error fewer than beancount. Reporting it fixes these, and 256 more
+            // fuzz-corpus inputs, but also turns 98 matching ones into
+            // mismatches, each a difference the old count happened to offset,
+            // so it is left for a change of its own.
+            "inner-bom-under-line-error"
+        } else if r < b {
+            // beancount reports a later grammar error after the line's first
+            // error, rledger one diagnostic for the line.
+            "one-diagnostic-per-line"
+        } else if ["poptag", "popmeta"]
+            .iter()
+            .any(|p| strip_boms(text).starts_with(p))
+        {
+            // A pop of a tag or key not pushed (its push failed): beancount
+            // reports it, rledger does not.
+            "pop-without-push"
+        } else if r > b && r == m {
+            // rledger reports one more construct-level error (a custom value, a
+            // price's link, a header's stray token, a pipe) on a line
+            // beancount's grammar abandons at its first error; the same on main.
+            "extra-construct-error"
+        } else {
+            return None;
+        },
+    )
 }
 
 /// A known-list entry: rledger's counts and the causes.
@@ -342,17 +364,23 @@ struct Worse {
     rl: usize,
     analog_bc: usize,
     analog_main: usize,
+    /// The whole input, and beancount's count on this line for the input
+    /// with each mid-line `#!` / `#+` made an ordinary invalid run
+    /// (`hash_bang_analog`).
+    input: String,
+    hash_bang_bc: usize,
 }
 
 fn check_row(line: &str) -> RowResult {
     let fields: Vec<&str> = line.split('\t').collect();
-    assert_eq!(fields.len(), 5, "malformed matrix line: {line:?}");
+    assert_eq!(fields.len(), 6, "malformed matrix line: {line:?}");
     let src = fields[0];
     let tail = src
         .strip_prefix(HEAD)
         .unwrap_or_else(|| panic!("matrix input without the head: {src:?}"))
         .to_string();
     let input = unescape(src);
+    let hash_bang_bc = parse_cells(fields[5]);
     let counts = Counts {
         bc: parse_cells(fields[1]),
         main: parse_cells(fields[2]),
@@ -391,6 +419,8 @@ fn check_row(line: &str) -> RowResult {
                         rl: r,
                         analog_bc: get(&counts.analog_bc, l),
                         analog_main: get(&counts.analog_main, l),
+                        input: input.clone(),
+                        hash_bang_bc: get(&hash_bang_bc, l),
                     });
                 }
             }
@@ -466,7 +496,11 @@ fn accepted() -> BTreeMap<(&'static str, usize), Accepted<'static>> {
 ///   counts for the input with its BOMs replaced by ordinary characters,
 ///   are beancount's and rledger's counts here;
 /// - the line's own difference (`INTRINSIC_CAUSES`): alone, rledger is off
-///   from beancount the same way and at least as far as in context.
+///   from beancount the same way and at least as far as in context, or
+///   rledger counts the line the same alone and beancount reports less in
+///   context (its recovery after the line before);
+/// - `mid-line-hash-bang`: with each mid-line `#!` / `#+` made an ordinary
+///   invalid run, rledger counts the line as beancount does.
 const RECOVERY_CAUSES: &[&str] = &[
     "indented-line-after-error",
     "indented-line-after-heading",
@@ -474,6 +508,7 @@ const RECOVERY_CAUSES: &[&str] = &[
 ];
 const INTRINSIC_CAUSES: &[&str] = &[
     "bom-glued-to-account",
+    "inner-bom-under-line-error",
     "invalid-account-after-invalid-token",
     "line-error-beside-bom-diagnostic",
 ];
@@ -496,6 +531,14 @@ fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
     if a.cause == "like-main-without-bom" {
         return w.analog_bc == w.bc && w.analog_main == w.rl;
     }
+    if a.cause == "mid-line-hash-bang" {
+        // With each mid-line `#!` / `#+` an ordinary invalid run, rledger
+        // counts the line as beancount does: the `#!` / `#+` (part 2 of
+        // #2928) is the whole difference.
+        let variant = hash_bang_analog(&w.input);
+        let rl = rledger_counts(&variant).get(&w.line).copied().unwrap_or(0);
+        return rl == w.hash_bang_bc;
+    }
     let Some(bc_alone) = a.standalone else {
         return false;
     };
@@ -508,7 +551,11 @@ fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
             signed(alone) - signed(bc_alone),
             signed(w.rl) - signed(w.bc),
         );
-        return off_alone.signum() == off_here.signum() && off_alone.abs() >= off_here.abs();
+        // Off the same way alone, and at least as far; or counted the same
+        // alone by rledger, with beancount reporting less here only because
+        // of its recovery after the line before.
+        return (off_alone.signum() == off_here.signum() && off_alone.abs() >= off_here.abs())
+            || (alone == w.rl && w.bc < bc_alone);
     }
     false
 }
@@ -527,6 +574,10 @@ fn check_worse_than_main(worse: &[(String, Worse)]) -> Vec<String> {
             None => failures.push(format!(
                 "not accepted, further from beancount than main:\n{tail}\t{l}\t{}\t-\tTODO {} {}",
                 w.cause, w.bc, w.rl
+            )),
+            Some(a) if a.cause != w.cause => failures.push(format!(
+                "accepted as {} but the rules give {}: {tail} line {l}",
+                a.cause, w.cause
             )),
             Some(a) if !holds(a, w) => failures.push(format!(
                 "accepted as {} ({}), which does not hold: beancount {}, rledger {} \

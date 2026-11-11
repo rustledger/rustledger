@@ -720,9 +720,12 @@ pub(crate) fn leading_bom_run(text: &str) -> usize {
 /// word with a stand-in non-ASCII character in the BOMs' place (the run's
 /// other BOMs are continuation characters, which the stand-in covers too).
 ///
-/// Linear: it reads no further than the next blank, which an account never
-/// holds (so an unterminated `"` after the BOMs is not scanned to the end of
-/// the file).
+/// Linear: it reads only the characters an account may hold (ASCII letters
+/// and digits, `-`, `:` and any non-ASCII character), so it stops at the
+/// first one that ends the account, whatever else the blank-free run holds.
+/// Each byte it reads is one the token it decides (the BOMs and the account
+/// beancount reads them into) then consumes, so a run of BOM-led accounts
+/// (`<BOM>1:A~<BOM>1:A~...`) is read once over, not once per account.
 pub(crate) fn bom_led_account(text: &str) -> Option<(usize, usize)> {
     const STAND_IN: char = '\u{dc}'; // Ü
     let run = leading_bom_run(text);
@@ -730,7 +733,8 @@ pub(crate) fn bom_led_account(text: &str) -> Option<(usize, usize)> {
         return None;
     }
     let after = &text[run..];
-    let word = &after[..after.find([' ', '\t', '\r', '\n']).unwrap_or(after.len())];
+    let in_account = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == ':' || !c.is_ascii();
+    let word = &after[..after.find(|c: char| !in_account(c)).unwrap_or(after.len())];
     #[cfg(test)]
     test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(c.get() + word.len()));
     let stand_in = format!("{STAND_IN}{word}");
@@ -2065,6 +2069,7 @@ mod tests {
         // few seconds rather than running for minutes on the 1 MB one.
         for count in [20_000, 350_000] {
             let run = bom.repeat(count);
+            let accounts = format!("~{bom}1:A").repeat(count / 2);
             // A wall-clock bound too, generous even for a slow debug build,
             // as a backstop for a rescan the byte counters (the primary
             // guard) do not see, such as a lookahead that trims the rest of
@@ -2077,6 +2082,12 @@ mod tests {
                 format!("x {run}a\n"),
                 format!("x {run}Assets:A\n"),
                 format!("x\n{run} a\n"),
+                // A blank-free run of BOM-led accounts, after a BOM-led
+                // account at the start of a line, after an invalid token, and
+                // after a line-start BOM before an account of its own.
+                format!("x\n{bom}assets:A{accounts}\n"),
+                format!("x $x {bom}assets:A{accounts}\n"),
+                format!("x\n{bom}Assets:A{accounts}\n"),
             ]);
             if count == 20_000 {
                 let took = started.elapsed();

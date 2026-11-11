@@ -4783,9 +4783,14 @@ fn emit_error_node_line(
     // Legacy span INCLUDES the terminator NEWLINE (skip_to_newline consumes it
     // before span_from is called); at EOF the terminator is the node end.
     let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
-    let line_text = stripped.get(ls as usize..end as usize).unwrap_or("");
     let stray_bom = has_stray_bom(invalid, stripped);
-    let primary = classify_recovery_error(line_text, stray_bom, span);
+    let primary = classify_recovery_error(
+        stripped,
+        ls as usize..end as usize,
+        invalid,
+        stray_bom,
+        span,
+    );
     let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
     out.push(primary);
     // Additive secondary `BomInDirectiveBody` when a different primary
@@ -4978,12 +4983,49 @@ fn is_bom_account_token(source: &str, start: usize, text: &str) -> bool {
 /// Order matters: a Windows-exported file with a Unicode account
 /// AND an internal BOM gets the Unicode-account diagnostic
 /// (the BOM is usually a side effect, not the root cause).
+///
+/// Only text outside the line's invalid tokens (`invalid`, ranges into
+/// `stripped`) can be an account: inside one (`Heading,Ü:A`, read by
+/// beancount as one invalid token) it is part of that token, whose own error
+/// reports it, and taking it for an account too counted the token twice.
+/// Its bytes are masked with `_`, not blanked: a blank would split the
+/// word, so the account glued to the BOM in `<BOM>Fݾ:Ü` (one word led by the
+/// BOM, never an account here) would start a word of its own and be counted
+/// beside the BOM's diagnostic.
 pub(super) fn classify_recovery_error(
-    line_text: &str,
+    stripped: &str,
+    line: std::ops::Range<usize>,
+    invalid: &[std::ops::Range<usize>],
     stray_bom: bool,
     span: Span,
 ) -> crate::ParseError {
-    if let Some(account) = crate::diagnostics::find_unicode_account(line_text) {
+    let line_text = stripped.get(line.clone()).unwrap_or("");
+    let outside_invalid: std::borrow::Cow<'_, str> =
+        if invalid.is_empty() || !line_text.starts_with(crate::bom::BOM_CHAR) {
+            line_text.into()
+        } else {
+            // `invalid` is in line order: one sweep, linear in the line. One `_`
+            // per byte keeps every offset, so the account found is read back
+            // from the line itself.
+            let mut k = 0;
+            let mut masked = String::with_capacity(line_text.len());
+            for (i, c) in line_text.char_indices() {
+                let at = line.start + i;
+                while invalid.get(k).is_some_and(|r| r.end <= at) {
+                    k += 1;
+                }
+                if invalid.get(k).is_some_and(|r| r.start <= at) {
+                    masked.extend(std::iter::repeat_n('_', c.len_utf8()));
+                } else {
+                    masked.push(c);
+                }
+            }
+            masked.into()
+        };
+    if let Some(account) = crate::diagnostics::find_unicode_account(&outside_invalid) {
+        // A word partly masked is reported whole, as written.
+        let at = account.as_ptr().addr() - outside_invalid.as_ptr().addr();
+        let account = line_text.get(at..at + account.len()).unwrap_or(account);
         return crate::ParseError::new(
             crate::ParseErrorKind::InvalidAccount(account.to_string()),
             span,
@@ -9323,6 +9365,12 @@ pub(super) fn report_invalid_tokens_of_error_line(
             account_glue_end = None;
             if range.start < end {
                 let tail = &stripped[end..range.end];
+                // A `;` right after the account starts beancount's comment,
+                // which takes the rest of the line
+                // (`<BOM><BOM>kk:<BOM>;c <BOM>1.5`).
+                if tail.starts_with(';') {
+                    break;
+                }
                 if !invalid_runs(&format!(" {tail}")).is_empty() {
                     report(end..range.end, tail, out);
                 }

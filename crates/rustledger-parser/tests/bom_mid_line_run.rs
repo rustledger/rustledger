@@ -554,3 +554,59 @@ fn test_parse_bom_account_in_metadata_keeps_booking_method_check() {
         assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
     }
 }
+
+/// Round-9 shapes, each count bean-check's: a tail glued to a BOM-led
+/// account (`<BOM>"s"`, `~<BOM>1:A`, `<BOM>x`) is no second error; an
+/// account inside a heading's invalid token (`Heading,Ü:A`) is that token,
+/// not one more error; an invalid token after a heading's first word is
+/// one; and a comment after a BOM-led key ends the line.
+#[test]
+fn test_parse_bom_led_line_tails_count_as_beancount() {
+    for (line, errors) in [
+        (format!("{BOM}assets:A{BOM}\"s\""), 1),
+        (format!("{BOM}assets:A~{BOM}1:A"), 1),
+        (format!("{BOM}assets:A{BOM}x"), 1),
+        (format!("{BOM}* Heading,\u{DC}:A"), 2),
+        (format!("{BOM}* Heading{BOM}a-b:C{{  1{BOM}2"), 2),
+        (format!("{BOM}{BOM}kk:{BOM};c\t{BOM}1.5"), 1),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// An account glued to a line-start BOM is not taken for an account of its
+/// own when the line is recovered after an error line: the BOM's diagnostic
+/// stands for the word, as it did before the BOM's run was split.
+#[test]
+fn test_parse_bom_glued_unicode_account_after_error_line_is_not_counted_twice() {
+    let src = format!("{HEAD}x\n{BOM}F\u{77E}:\u{DC}\n");
+    let result = parse_both(&src);
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e.kind, ParseErrorKind::InvalidAccount(_))),
+        "{:?}",
+        result.errors
+    );
+    assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
+}
+
+/// An account word only partly inside an invalid token is still reported as
+/// written: masking the token keeps it out of the account search but never
+/// shows in the message (`G:\u{3A8}@3O+.1`, not the masked text).
+#[test]
+fn test_parse_partly_invalid_account_word_is_reported_as_written() {
+    let src = format!("{HEAD}{BOM}\tG:\u{3A8}@3O+.1\n");
+    let result = parse_both(&src);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.kind == ParseErrorKind::InvalidAccount("G:\u{3A8}@3O+.1".to_string())),
+        "{:?}",
+        result.errors
+    );
+}

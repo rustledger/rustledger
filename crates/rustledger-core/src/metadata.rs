@@ -765,7 +765,10 @@ mod tests {
         // `Extend`, `FromIterator` and equality share the same machinery.
         // A loop of `insert` calls makes n^2/2 (1.25e9) key comparisons
         // here; the indexed paths make none.
-        const N: usize = 50_000;
+        // Shrunk under Miri, whose per-step cost made the full size outrun
+        // the weekly job's 40-minute budget. A quadratic path still blows
+        // the 10 * N comparison bound at this size (N^2/2 = 500,000).
+        const N: usize = if cfg!(miri) { 1_000 } else { 50_000 };
         let pairs: Vec<(String, MetaValue)> = (0..N)
             .map(|i| (format!("key-{i}"), MetaValue::Int(i as i64)))
             .collect();
@@ -796,7 +799,10 @@ mod tests {
 
     #[test]
     fn test_build_keeping_first_keeps_each_keys_first_entry() {
-        const N: usize = 50_000;
+        // Shrunk under Miri, whose per-step cost made the full size outrun
+        // the weekly job's 40-minute budget. A quadratic path still blows
+        // the 10 * N comparison bound at this size (N^2/2 = 500,000).
+        const N: usize = if cfg!(miri) { 1_000 } else { 50_000 };
         // Both sides of the threshold: a repeated key keeps its first
         // position AND its first value (#2893), and it stays near-linear.
         for n in [3, INDEX_THRESHOLD, INDEX_THRESHOLD + 1, 200] {

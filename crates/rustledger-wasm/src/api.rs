@@ -647,14 +647,19 @@ fn validate_with_filesystem(
         }
     };
 
-    // Report every load error, then validate whatever loaded: no load error
-    // stops validation, as none stops it in `rledger check`, which reports
-    // them and then runs `process` with them cleared, and in bean-check
-    // (#2949). This used to stop before validating on any load error but a
-    // duplicate include, an include cycle or an empty glob, so one syntax
-    // error, or an include of a missing file, hid every other finding.
-    let mut errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
-    load_result.errors.clear();
+    // Validate whatever loaded: no load error stops validation, as none stops
+    // it in `rledger check` or in bean-check (#2949). This used to stop before
+    // validating on any load error but a duplicate include, an include cycle
+    // or an empty glob, so one syntax error, or an include of a missing file,
+    // hid every other finding.
+    //
+    // The parse errors are rendered here one by one with their code and line,
+    // rather than folded by `process` into one line-less `parse errors in
+    // <path>`; every other load error stays for `process`, the canonical
+    // renderer of those (code `LOAD`, with the include's file and line), as
+    // in `Ledger::from_file_map`.
+    let parse_failures = load_result.take_parse_errors();
+    let mut errors = load_errors_to_errors(&parse_failures, &load_result.source_map);
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize
@@ -1069,6 +1074,91 @@ mod load_error_tests {
             err.line,
             Some(2),
             "Line must be the include directive, not Unknown: {err:?}"
+        );
+    }
+
+    /// Both multi-file surfaces report a load error alike: `validateMultiFile`
+    /// (and `validateWithHost`, the same `validate_with_filesystem`) and
+    /// `Ledger.fromFiles`. A duplicate include and a missing include each
+    /// keep the code `LOAD` and the place `process` gives them (the missing
+    /// include's file and line; none for the duplicate, as `rledger check`
+    /// prints it), beside a parse error rendered with its own code and line.
+    /// The validate surface once rendered every load error itself, and its
+    /// load errors had no code.
+    #[test]
+    fn validate_and_ledger_report_load_errors_alike() {
+        let files: HashMap<String, String> = [
+            (
+                "main.beancount".to_string(),
+                "include \"x.beancount\"\ninclude \"x.beancount\"\n\
+                 include \"missing.beancount\"\ngarbage\n\
+                 2024-01-01 open Assets:Bank\n2024-01-04 balance Assets:Bank 1 USD\n"
+                    .to_string(),
+            ),
+            (
+                "x.beancount".to_string(),
+                "2024-01-01 open Equity:Opening\n".to_string(),
+            ),
+        ]
+        .into();
+        let shape = |errors: &[Error]| -> Vec<(Option<String>, Option<String>, Option<u32>)> {
+            errors
+                .iter()
+                .map(|e| (e.code.clone(), e.file.clone(), e.line))
+                .collect()
+        };
+
+        let validated = validate_with_filesystem(
+            Box::new(VirtualFileSystem::from_files(files.clone())),
+            "main.beancount",
+        );
+        let Ok(ledger) = crate::parsed_ledger::Ledger::from_file_map(files, "main.beancount")
+        else {
+            panic!("the ledger loads");
+        };
+
+        let validated_shape = shape(&validated.errors);
+        assert_eq!(
+            validated_shape,
+            shape(ledger.error_list()),
+            "validateMultiFile: {:?}\nLedger.fromFiles: {:?}",
+            validated.errors,
+            ledger.error_list()
+        );
+        let load = |needle: &str| {
+            validated
+                .errors
+                .iter()
+                .find(|e| e.message.contains(needle))
+                .map(|e| (e.code.clone(), e.file.clone(), e.line))
+        };
+        let main = Some("main.beancount".to_string());
+        // `process` gives a duplicate no place, as `rledger check` prints it
+        // with none.
+        assert_eq!(
+            load("Duplicate filename"),
+            Some((Some("LOAD".to_string()), None, None)),
+            "{:?}",
+            validated.errors
+        );
+        assert_eq!(
+            load("missing.beancount"),
+            Some((Some("LOAD".to_string()), main.clone(), Some(3))),
+            "{:?}",
+            validated.errors
+        );
+        assert!(
+            validated_shape.contains(&(Some("P0012".to_string()), main, Some(4))),
+            "the parse error keeps its code and line: {:?}",
+            validated.errors
+        );
+        assert!(
+            validated
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Balance failed")),
+            "and the ledger is validated past them: {:?}",
+            validated.errors
         );
     }
 }

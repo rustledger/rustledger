@@ -461,7 +461,8 @@ use crate::types::{Error, LedgerOptions};
 /// directives and their validation errors where it archived none, and a
 /// `Ledger` archives each parse error with its code and line where it
 /// archived one line-less `parse errors in <path>`. An older blob would keep
-/// serving the old errors. (v98, v99 and v100 are held by open PRs.)
+/// serving the old errors. (v98 is held by #2944, v99 by #2945 and #2946;
+/// v100 was never released.)
 pub const CACHE_VERSION: u32 = 101;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

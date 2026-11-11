@@ -2213,13 +2213,30 @@ impl MainLoopState {
         let (diagnostics, cross_file) = if is_multi_file {
             // Shared overlay for the one validation: the current file's fresh
             // parse (when it's a ledger file, parse errors or not, #2949) then
-            // every other open buffer.
+            // every other open buffer, parse errors or not. A broken current
+            // buffer is overlaid because its own diagnostics are mapped onto
+            // its text and must be what `rledger check` reports for that text
+            // (the stale ledger directives would put them on the wrong lines,
+            // or report what the buffer no longer says). Another broken open
+            // buffer is overlaid for the same reason: what parsed in it is
+            // what `check` validates, and it does not change while this one is
+            // edited, so it cannot make anything flap.
             let mut overlay: Vec<(u16, &[Spanned<Directive>])> =
                 Vec::with_capacity(1 + other_buffer_overlays.len());
             if let Some(fid) = current_file_id {
                 overlay.push((fid, result.directives.as_slice()));
             }
             overlay.extend_from_slice(&other_buffer_overlays);
+
+            // But while the current ledger buffer has a parse error, the
+            // unopened files keep what was last published for them (#1813).
+            // A buffer broken mid-edit loses whatever the error swallowed:
+            // typing one `"` makes a string of every line up to the next
+            // quote, `open`s included. Republishing would put E1001s on the
+            // unopened files that use those accounts on that keystroke and
+            // take them away on the next, so they are recomputed once the
+            // buffer parses again (or another, clean buffer is edited).
+            let hold_cross_file = current_file_id.is_some() && !result.errors.is_empty();
 
             let (current_from_multi, cross) = self.multi_file_diagnostics(
                 ledger_state.expect("is_multi_file implies a loaded ledger"),
@@ -2228,6 +2245,7 @@ impl MainLoopState {
                 &result,
                 text,
                 &overlay,
+                !hold_cross_file,
             );
             // When the current buffer IS part of the ledger, its diagnostics
             // come from the shared validation (`current_from_multi`). When it
@@ -2249,7 +2267,7 @@ impl MainLoopState {
                     self.position_encoding,
                 )
             };
-            (current, cross)
+            (current, (!hold_cross_file).then_some(cross))
         } else {
             // Single-file (or no loaded ledger): unchanged path — validate just
             // the current file.
@@ -2262,7 +2280,7 @@ impl MainLoopState {
                 &other_buffer_overlays,
                 self.position_encoding,
             );
-            (diagnostics, Vec::new())
+            (diagnostics, Some(Vec::new()))
         };
         drop(ledger_guard); // Release lock before sending
 
@@ -2279,8 +2297,11 @@ impl MainLoopState {
         }
         self.send_diagnostics_to_uri(uri, diagnostics);
 
-        // Publish (or clear) diagnostics for unopened included files.
-        self.publish_cross_file_diagnostics(cross_file);
+        // Publish (or clear) diagnostics for unopened included files, unless
+        // they are held while the current buffer has a parse error.
+        if let Some(cross_file) = cross_file {
+            self.publish_cross_file_diagnostics(cross_file);
+        }
     }
 
     /// Compute the current file's diagnostics AND every unopened included
@@ -2296,7 +2317,9 @@ impl MainLoopState {
     ///
     /// Only unopened files are cross-published; open buffers self-publish via
     /// didOpen/didChange. `overlay` is the fresh parse of every open buffer
-    /// (current file included).
+    /// (current file included). With `with_unopened` false the unopened files
+    /// are not mapped at all and `cross_file` is empty: the caller is holding
+    /// their diagnostics while the current buffer has a parse error.
     fn multi_file_diagnostics(
         &self,
         ledger_state: &crate::ledger_state::LedgerState,
@@ -2305,6 +2328,7 @@ impl MainLoopState {
         current_parse: &ParseResult,
         current_source: &str,
         overlay: &[(u16, &[Spanned<Directive>])],
+        with_unopened: bool,
     ) -> (
         Vec<lsp_types::Diagnostic>,
         Vec<(AbsPathBuf, Vec<lsp_types::Diagnostic>)>,
@@ -2334,6 +2358,7 @@ impl MainLoopState {
             .source_map
             .files()
             .iter()
+            .filter(|_| with_unopened)
             .filter_map(|f| {
                 let canonical = f.path.canonicalize().ok();
                 // Skip the current file and any open buffer — those self-publish.
@@ -2928,5 +2953,224 @@ mod tests {
                 "{spelling} left the cross-file set populated"
             );
         }
+    }
+
+    /// Every `textDocument/publishDiagnostics` sent so far, as
+    /// `(uri, [(code, 0-based line)])`.
+    fn drain_published(
+        receiver: &crossbeam_channel::Receiver<lsp_server::Message>,
+    ) -> Vec<(String, Vec<(String, u32)>)> {
+        let mut published = Vec::new();
+        while let Ok(msg) = receiver.try_recv() {
+            if let lsp_server::Message::Notification(n) = msg
+                && n.method == "textDocument/publishDiagnostics"
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).expect("publishDiagnostics params");
+                let codes = p
+                    .diagnostics
+                    .iter()
+                    .map(|d| {
+                        let code = match &d.code {
+                            Some(lsp_types::NumberOrString::String(s)) => s.clone(),
+                            Some(lsp_types::NumberOrString::Number(n)) => n.to_string(),
+                            None => String::new(),
+                        };
+                        (code, d.range.start.line)
+                    })
+                    .collect();
+                published.push((p.uri.as_str().to_string(), codes));
+            }
+        }
+        published
+    }
+
+    /// The codes last published for `path`, or `None` if nothing was.
+    fn last_published_for(
+        published: &[(String, Vec<(String, u32)>)],
+        path: &std::path::Path,
+    ) -> Option<Vec<(String, u32)>> {
+        let uri = crate::path_to_uri(path).expect("file URI");
+        published
+            .iter()
+            .rev()
+            .find(|(u, _)| u.as_str() == uri.as_str()) // ratchet-allow: uri-string-eq comparing what was sent on the wire
+            .map(|(_, codes)| codes.clone())
+    }
+
+    fn open_doc(state: &mut MainLoopState, path: &std::path::Path, text: &str) {
+        state.on_did_open(lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri: crate::path_to_uri(path).expect("file URI"),
+                language_id: "beancount".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        });
+    }
+
+    fn change_doc(state: &mut MainLoopState, path: &std::path::Path, version: i32, text: &str) {
+        state.on_did_change(lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: crate::path_to_uri(path).expect("file URI"),
+                version,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_string(),
+            }],
+        });
+    }
+
+    /// The edited buffer of a multi-file ledger is validated from its text
+    /// while it has a parse error, as `rledger check` validates that text
+    /// (#2949): its unbalanced transaction is reported on the buffer's line.
+    /// Validating the ledger's stale copy instead would report nothing here,
+    /// since the file on disk balances.
+    ///
+    /// The unopened file it includes keeps what was last published for it
+    /// while the buffer is broken (#1813): typing one `"` makes a string of
+    /// every line up to the next quote, the `open`s among them, and
+    /// republishing would put E1001s on the unopened file on that keystroke
+    /// and take them away on the next. Once the buffer parses again the
+    /// unopened file is recomputed.
+    #[test]
+    fn a_broken_ledger_buffer_is_validated_from_its_text_and_holds_unopened_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        let main_on_disk = "include \"b.beancount\"\n\
+                            2024-01-01 open Assets:X\n\
+                            2024-01-01 open Equity:E\n";
+        std::fs::write(&main, main_on_disk).expect("write main");
+        // b has one error of its own (`Assets:Q` is never opened), so what is
+        // published for it shows whether it was recomputed.
+        std::fs::write(
+            &b,
+            "2024-01-02 * \"t\"\n  Assets:X  1 USD\n  Equity:E  -1 USD\n\
+             2024-01-03 * \"q\"\n  Assets:Q  1 USD\n  Equity:E  -1 USD\n",
+        )
+        .expect("write b");
+        let b_own = Some(vec![("E1001".to_string(), 3)]);
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_on_disk);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![]),
+            "the clean main has no diagnostics: {published:?}"
+        );
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_own,
+            "b has its own error: {published:?}"
+        );
+
+        // A line that does not parse, then an unbalanced transaction on line
+        // 5 (0-based 4) of the buffer.
+        change_doc(
+            &mut state,
+            &main,
+            2,
+            "include \"b.beancount\"\ngarbage\n2024-01-01 open Assets:X\n\
+             2024-01-01 open Equity:E\n2024-01-03 * \"u\"\n  Assets:X  5 USD\n  \
+             Equity:E  -4 USD\n",
+        );
+        let published = drain_published(&receiver);
+        let main_codes = last_published_for(&published, &main).expect("main published");
+        assert!(
+            main_codes.iter().any(|(c, _)| c.starts_with('P')),
+            "the parse error is reported: {main_codes:?}"
+        );
+        assert!(
+            main_codes.contains(&("E3001".to_string(), 4)),
+            "the buffer's unbalanced transaction is reported on its line: {main_codes:?}"
+        );
+
+        // One `"` typed: the string runs to the next quote and swallows both
+        // `open`s. `rledger check` on this text reports E1001 in main and in
+        // b; main gets them, b is held.
+        change_doc(
+            &mut state,
+            &main,
+            3,
+            "include \"b.beancount\"\n2024-01-01 * \"oops\n2024-01-01 open Assets:X\n\
+             2024-01-01 open Equity:E\n2024-01-05 * \"z\"\n  Assets:X  1 USD\n  \
+             Equity:E  -1 USD\n",
+        );
+        let published = drain_published(&receiver);
+        let main_codes = last_published_for(&published, &main).expect("main published");
+        // Exactly what `rledger check` reports for this text in main.
+        assert_eq!(
+            main_codes,
+            vec![
+                ("P0012".to_string(), 4),
+                ("E1001".to_string(), 1),
+                ("E1001".to_string(), 1),
+            ],
+            "the swallowed opens are missed in the buffer, as in check"
+        );
+        assert_eq!(
+            last_published_for(&published, &b),
+            None,
+            "the unopened file must be held while the buffer is broken: {published:?}"
+        );
+
+        // The edit undone: the buffer parses again, and b is recomputed.
+        change_doc(&mut state, &main, 4, main_on_disk);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![]),
+            "{published:?}"
+        );
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_own,
+            "b is recomputed once the buffer parses: {published:?}"
+        );
+    }
+
+    /// Another open buffer with a parse error is overlaid with what parsed in
+    /// it, as `rledger check` validates that text (#2949), not with its stale
+    /// copy in the ledger. Here the open buffer `c` opens `Assets:Z`, which
+    /// the file on disk does not, and the edited `main` uses it: no E1001.
+    #[test]
+    fn a_broken_other_open_buffer_is_overlaid_with_what_parsed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let c = dir.join("c.beancount");
+        let main_on_disk = "include \"c.beancount\"\n2024-01-01 open Equity:E\n";
+        std::fs::write(&main, main_on_disk).expect("write main");
+        std::fs::write(&c, "2024-01-01 open Assets:Y\n").expect("write c");
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_on_disk);
+        open_doc(
+            &mut state,
+            &c,
+            "garbage\n2024-01-01 open Assets:Y\n2024-01-01 open Assets:Z\n",
+        );
+        drain_published(&receiver);
+
+        change_doc(
+            &mut state,
+            &main,
+            2,
+            "include \"c.beancount\"\n2024-01-01 open Equity:E\n\
+             2024-01-02 * \"t\"\n  Assets:Z  1 USD\n  Equity:E  -1 USD\n",
+        );
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![]),
+            "Assets:Z is opened in the open buffer c, broken or not: {published:?}"
+        );
     }
 }

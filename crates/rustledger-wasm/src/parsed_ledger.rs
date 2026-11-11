@@ -711,6 +711,12 @@ impl Ledger {
         self.errors.iter().map(|e| e.message.clone()).collect()
     }
 
+    /// The errors `getErrors` answers with.
+    #[cfg(test)]
+    pub(crate) fn error_list(&self) -> &[Error] {
+        &self.errors
+    }
+
     /// [`Ledger::from_files`] once the files are a map: the load, as the CLI
     /// runs it. Plain Rust, so native tests build a `Ledger` too.
     pub(crate) fn from_file_map(

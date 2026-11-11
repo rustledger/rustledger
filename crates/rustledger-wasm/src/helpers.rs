@@ -61,6 +61,9 @@ pub fn validation_error_to_wasm(
         .with_file(file);
     // A span is a place in the one source text (file id 0) only; one a
     // plugin's directive carries (a placeholder id) says nothing about it.
+    // The FFI component's `semantic_validation_errors`
+    // (`rustledger-ffi-component/src/convert.rs`) applies the same rule and
+    // points back here; change both together (#2935).
     if let Some(span) = e.span.filter(|_| e.file_id.is_none_or(|id| id == 0)) {
         out = out.with_span(
             lookup.byte_to_line_col(span.start),

@@ -16,9 +16,15 @@
 // Each side must report exactly `diagnostics`, so a change on either side
 // trips its own test against this one list.
 //
-// An option diagnostic has no location (`file` and `line` are `None`): an
-// `OptionWarning` carries none. `rledger check` prints it at the entry file's
-// line 1, its JSON's stand-in for "no location"; the FFI reports no line.
+// A diagnostic with no location (`file` and `line` are `None`, such as a
+// plugin that could not be resolved) is printed by `rledger check` at the
+// entry file's line 1, its JSON's stand-in for "no location"; the FFI reports
+// no file and no line. Every option diagnostic has its option's location
+// (#2925).
+//
+// Each case also closes an account with a balance, the advisory-only E1004
+// that `rledger check` leaves out (bean-check does not flag it): no surface
+// may report it.
 
 /// One diagnostic as every surface must report it.
 #[allow(dead_code)]
@@ -67,7 +73,8 @@ impl CheckParityCase {
     }
 }
 
-/// The option diagnostics both cases raise, at no location: a rejected
+/// The option diagnostics both ledgers raise, at their options' lines in
+/// `main.beancount`: a rejected
 /// `booking_method` (whose ledger is then booked STRICT, so a query refuses,
 /// #2911), a rejected `name_equity`, and a duplicate `title` (a warning).
 #[allow(dead_code)]
@@ -75,24 +82,24 @@ const OPTION_DIAGNOSTICS: [ExpectedDiagnostic; 3] = [
     ExpectedDiagnostic {
         code: "E7002",
         severity: "error",
-        file: None,
-        line: None,
+        file: Some("main.beancount"),
+        line: Some(2),
         message: "Invalid value \"fifo\" for option \"booking_method\": expected one of \
                   STRICT, STRICT_WITH_SIZE, FIFO, LIFO, HIFO, AVERAGE, NONE",
     },
     ExpectedDiagnostic {
         code: "E7008",
         severity: "error",
-        file: None,
-        line: None,
+        file: Some("main.beancount"),
+        line: Some(3),
         message: "Invalid account type name: 'x' cannot begin an account name, so the \
                   option keeps its previous value",
     },
     ExpectedDiagnostic {
         code: "E7003",
         severity: "warning",
-        file: None,
-        line: None,
+        file: Some("main.beancount"),
+        line: Some(5),
         message: DUPLICATE_TITLE,
     },
 ];
@@ -135,7 +142,8 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                  2024-01-01 open Assets:Brokerage\n\
                  2024-01-01 open Equity:Opening-Balances\n\
                  \n\
-                 2024-01-05 balance Assets:Bank 100 USD\n",
+                 2024-01-05 balance Assets:Bank 100 USD\n\
+                 2024-01-06 close Assets:Bank\n",
             ),
         ],
         entry: "main.beancount",
@@ -180,7 +188,8 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
              \n\
              2024-01-03 pad Assets:Brokerage Equity:Opening-Balances\n\
              2024-01-04 balance Assets:Brokerage 12 HOOL\n\
-             2024-01-05 balance Assets:Bank 100 USD\n",
+             2024-01-05 balance Assets:Bank 100 USD\n\
+             2024-01-06 close Assets:Bank\n",
         )],
         entry: "main.beancount",
         diagnostics: &[
@@ -200,6 +209,47 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 file: Some("main.beancount"),
                 line: Some(16),
                 message: BALANCE_FAILED,
+            },
+        ],
+    },
+    // A declared plugin that is not run: `rledger check` still validates,
+    // and reports an account the plugin might have opened as E1001 beside the
+    // plugin error, and so does every FFI surface. Unresolved here (E8001),
+    // which every build reports alike; a Python plugin the component cannot
+    // run (E8005, or E8004 by module name) takes the same path, pinned in the
+    // component's own tests.
+    CheckParityCase {
+        name: "unresolved-plugin",
+        files: &[(
+            "main.beancount",
+            "plugin \"no_such_plugin\"\n\
+             \n\
+             2024-01-02 * \"x\"\n  \
+               Assets:A  10 USD\n  \
+               Income:X\n",
+        )],
+        entry: "main.beancount",
+        diagnostics: &[
+            ExpectedDiagnostic {
+                code: "E8001",
+                severity: "error",
+                file: None,
+                line: None,
+                message: "Plugin not found: \"no_such_plugin\"",
+            },
+            ExpectedDiagnostic {
+                code: "E1001",
+                severity: "error",
+                file: Some("main.beancount"),
+                line: Some(3),
+                message: "Account Assets:A was never opened",
+            },
+            ExpectedDiagnostic {
+                code: "E1001",
+                severity: "error",
+                file: Some("main.beancount"),
+                line: Some(3),
+                message: "Account Income:X was never opened",
             },
         ],
     },

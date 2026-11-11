@@ -283,7 +283,8 @@ impl Ledger {
     ///
     /// For surfaces that report only `errors`, not the option warnings: the
     /// E7002 itself is on `options.warnings`, so a surface listing both must
-    /// not list this as well.
+    /// not list this as well. A query surface lists both through
+    /// [`Self::query_option_errors`], which does that.
     #[must_use]
     pub fn query_refusal(&self) -> Option<LedgerError> {
         let rejected = self.options.query_refusal(self.booking_method)?;
@@ -301,6 +302,39 @@ impl Ledger {
             });
         }
         Some(err)
+    }
+
+    /// The option diagnostics a query surface lists:
+    /// [`option_warnings_to_errors`] over this ledger's options, with the
+    /// E7002 of the rejected `booking_method` that refuses queries replaced
+    /// by [`Self::query_refusal`], which names the same option at the same
+    /// line and says why the query did not answer (#2911, #2929).
+    ///
+    /// One rule for every query surface, so none lists both and none lists
+    /// the plain E7002 where the refusal belongs. A surface that reports a
+    /// load (`rledger check`, the FFI's `load` and `info()`) lists the plain
+    /// [`option_warnings_to_errors`].
+    #[must_use]
+    pub fn query_option_errors(&self) -> Vec<LedgerError> {
+        let mut errors = option_warnings_to_errors(&self.options.warnings);
+        if let (Some(rejected), Some(refusal)) = (
+            self.options.query_refusal(self.booking_method),
+            self.query_refusal(),
+        ) {
+            // The last E7002 for the rejected value at its site: the
+            // rejection the refusal is about.
+            let refused = self.options.warnings.iter().rposition(|w| {
+                w.code == "E7002"
+                    && w.option == rejected.key
+                    && w.value == rejected.value
+                    && w.site == rejected.site
+            });
+            match refused {
+                Some(i) => errors[i] = refusal,
+                None => errors.push(refusal),
+            }
+        }
+        errors
     }
 
     /// Return the directive stream merged with synthesized
@@ -2515,7 +2549,7 @@ mod option_errors_tests {
     /// The shared mapping (#2929) reads severity, code and phase off each
     /// warning and keeps its message: an E7002 (error) and an E7003
     /// (warning, last value wins) come out as `rledger check` prints them,
-    /// with no location, since a warning has none.
+    /// with no location, since one set through `Options::set` has none.
     #[test]
     fn test_option_warnings_to_errors_reads_each_warning() {
         let mut opts = Options::new();
@@ -2584,6 +2618,46 @@ mod option_errors_tests {
             .find(|e| e.is_booking_failure())
             .unwrap_or_else(|| panic!("a booking failure: {:?}", ledger.errors));
         assert!(!booking.is_validation_finding(), "{booking:?}");
+    }
+
+    /// A query surface lists the refusal where the rejected `booking_method`'s
+    /// E7002 is, once, and every other option diagnostic as a load lists it
+    /// (#2911, #2929).
+    #[test]
+    fn test_query_option_errors_replaces_the_refused_e7002() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "option \"title\" \"A\"\n\
+             option \"booking_method\" \"fifo\"\n\
+             option \"title\" \"B\"\n\
+             2024-01-01 open Assets:A\n",
+        );
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = super::process(raw, &super::LoadOptions::default()).expect("processes");
+
+        let load: Vec<_> = option_warnings_to_errors(&ledger.options.warnings);
+        let query = ledger.query_option_errors();
+        assert_eq!(load.len(), 2, "{load:?}");
+        assert_eq!(query.len(), 2, "{query:?}");
+        let refusal = ledger.query_refusal().expect("fifo refuses");
+        let e7002 = load
+            .iter()
+            .position(|e| e.code == "E7002")
+            .expect("the E7002");
+        assert!(load[e7002].message.starts_with("Invalid value \"fifo\""));
+        assert_eq!(query[e7002].message, refusal.message);
+        assert!(query[e7002].blocks_queries());
+        assert_eq!(
+            query[e7002].location.as_ref().map(|l| l.line),
+            load[e7002].location.as_ref().map(|l| l.line),
+            "at the option's line"
+        );
+        let other = 1 - e7002;
+        assert_eq!(query[other].message, load[other].message);
     }
 }
 

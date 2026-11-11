@@ -24,10 +24,14 @@ fn test_check_reports_the_ffi_parity_diagnostics() {
         for (path, text) in case.files {
             std::fs::write(dir.path().join(path), text).expect("write");
         }
-        let entry = dir.path().join(case.entry);
+        // The entry by its relative name, from its directory: `check` names a
+        // diagnostic with no location by the path it was given (this one,
+        // at line 1), and a located one by the loader's absolute path, so
+        // the two cannot be confused.
         let out = Command::new(&bin)
+            .current_dir(dir.path())
             .args(["check", "--format", "json", "--no-cache"])
-            .arg(&entry)
+            .arg(case.entry)
             .output()
             .expect("run rledger check");
         assert_eq!(
@@ -38,7 +42,6 @@ fn test_check_reports_the_ffi_parity_diagnostics() {
             String::from_utf8_lossy(&out.stderr)
         );
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON output");
-        let entry_str = entry.display().to_string();
         let mut got: Vec<Row> = json["diagnostics"]
             .as_array()
             .expect("diagnostics")
@@ -47,14 +50,10 @@ fn test_check_reports_the_ffi_parity_diagnostics() {
                 let file = d["file"].as_str().expect("file");
                 let line = u32::try_from(d["line"].as_u64().expect("line")).expect("u32");
                 let code = d["code"].as_str().expect("code").to_string();
-                // An option diagnostic has no location; `check` prints its
-                // stand-in, the entry file's line 1 (see `cases.rs`).
-                let (file, line) = if code.starts_with("E70") {
-                    assert!(
-                        (file == entry_str || file == case.entry) && line == 1,
-                        "{}: {code} at {file}:{line}",
-                        case.name
-                    );
+                // A diagnostic with no location: `check` prints its stand-in,
+                // the entry as given, at line 1 (see `cases.rs`).
+                let (file, line) = if file == case.entry {
+                    assert!(line == 1, "{}: {code} at {file}:{line}", case.name);
                     (None, None)
                 } else {
                     let relative = std::path::Path::new(file)

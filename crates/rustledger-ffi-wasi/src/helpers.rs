@@ -68,6 +68,11 @@ pub struct LoadResult {
     /// have run. They include a rejected `booking_method`'s E7002, so a
     /// surface listing them does not list [`Self::query_refusal`] too.
     pub option_errors: Vec<Error>,
+    /// What a query over the load lists of [`Self::option_errors`]: the same,
+    /// with the rejected `booking_method`'s E7002 replaced by
+    /// [`Self::query_refusal`]'s reason
+    /// ([`rustledger_loader::Ledger::query_option_errors`], #2911, #2929).
+    pub query_option_errors: Vec<Error>,
     pub options: LedgerOptions,
     /// The ledger's `tolerance_multiplier` option, for the padding
     /// [`expand_pads`] inserts (a difference within a balance's tolerance is
@@ -151,6 +156,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 error_blocks_queries: vec![true],
                 query_refusal: None,
                 option_errors: Vec::new(),
+                query_option_errors: Vec::new(),
                 options: LedgerOptions::default(),
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 validation_options: rustledger_validate::ValidationOptions::default(),
@@ -240,6 +246,7 @@ pub fn load_source(source: &str) -> LoadResult {
         .unzip();
     let query_refusal = query_refusal_error(&ledger);
     let option_errors = option_errors(&ledger);
+    let query_option_errors = query_option_errors(&ledger);
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
@@ -268,6 +275,7 @@ pub fn load_source(source: &str) -> LoadResult {
         error_blocks_queries,
         query_refusal,
         option_errors,
+        query_option_errors,
         options,
         tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
         validation_options,
@@ -385,6 +393,8 @@ pub struct FileLoad {
     /// The option diagnostics (E7001 to E7011); see
     /// [`LoadResult::option_errors`] for why they are kept apart (#2929).
     pub option_errors: Vec<Error>,
+    /// See [`LoadResult::query_option_errors`].
+    pub query_option_errors: Vec<Error>,
     /// Why a query over the ledger refuses though no error blocks it: a
     /// rejected `booking_method`
     /// ([`rustledger_loader::Ledger::query_refusal`]). Not among `errors`, so
@@ -532,9 +542,20 @@ pub fn load_file_with_fs(
         .map(ledger_error_to_ffi)
         .collect();
     let error_blocks_queries: Vec<bool> = load_errors.iter().map(|e| e.blocks_queries()).collect();
-    let validation_errors: Vec<Error> = findings.into_iter().map(ledger_error_to_ffi).collect();
+    // As `rledger check` reports them: an advisory-only code (E1004, closing
+    // an account with a balance, which bean-check does not flag) is left out,
+    // by the canonical predicate the CLI and the WASM query apply. A finding
+    // is kept when a declared plugin was not run (E8004, E8005): `check`
+    // keeps it too, so an account the plugin would have opened is an E1001
+    // on both, beside the plugin error that says why.
+    let validation_errors: Vec<Error> = findings
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(ledger_error_to_ffi)
+        .collect();
     let query_refusal = query_refusal_error(&ledger);
     let option_errors = option_errors(&ledger);
+    let query_option_errors = query_option_errors(&ledger);
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -561,6 +582,7 @@ pub fn load_file_with_fs(
         error_blocks_queries,
         validation_errors,
         option_errors,
+        query_option_errors,
         query_refusal,
         options,
         tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
@@ -577,6 +599,26 @@ fn option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
     rustledger_loader::option_warnings_to_errors(&ledger.options.warnings)
         .iter()
         .map(ledger_error_to_ffi)
+        .collect()
+}
+
+/// The option diagnostics a query over `ledger` lists, as wire errors:
+/// [`rustledger_loader::Ledger::query_option_errors`], so the rejected
+/// `booking_method`'s E7002 is the refusal, as [`query_refusal_error`]
+/// gives it (#2911, #2929).
+fn query_option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
+    ledger
+        .query_option_errors()
+        .iter()
+        .map(|e| {
+            let err = ledger_error_to_ffi(e);
+            // The refusal crosses as `query_refusal_error` gives it.
+            if e.blocks_queries() {
+                err.validate_phase()
+            } else {
+                err
+            }
+        })
         .collect()
 }
 

@@ -1597,23 +1597,44 @@ mod check_parity_cases {
 }
 use check_parity_cases::{CHECK_PARITY_CASES, CheckParityCase};
 
-/// Severity, line, message of each error, sorted: what the WIT record carries.
-fn severity_line_message(
-    errors: &[rustledger::ledger::types::Error],
-) -> Vec<(String, Option<u32>, String)> {
+/// Code, severity, file, line, message.
+type CheckRow = (Option<String>, String, Option<String>, Option<u32>, String);
+
+/// Each error as a row, sorted, a file under `/work/` named relative to it.
+fn check_rows(errors: &[rustledger::ledger::types::Error]) -> Vec<CheckRow> {
     let mut rows: Vec<_> = errors
         .iter()
-        .map(|e| (e.severity.clone(), e.line, e.message.clone()))
+        .map(|e| {
+            (
+                e.code.clone(),
+                e.severity.clone(),
+                e.filename
+                    .as_ref()
+                    .map(|f| f.strip_prefix("/work/").unwrap_or(f).to_string()),
+                e.line,
+                e.message.clone(),
+            )
+        })
         .collect();
     rows.sort();
     rows
 }
 
-fn expected_rows(case: &CheckParityCase) -> Vec<(String, Option<u32>, String)> {
+/// `case`'s diagnostics as rows, the entry file named `entry_as`.
+fn expected_rows(case: &CheckParityCase, entry_as: &str) -> Vec<CheckRow> {
     let mut rows: Vec<_> = case
         .diagnostics
         .iter()
-        .map(|d| (d.severity.to_string(), d.line, d.message.to_string()))
+        .map(|d| {
+            (
+                Some(d.code.to_string()),
+                d.severity.to_string(),
+                d.file
+                    .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
+                d.line,
+                d.message.to_string(),
+            )
+        })
         .collect();
     rows.sort();
     rows
@@ -1621,14 +1642,11 @@ fn expected_rows(case: &CheckParityCase) -> Vec<(String, Option<u32>, String)> {
 
 /// Through the built component, `load`, `load-file`, `validate` and
 /// `validate-file` report what `rledger check` reports for the same ledger:
-/// the option diagnostics (#2929), and the validation findings of a ledger
-/// with includes, each at its own line (#2935). The native tests in
-/// `rustledger-ffi-component` compare codes and files too, which the WIT
-/// `error` record has no field for.
+/// code, severity, file, line and message of the option diagnostics (#2929)
+/// and of the validation findings of a ledger with includes (#2935).
 #[test]
 fn check_parity_through_the_component() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     for case in CHECK_PARITY_CASES {
@@ -1637,41 +1655,46 @@ fn check_parity_through_the_component() -> Result<()> {
             std::fs::write(dir.path().join(path), text)?;
         }
         let entry = format!("/work/{}", case.entry);
-        let want = expected_rows(case);
+        let want = expected_rows(case, case.entry);
+        let others = case
+            .diagnostics
+            .iter()
+            .filter(|d| !d.code.starts_with("E70"))
+            .count() as u32;
         let (mut store, inst) = instantiate_in(dir.path())?;
         let ledger = inst.rustledger_ledger_ledger();
 
         let loaded = ledger.call_load_file(&mut store, &entry, false, &[], false)?;
         assert_eq!(
-            severity_line_message(&loaded.errors),
+            check_rows(&loaded.errors),
             want,
             "{} via load-file",
             case.name
         );
         let validated = ledger.call_validate_file(&mut store, &entry)?;
         assert_eq!(
-            severity_line_message(&validated.errors),
+            check_rows(&validated.errors),
             want,
             "{} via validate-file",
             case.name
         );
         assert!(!validated.valid, "{}", case.name);
         assert_eq!(validated.parse_error_count, 0, "{}", case.name);
-        assert_eq!(validated.validate_error_count, 2, "{}", case.name);
+        assert_eq!(validated.validate_error_count, others, "{}", case.name);
 
         if case.is_single_file() {
             let source = case.entry_text();
-            let loaded = ledger.call_load(&mut store, source, "<string>", false)?;
+            let loaded = ledger.call_load(&mut store, source, "main.beancount", false)?;
             assert_eq!(
-                severity_line_message(&loaded.errors),
-                want,
+                check_rows(&loaded.errors),
+                expected_rows(case, "main.beancount"),
                 "{} via load",
                 case.name
             );
             let validated = ledger.call_validate(&mut store, source)?;
             assert_eq!(
-                severity_line_message(&validated.errors),
-                want,
+                check_rows(&validated.errors),
+                expected_rows(case, "<string>"),
                 "{} via validate",
                 case.name
             );

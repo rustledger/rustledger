@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.19.0;
+package rustledger:ledger@4.0.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -198,8 +198,18 @@ interface types {
   }
 
   /// A load / validate / query error.
+  ///
+  /// `filename` and `line` say where the error is: the file it is in (on a
+  /// multi-file load, an included file's own path; for source text, the
+  /// `filename` given to `load`, else `<string>`; for a directive a plugin
+  /// made, the plugin's placeholder name, such as `<check_closing>`, at the
+  /// line the plugin gave it), and the 1-based line in it. `code` is the
+  /// diagnostic code `rledger check` reports (`E2001`, `E7002`, ...).
+  /// Both are `none` where the error has none (4.0.0, #2935).
   record error {
     message: string,
+    code: option<string>,
+    filename: option<string>,
     line: option<u32>,
     column: option<u32>,
     field: option<string>,
@@ -537,8 +547,8 @@ interface ledger {
   ///
   /// `errors` ends with the ledger's option diagnostics (E7001 to E7011,
   /// `severity` `error` or `warning` as `rledger check` reports them, `phase`
-  /// `parse`, no line), after the load's and validation's; before 3.19.0
-  /// they were never reported (#2929).
+  /// `parse`, at the option's line), after the load's and validation's;
+  /// before 4.0.0 they were never reported (#2929).
   load: func(source: string, filename: string, expand-pads: bool) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
   /// By default the include graph is confined to the entry file's directory
@@ -558,26 +568,32 @@ interface ledger {
   /// `errors` holds what `rledger check` reports for the ledger: the load's,
   /// the `plugins`', the validation findings (a failed balance assertion,
   /// at its own line, which is a line of the file it is in), then the option
-  /// diagnostics, as `load` lists them. Before 3.19.0 it held no validation
+  /// diagnostics, as `load` lists them. Before 4.0.0 it held no validation
   /// finding and no option diagnostic (#2929, #2935). `plugins` run unless the
   /// load reported an error (a warning, a validation finding or an option
-  /// diagnostic does not stop them; before 3.19.0 a warning did).
+  /// diagnostic does not stop them; before 4.0.0 a warning did).
   load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>, expand-pads: bool) -> load-result;
 
   /// Validate source text (parse + semantic checks). `errors` ends with the
   /// option diagnostics, as `load` lists them, counted in neither count, and
   /// `valid` is false only when an entry has `severity` `error`; before
-  /// 3.19.0 the option diagnostics were missing and a warning made `valid`
+  /// 4.0.0 the option diagnostics were missing and a warning made `valid`
   /// false (#2929).
   validate: func(source: string) -> validate-result;
   /// Like `validate`, but the ledger is loaded from a file path with its
   /// includes (confined to the entry file's directory tree, as `query-file`
   /// confines them) and validated as `rledger check` validates it, each
-  /// finding at its own line. Before 3.19.0 the file's text was validated as
+  /// finding at its own line. Before 4.0.0 the file's text was validated as
   /// one source, its includes unread (#2935).
   validate-file: func(path: string) -> validate-result;
 
   /// Run a BQL query against source text.
+  ///
+  /// `errors` lists the option diagnostics too, as `load` does, but a
+  /// rejected `booking_method` whose ledger is booked another way (which
+  /// refuses the query, #2911) is listed as the refusal, which names the
+  /// option, not as its plain E7002. `query-file`, `batch`, `batch-file` and
+  /// `session.query` list them the same way.
   ///
   /// It refuses, with an empty result carrying the load errors, when the
   /// source failed to parse or a transaction failed to book, the rule

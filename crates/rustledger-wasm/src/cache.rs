@@ -12,7 +12,10 @@
 //! # Cache format
 //!
 //! Each cache blob starts with a 12-byte header (8-byte magic + 4-byte version)
-//! followed by an rkyv-serialized payload.
+//! followed by an rkyv-serialized payload. The payload is therefore not at
+//! its archive's alignment in the blob, and the blob a caller hands back need
+//! not be aligned at all, so decoding copies the payload into an aligned
+//! buffer first (#2934).
 //!
 //! # Cache invalidation
 //!
@@ -596,6 +599,28 @@ fn prepend_header(magic: [u8; 8], data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Copy an archive into a buffer aligned for every archived type before
+/// rkyv reads it in place (#2934).
+///
+/// `rkyv::from_bytes` validates and reads the archive where it lies, so each
+/// archived value must sit at its own alignment in memory. `ArchivedMetaValue`
+/// needs 8 (its `Int(i64)` variant), and every `custom` directive and metadata
+/// entry archives one. The archive starts [`HEADER_SIZE`] (12) bytes into the
+/// blob, so even in a 16-aligned blob those values sat 4 bytes off and every
+/// such ledger failed with `unaligned pointer`. Nor is the blob itself aligned:
+/// wasm-bindgen copies a JS `Uint8Array` into wasm memory with alignment 1,
+/// and a native caller may hand in any slice. So rather than pad the header,
+/// which would still depend on where the caller's bytes happen to lie, the
+/// payload is copied into an [`rkyv::util::AlignedVec`], aligned to 16, the
+/// alignment `rkyv::to_bytes` writes the archive for. The copy is one
+/// `memcpy` of the blob, small beside the deserialization that follows, and
+/// leaves the cache format unchanged.
+fn aligned_payload(data: &[u8]) -> rkyv::util::AlignedVec {
+    let mut aligned = rkyv::util::AlignedVec::with_capacity(data.len());
+    aligned.extend_from_slice(data);
+    aligned
+}
+
 /// Serialize a [`ParsedLedgerPayload`] to bytes.
 pub fn serialize_parsed(payload: &ParsedLedgerPayload) -> Result<Vec<u8>, String> {
     let data = rkyv::to_bytes::<rkyv::rancor::Error>(payload)
@@ -605,8 +630,8 @@ pub fn serialize_parsed(payload: &ParsedLedgerPayload) -> Result<Vec<u8>, String
 
 /// Deserialize a [`ParsedLedgerPayload`] from bytes.
 pub fn deserialize_parsed(bytes: &[u8]) -> Result<ParsedLedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_PARSED)?;
-    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned_payload(strip_header(bytes, *MAGIC_PARSED)?);
+    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 
@@ -619,8 +644,8 @@ pub fn serialize_ledger(payload: &LedgerPayload) -> Result<Vec<u8>, String> {
 
 /// Deserialize a [`LedgerPayload`] from bytes.
 pub fn deserialize_ledger(bytes: &[u8]) -> Result<LedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_LEDGER)?;
-    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned_payload(strip_header(bytes, *MAGIC_LEDGER)?);
+    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 
@@ -983,6 +1008,63 @@ option "operating_currency" "USD"
         let restored = deserialize_parsed(&bytes).expect("deserialize");
         assert_eq!(restored.directives.len(), processed.directives.len());
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
+    }
+
+    /// A payload holding `MetaValue`s (8-byte aligned) decodes wherever the
+    /// caller's bytes lie (#2934).
+    ///
+    /// The archive sits 12 bytes into the blob, and a `Uint8Array` reaches
+    /// wasm memory with alignment 1, so the decoder may not assume either.
+    /// Each shift below places the blob at a different offset from a 16-byte
+    /// boundary; before the fix every one failed with `unaligned pointer`.
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn test_deserialize_at_any_alignment() {
+        use crate::helpers::load_and_book;
+
+        let source = "2024-01-01 open Assets:Bank USD\n  note: \"meta\"\n\
+2024-01-02 custom \"budget\" Assets:Bank \"monthly\" 2024-02-01 TRUE 42 2.5 1.00 USD\n";
+        let processed = load_and_book(source);
+        assert!(processed.errors.is_empty(), "{:?}", processed.errors);
+        let parsed = serialize_parsed(&ParsedLedgerPayload {
+            directives: processed.directives.clone(),
+            directive_spans: processed.directive_spans.clone(),
+            placeholders: Vec::new(),
+            options: processed.options.clone(),
+            parse_errors: Vec::new(),
+            option_errors: Vec::new(),
+            validation_errors: Vec::new(),
+            query_refused: false,
+        })
+        .expect("serialize");
+        let ledger = serialize_ledger(&LedgerPayload {
+            directives: processed.directives.clone(),
+            options: processed.options,
+            account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
+            summary_account_names: Vec::new(),
+            errors: Vec::new(),
+            query_refused: false,
+        })
+        .expect("serialize");
+
+        for shift in 0..16 {
+            let at = |blob: &[u8]| {
+                let mut buf = rkyv::util::AlignedVec::<16>::with_capacity(shift + blob.len());
+                buf.extend_from_slice(&vec![0; shift]);
+                buf.extend_from_slice(blob);
+                buf
+            };
+            let restored = deserialize_parsed(&at(&parsed)[shift..])
+                .unwrap_or_else(|e| panic!("ParsedLedger at shift {shift}: {e}"));
+            assert_eq!(restored.directives, processed.directives, "shift {shift}");
+            let restored = deserialize_ledger(&at(&ledger)[shift..])
+                .unwrap_or_else(|e| panic!("Ledger at shift {shift}: {e}"));
+            assert_eq!(restored.directives, processed.directives, "shift {shift}");
+        }
     }
 
     #[test]

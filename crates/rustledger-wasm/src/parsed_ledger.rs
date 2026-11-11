@@ -275,9 +275,8 @@ impl ParsedLedger {
     #[wasm_bindgen(constructor)]
     pub fn new(source: &str) -> Self {
         let load = load_and_book(source);
-        // Before merging option diagnostics in: `run_validation` gates on
-        // `load.errors`, and an invalid option must not stop a ledger's real
-        // validation errors from being reported (#2299).
+        // Validation runs whatever loaded, as `rledger check` does (#2937); an
+        // invalid option, kept in `option_errors`, does not stop it (#2299).
         let validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
 
@@ -797,7 +796,7 @@ impl Ledger {
                 // cache payload so a restored ledger pads alike.
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
-                let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
+                let mut errors = crate::helpers::reported_ledger_errors(ledger.errors);
                 errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
@@ -1432,8 +1431,9 @@ pub mod option_warning_severity_tests {
     }
 
     /// And the option error must not cost the ledger its real diagnostics:
-    /// `run_validation` is gated on `load.errors`, so an option folded in
-    /// there would silently swallow the undefined-account error below.
+    /// `run_validation` used to skip on any error in `load.errors`, so an
+    /// option folded in there swallowed the undefined-account error below; it
+    /// validates whatever loaded now (#2937), and this pins that it still runs.
     #[test]
     fn an_invalid_option_does_not_hide_a_real_validation_error() {
         let src = "option \"nonsense_option\" \"x\"\n\

@@ -59,6 +59,8 @@ tempfile.workspace = true
 serde_json.workspace = true
 rust_decimal_macros.workspace = true
 jiff.workspace = true
+# Counting global allocator for `tests/option_number_allocation.rs`.
+dhat.workspace = true
 
 [lints]
 workspace = true

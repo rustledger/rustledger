@@ -2643,7 +2643,7 @@ mod tests {
         use rust_decimal_macros::dec;
 
         /// The most scans per input byte a call may make. The calls below
-        /// measure between 3.0 and 7.0 per byte (the highest is the long
+        /// measure between 2.0 and 7.0 per byte (the highest is the long
         /// multiplier, which is cleaned, filtered and checked before
         /// `exact_decimal` reads it), so one more linear pass still fits,
         /// where a quadratic scan of these 4,000-zero inputs makes thousands.
@@ -2693,6 +2693,11 @@ mod tests {
             assert_linear(&separated, parse_beancount_decimal),
             Ok(dec!(1))
         );
+        // Many colons none of which a number follows: the search for the
+        // last `CURRENCY:` colon passes each of them, and must not rescan
+        // the line at any one of them.
+        let colons = format!("USD:1{}", ":a".repeat(4_000));
+        assert!(assert_linear(&colons, parse_tolerance_map).is_err());
     }
 
     /// A zero is 0 at any exponent Python's `Decimal` can build, and an error

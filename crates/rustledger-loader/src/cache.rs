@@ -1094,16 +1094,24 @@ pub fn save_cache_entry_in(
 }
 
 /// Serialize directives to bytes using rkyv (for benchmarking).
+///
+/// Returns the aligned buffer `rkyv::to_bytes` writes, not a `Vec<u8>`
+/// (alignment 1): [`deserialize_directives`] reads it in place, and
+/// `ArchivedMetaValue` needs 8-byte alignment (#2934).
 #[cfg(test)]
-fn serialize_directives(directives: &Vec<Spanned<Directive>>) -> Result<Vec<u8>, std::io::Error> {
+fn serialize_directives(
+    directives: &Vec<Spanned<Directive>>,
+) -> Result<rkyv::util::AlignedVec, std::io::Error> {
     rkyv::to_bytes::<rkyv::rancor::Error>(directives)
-        .map(|v| v.to_vec())
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Deserialize directives from bytes using rkyv (for benchmarking).
+///
+/// `from_bytes` reads the archive in place, so this takes the aligned buffer
+/// [`serialize_directives`] returns rather than any byte slice (#2934).
 #[cfg(test)]
-fn deserialize_directives(data: &[u8]) -> Option<Vec<Spanned<Directive>>> {
+fn deserialize_directives(data: &rkyv::util::AlignedVec) -> Option<Vec<Spanned<Directive>>> {
     rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(data).ok()
 }
 

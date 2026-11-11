@@ -6336,6 +6336,19 @@ mod tests {
     /// query: a filtered scan of every key, correct or not, fails the bound.
     #[test]
     fn for_each_strict_subaccount_visits_exactly_the_strict_subtree() {
+        // Shrunk under Miri, whose per-step cost made the full size outrun
+        // the weekly job's 40-minute budget: the oracle below filters every
+        // name per query, so the test is quadratic in the set (about 1,240
+        // queries over 8,655 names natively, 10.7 million prefix checks).
+        // Under Miri the tree is three levels deep with full fan-out only
+        // under each level's first parent: 830 names, still with every
+        // segment shape and root, so a filtered scan still reads over four
+        // times the 200-key bound. Every 23rd name is a query (41 in all).
+        let (depth, wide, step, min_names) = if cfg!(miri) {
+            (3, 1, 23, 800)
+        } else {
+            (4, 12, 7, 5_000)
+        };
         let roots = ["Assets", "Assets2", "Assets-X", "Liabilities", "Équité"];
         let segments = [
             "A", "AB", "A-B", "A_B", "A0", "Ab", "Café", "日本", "Ünï", "Z",
@@ -6344,12 +6357,12 @@ mod tests {
         for root in roots {
             names.insert(root.to_string());
             let mut frontier = vec![root.to_string()];
-            for _depth in 0..4 {
+            for _depth in 0..depth {
                 let mut next = Vec::new();
                 for (i, parent) in frontier.iter().enumerate() {
                     // Keep the tree large but bounded: every segment under
                     // the first parents, fewer further along.
-                    let take = if i < 12 { segments.len() } else { 3 };
+                    let take = if i < wide { segments.len() } else { 3 };
                     for segment in &segments[..take] {
                         let child = format!("{parent}:{segment}");
                         names.insert(child.clone());
@@ -6361,10 +6374,10 @@ mod tests {
         }
         let index: std::collections::BTreeSet<CountedName> =
             names.iter().cloned().map(CountedName).collect();
-        assert!(index.len() > 5_000, "{}", index.len());
+        assert!(index.len() > min_names, "{}", index.len());
 
         // Every name in the set, and names that are not in it.
-        let mut queries: Vec<String> = names.iter().step_by(7).cloned().collect();
+        let mut queries: Vec<String> = names.iter().step_by(step).cloned().collect();
         queries.extend(["Assets:A:Missing", "Assets:Ä", "Nope", "Assets:"].map(String::from));
 
         let mut reads = 0;

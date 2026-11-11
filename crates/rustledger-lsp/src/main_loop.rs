@@ -6,6 +6,7 @@
 //! - Revision counter enables cancellation of stale requests
 
 use crate::AbsPathBuf;
+use crate::diagnostics_schedule::{DIAGNOSTICS_DEBOUNCE, DiagnosticsSchedule};
 use crate::handlers::call_hierarchy::{
     handle_incoming_calls, handle_outgoing_calls, handle_prepare_call_hierarchy,
 };
@@ -78,6 +79,7 @@ use rustledger_parser::{ParseResult, Spanned, parse};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Events processed by the main loop.
 #[derive(Debug)]
@@ -275,6 +277,19 @@ pub struct MainLoopState {
     /// to behave identically; override via [`Self::with_exit_action`]
     /// or [`run_main_loop_with_exit_action`].
     exit_action: Option<Box<dyn FnOnce(i32) + Send>>,
+    /// Documents edited since their last diagnostics pass, and when that pass
+    /// falls due (#2940). `didChange` schedules here instead of validating, so
+    /// a burst of edits costs one pass instead of one per change; the main
+    /// loop runs due passes from a timer arm. See [`DiagnosticsSchedule`].
+    diagnostics_schedule: DiagnosticsSchedule,
+    /// Source of "now" for the schedule. `Instant::now` in production; tests
+    /// substitute a hand-advanced clock so debouncing is checked without
+    /// sleeping.
+    clock: Box<dyn Fn() -> Instant + Send>,
+    /// Number of diagnostics passes run so far. Only read by tests, which
+    /// assert that a burst of edits costs exactly one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    diagnostics_passes: u64,
 }
 
 /// Default empty parse result for missing documents.
@@ -339,6 +354,9 @@ impl MainLoopState {
             // exits with the propagated code. `exit_action` is kept
             // for side effects (test harnesses use a no-op).
             exit_action: Some(Box::new(|_code| {})),
+            diagnostics_schedule: DiagnosticsSchedule::new(DIAGNOSTICS_DEBOUNCE),
+            clock: Box::new(Instant::now),
+            diagnostics_passes: 0,
         }
     }
 
@@ -640,6 +658,11 @@ impl MainLoopState {
         let inner: Result<serde_json::Value, String> = match method.as_str() {
             Shutdown::METHOD => {
                 self.shutdown_requested = true;
+                // Drop the debounced passes still owed: nothing should be
+                // published after `shutdown`. `handle_notification` ignores
+                // document and watched-file notifications from here on, so
+                // none can be scheduled or published again either.
+                self.diagnostics_schedule.clear();
                 Ok(serde_json::Value::Null)
             }
             Completion::METHOD => self.handle_completion_request(req),
@@ -1357,13 +1380,17 @@ impl MainLoopState {
 
     /// Handle the textDocument/codeLens request.
     fn handle_code_lens_request(
-        &self,
+        &mut self,
         req: lsp_server::Request,
     ) -> Result<serde_json::Value, String> {
         let params: CodeLensParams =
             serde_json::from_value(req.params).map_err(|e| e.to_string())?;
 
         let uri = &params.text_document.uri;
+        // The lens reads the diagnostics cache below. With a debounced pass
+        // still pending (#2940) that cache describes text the user has since
+        // edited, so settle the pass first rather than serve its verdict.
+        self.flush_pending_diagnostics(uri);
         let (text, parse_result) = self.get_document_data(uri);
 
         // The balance lens reads the validator's last-computed verdict
@@ -1650,6 +1677,14 @@ impl MainLoopState {
 
     /// Handle an LSP notification (no response expected).
     fn handle_notification(&mut self, notif: lsp_server::Notification) {
+        // After `shutdown`, the client may send only `exit` (LSP 3.17
+        // §Lifecycle), and the server should not act on anything else. A
+        // document or watched-file notification would otherwise run (or
+        // schedule) a diagnostics pass and publish after shutdown.
+        if self.shutdown_requested && notif.method != "exit" {
+            tracing::debug!("Ignoring {} after shutdown", notif.method);
+            return;
+        }
         // Notifications are handled synchronously - this is critical for correctness
         match notif.method.as_str() {
             DidOpenTextDocument::METHOD => {
@@ -1941,18 +1976,35 @@ impl MainLoopState {
 
             tracing::debug!("Document changed: {}", uri.as_str());
 
-            // Update VFS
-            if let Ok(path) = uri_to_path(&uri) {
-                self.vfs
-                    .write()
-                    .update(path.as_path(), text.clone(), version);
-            }
-
-            // Bump revision
+            // Apply the edit and bump the revision NOW, so every request from
+            // here on (hover, completion, definition, ...) sees this text.
+            let path = uri_to_path(&uri).ok();
+            let in_vfs = path.as_ref().is_some_and(|path| {
+                let mut vfs = self.vfs.write();
+                let open = vfs.get(path.as_path()).is_some();
+                vfs.update(path.as_path(), text.clone(), version);
+                open
+            });
             self.bump_revision();
 
-            // Recompute diagnostics
-            self.publish_diagnostics(&uri, &text);
+            // Diagnostics, on the other hand, wait for the edits to pause
+            // (#2940): a pass validates the whole ledger, and during a burst
+            // every pass but the last is thrown away. The pass reads the text
+            // from the VFS when it runs, so it can only ever describe the
+            // latest version, never this intermediate one.
+            //
+            // A document that is not in the VFS leaves a deferred pass nothing
+            // to read back, so it keeps the immediate publish from the text in
+            // hand. That covers a URI with no file path, and a `didChange` with
+            // no `didOpen` before it: a client protocol violation, but one the
+            // server answered with diagnostics before #2940 and still does.
+            match path.filter(|_| in_vfs) {
+                Some(path) => {
+                    let now = (self.clock)();
+                    self.diagnostics_schedule.schedule(path, uri, now);
+                }
+                None => self.publish_diagnostics(&uri, &text),
+            }
         }
     }
 
@@ -1990,6 +2042,9 @@ impl MainLoopState {
         // the VFS uses. The clear still goes out on the URI the client sent,
         // which is what it will match against its own store.
         if let Ok(path) = uri_to_path(&uri) {
+            // A pass still pending for this buffer would re-publish what the
+            // clear below removes, for a file the client no longer has open.
+            self.diagnostics_schedule.cancel(&path);
             self.vfs.write().close(path.as_path());
             self.diagnostics.remove(&path);
             self.cross_file_diag_paths.remove(&path);
@@ -2106,6 +2161,49 @@ impl MainLoopState {
         tracing::info!("Registered file watchers for *.beancount and *.bean files");
     }
 
+    /// When the earliest debounced diagnostics pass falls due, if any. The
+    /// main loop sleeps until then (or until a message arrives).
+    fn next_diagnostics_deadline(&self) -> Option<Instant> {
+        self.diagnostics_schedule.next_deadline()
+    }
+
+    /// Run every debounced diagnostics pass whose deadline has passed.
+    ///
+    /// Each pass reads the document's text from the VFS at the moment it
+    /// runs, so what gets published always describes the current version: an
+    /// intermediate version of a burst is never validated at all, let alone
+    /// published after a later one.
+    fn run_due_diagnostics(&mut self) {
+        let now = (self.clock)();
+        for (path, uri) in self.diagnostics_schedule.take_due(now) {
+            self.run_diagnostics_pass(&path, &uri);
+        }
+    }
+
+    /// Run the pending diagnostics pass for `uri` now, ahead of its deadline.
+    ///
+    /// For requests that READ the diagnostics cache: a pending pass means the
+    /// cache describes text the user has since changed, so answering from it
+    /// would serve a stale verdict. Does nothing when no pass is pending.
+    fn flush_pending_diagnostics(&mut self, uri: &Uri) {
+        let Ok(path) = uri_to_path(uri) else {
+            return;
+        };
+        if let Some(pending_uri) = self.diagnostics_schedule.cancel(&path) {
+            self.run_diagnostics_pass(&path, &pending_uri);
+        }
+    }
+
+    /// One pass for an open document, from its current text in the VFS. A
+    /// document closed since the pass was scheduled has nothing to publish
+    /// (its close already sent the clear).
+    fn run_diagnostics_pass(&mut self, path: &AbsPathBuf, uri: &Uri) {
+        let content = self.vfs.read().get_content(path.as_path());
+        if let Some(content) = content {
+            self.publish_diagnostics(uri, &content);
+        }
+    }
+
     /// Parse document and publish diagnostics (parse errors + validation errors).
     ///
     /// When a full ledger is loaded (multi-file mode), validation considers all
@@ -2119,6 +2217,15 @@ impl MainLoopState {
     /// this is usually a cache hit (O(1) per open buffer) except immediately
     /// after an edit to that buffer.
     fn publish_diagnostics(&mut self, uri: &Uri, text: &str) {
+        self.diagnostics_passes += 1;
+        // Every caller passes the document's current text, so this pass
+        // settles any debounced one still pending for the same file. Covers
+        // `didOpen`, root adoption and watched-file revalidation, which all
+        // publish at once and would otherwise be followed by a redundant pass.
+        if let Ok(path) = uri_to_path(uri) {
+            self.diagnostics_schedule.cancel(&path);
+        }
+
         // Parse the current document.
         let result = parse(text);
 
@@ -2645,25 +2752,28 @@ where
     tracing::info!("Main loop started");
 
     let exit_code = loop {
+        // Wake for the earliest debounced diagnostics pass, or never when
+        // none is pending. Rebuilt every iteration because each event can
+        // move it (a `didChange` pushes its document's deadline back).
+        let diagnostics_timer = match state.next_diagnostics_deadline() {
+            Some(deadline) => crossbeam_channel::at(deadline),
+            None => crossbeam_channel::never(),
+        };
         crossbeam_channel::select! {
             recv(receiver) -> msg => {
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(_) => break 0, // Channel closed without an `exit` notification.
                 };
-                let event = match msg {
-                    lsp_server::Message::Request(req) => Event::Message(Message::Request(req)),
-                    lsp_server::Message::Notification(notif) => {
-                        Event::Message(Message::Notification(notif))
-                    }
-                    lsp_server::Message::Response(resp) => Event::Message(Message::Response(resp)),
-                };
-                state.handle_event(event);
+                state.handle_event(message_event(msg));
             }
             recv(task_receiver) -> task_result => {
                 if let Ok(result) = task_result {
                     state.handle_event(Event::Task(result));
                 }
+            }
+            recv(diagnostics_timer) -> _ => {
+                state.on_diagnostics_timer(&receiver);
             }
         }
         // The `exit` notification handler signals via `pending_exit_code`
@@ -2679,6 +2789,41 @@ where
 
     tracing::info!("Main loop ended (exit code {exit_code})");
     exit_code
+}
+
+/// Wrap a raw client message as a main-loop event.
+fn message_event(msg: lsp_server::Message) -> Event {
+    match msg {
+        lsp_server::Message::Request(req) => Event::Message(Message::Request(req)),
+        lsp_server::Message::Notification(notif) => Event::Message(Message::Notification(notif)),
+        lsp_server::Message::Response(resp) => Event::Message(Message::Response(resp)),
+    }
+}
+
+impl MainLoopState {
+    /// The diagnostics timer fired: drain what the client has already sent,
+    /// then run the passes that are still due.
+    ///
+    /// Draining first is what collapses a backlog. When a pass is slow, the
+    /// client's next edits pile up in the channel behind it; handling them
+    /// before deciding pushes their document's deadline back, so the backlog
+    /// costs one pass after it rather than one pass per queued edit. Only the
+    /// messages queued at this moment are drained, so a client that never
+    /// stops sending cannot keep the loop in here.
+    fn on_diagnostics_timer(&mut self, receiver: &Receiver<lsp_server::Message>) {
+        for _ in 0..receiver.len() {
+            let Ok(msg) = receiver.try_recv() else {
+                // Empty or disconnected: the main loop's `recv` arm sees the
+                // disconnect on its next iteration and ends the loop.
+                break;
+            };
+            self.handle_event(message_event(msg));
+            if self.pending_exit_code.is_some() {
+                return;
+            }
+        }
+        self.run_due_diagnostics();
+    }
 }
 
 #[cfg(test)]
@@ -2955,6 +3100,531 @@ mod tests {
         }
     }
 
+    /// Debounced diagnostics (#2940). Time is a hand-advanced clock, never
+    /// the wall clock, so these are exact about what is due when.
+    mod coalescing {
+        use super::*;
+        use crate::diagnostics_schedule::DIAGNOSTICS_DEBOUNCE;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        const MS: Duration = Duration::from_millis(1);
+
+        /// A server state whose schedule reads `clock` instead of the wall.
+        struct Harness {
+            state: MainLoopState,
+            receiver: Receiver<lsp_server::Message>,
+            clock: Arc<Mutex<Instant>>,
+            dir: tempfile::TempDir,
+        }
+
+        impl Harness {
+            fn new() -> Self {
+                let (sender, receiver) = crossbeam_channel::unbounded();
+                let mut state = MainLoopState::new(sender, None);
+                let clock = Arc::new(Mutex::new(Instant::now()));
+                let shared = Arc::clone(&clock);
+                state.clock = Box::new(move || *shared.lock().expect("clock lock"));
+                Self {
+                    state,
+                    receiver,
+                    clock,
+                    dir: tempfile::tempdir().expect("tempdir"),
+                }
+            }
+
+            fn advance(&self, by: Duration) {
+                *self.clock.lock().expect("clock lock") += by;
+            }
+
+            fn uri(&self, name: &str) -> Uri {
+                crate::path_to_uri(&self.dir.path().join(name)).expect("file uri")
+            }
+
+            fn open(&mut self, uri: &Uri, text: &str) {
+                self.state
+                    .on_did_open(lsp_types::DidOpenTextDocumentParams {
+                        text_document: lsp_types::TextDocumentItem {
+                            uri: uri.clone(),
+                            language_id: "beancount".to_string(),
+                            version: 1,
+                            text: text.to_string(),
+                        },
+                    });
+            }
+
+            fn change(&mut self, uri: &Uri, version: i32, text: &str) {
+                self.state.on_did_change(change_params(uri, version, text));
+            }
+
+            /// Every diagnostics publish sent since the last call.
+            fn published(&self) -> Vec<lsp_types::PublishDiagnosticsParams> {
+                let mut out = Vec::new();
+                while let Ok(msg) = self.receiver.try_recv() {
+                    if let lsp_server::Message::Notification(n) = msg
+                        && n.method == PublishDiagnostics::METHOD
+                    {
+                        out.push(serde_json::from_value(n.params).expect("publish params"));
+                    }
+                }
+                out
+            }
+        }
+
+        fn change_params(
+            uri: &Uri,
+            version: i32,
+            text: &str,
+        ) -> lsp_types::DidChangeTextDocumentParams {
+            lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_string(),
+                }],
+            }
+        }
+
+        fn for_doc<'a>(
+            published: &'a [lsp_types::PublishDiagnosticsParams],
+            uri: &Uri,
+        ) -> Vec<&'a lsp_types::PublishDiagnosticsParams> {
+            let path = uri_to_path(uri).expect("path");
+            published
+                .iter()
+                .filter(|p| uri_to_path(&p.uri).ok().as_ref() == Some(&path))
+                .collect()
+        }
+
+        /// Version `n` of a document: one parse error, on line `n`. Every
+        /// version's diagnostics differ, so a publish names its version.
+        fn version_text(n: usize) -> String {
+            format!("{}this line is not beancount\n", "\n".repeat(n))
+        }
+
+        /// What an immediate pass over `text` publishes: a fresh server that
+        /// just opened it, with no debouncing involved.
+        fn reference_diagnostics(name: &str, text: &str) -> Vec<lsp_types::Diagnostic> {
+            let mut h = Harness::new();
+            let uri = h.uri(name);
+            h.open(&uri, text);
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1, "didOpen publishes once");
+            mine[0].diagnostics.clone()
+        }
+
+        /// The distinct lines `p` reports errors on (one bad line can yield
+        /// more than one diagnostic).
+        fn error_lines(p: &lsp_types::PublishDiagnosticsParams) -> Vec<u32> {
+            let mut lines: Vec<u32> = p.diagnostics.iter().map(|d| d.range.start.line).collect();
+            lines.dedup();
+            lines
+        }
+
+        #[test]
+        fn test_did_open_publishes_immediately() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            assert_eq!(h.state.diagnostics_passes, 1);
+            assert_eq!(for_doc(&h.published(), &uri).len(), 1);
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+        }
+
+        #[test]
+        fn test_burst_of_changes_runs_one_pass_matching_final_text() {
+            const N: usize = 50;
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            for n in 1..=N {
+                h.change(&uri, n as i32 + 1, &version_text(n));
+                // Every edit lands at once, so requests see the newest text.
+                assert_eq!(h.state.get_document_data(&uri).0, version_text(n));
+                h.advance(10 * MS);
+                h.state.run_due_diagnostics();
+            }
+            assert_eq!(
+                h.state.diagnostics_passes, before,
+                "no pass may run while the edits keep coming"
+            );
+            assert!(h.published().is_empty());
+
+            // Not yet: the last edit was 10 ms ago.
+            h.advance(DIAGNOSTICS_DEBOUNCE - 10 * MS - MS);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before);
+
+            h.advance(MS);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before + 1, "exactly one pass");
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1, "exactly one publish");
+            assert_eq!(
+                mine[0].diagnostics,
+                reference_diagnostics("a.beancount", &version_text(N)),
+                "the pass must describe the final text"
+            );
+
+            // Nothing left over.
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+            h.advance(DIAGNOSTICS_DEBOUNCE * 10);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before + 1);
+        }
+
+        /// The main loop's timer arm drains changes that are already queued
+        /// before it runs anything, so a backlog that piled up behind a slow
+        /// pass costs one pass, for its last version.
+        #[test]
+        fn test_timer_drains_queued_changes_into_one_pass() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.change(&uri, 2, &version_text(1));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            // The pass for version 2 is due, but 20 more edits are queued.
+            h.advance(DIAGNOSTICS_DEBOUNCE);
+            let (client, queue) = crossbeam_channel::unbounded();
+            for n in 2..22 {
+                let notif = lsp_server::Notification::new(
+                    DidChangeTextDocument::METHOD.to_string(),
+                    change_params(&uri, n as i32 + 1, &version_text(n)),
+                );
+                client
+                    .send(lsp_server::Message::Notification(notif))
+                    .expect("queue");
+            }
+
+            h.state.on_diagnostics_timer(&queue);
+            assert!(queue.is_empty(), "the queued edits must be drained");
+            assert_eq!(
+                h.state.diagnostics_passes, before,
+                "the drained edits push the deadline back; nothing is due yet"
+            );
+
+            h.advance(DIAGNOSTICS_DEBOUNCE);
+            h.state.on_diagnostics_timer(&queue);
+            assert_eq!(h.state.diagnostics_passes, before + 1);
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1);
+            assert_eq!(error_lines(mine[0]), vec![21]);
+        }
+
+        #[test]
+        fn test_interleaved_documents_each_get_their_final_pass() {
+            let mut h = Harness::new();
+            let a = h.uri("a.beancount");
+            let b = h.uri("b.beancount");
+            h.open(&a, &version_text(0));
+            h.open(&b, &version_text(0));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            for n in 1..=10 {
+                h.change(&a, n as i32 + 1, &version_text(n));
+                h.advance(10 * MS);
+                h.change(&b, n as i32 + 1, &version_text(n + 100));
+                h.advance(10 * MS);
+            }
+            h.advance(DIAGNOSTICS_DEBOUNCE);
+            h.state.run_due_diagnostics();
+
+            assert_eq!(h.state.diagnostics_passes, before + 2, "one pass each");
+            let published = h.published();
+            let pa = for_doc(&published, &a);
+            let pb = for_doc(&published, &b);
+            assert_eq!(pa.len(), 1);
+            assert_eq!(pb.len(), 1);
+            assert_eq!(error_lines(pa[0]), vec![10]);
+            assert_eq!(error_lines(pb[0]), vec![110]);
+        }
+
+        /// Version 2's deadline passes after version 3 has arrived. Nothing
+        /// may be published for version 2, then or ever.
+        #[test]
+        fn test_no_publish_for_an_intermediate_version() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.published();
+
+            h.change(&uri, 2, &version_text(2));
+            h.advance(DIAGNOSTICS_DEBOUNCE - MS);
+            h.change(&uri, 3, &version_text(3));
+            h.advance(MS); // version 2's deadline
+            h.state.run_due_diagnostics();
+            assert!(
+                for_doc(&h.published(), &uri).is_empty(),
+                "version 2 was superseded before its deadline"
+            );
+
+            h.advance(DIAGNOSTICS_DEBOUNCE);
+            h.state.run_due_diagnostics();
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1);
+            assert_eq!(error_lines(mine[0]), vec![3], "only version 3 is published");
+        }
+
+        /// The balance code lens reads the diagnostics cache. A request made
+        /// while a pass is pending must see the edited text's verdict, not
+        /// the one cached before the edit.
+        #[test]
+        fn test_code_lens_during_pending_pass_sees_current_diagnostics() {
+            const PASSING: &str = "2024-01-01 open Assets:Cash USD\n\
+                                   2024-01-01 open Equity:Opening USD\n\
+                                   2024-01-02 * \"seed\"\n  \
+                                   Assets:Cash  100 USD\n  \
+                                   Equity:Opening  -100 USD\n\
+                                   2024-01-03 balance Assets:Cash 100 USD\n";
+            let failing = PASSING.replace("balance Assets:Cash 100", "balance Assets:Cash 50");
+
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, PASSING);
+            h.change(&uri, 2, &failing);
+            h.published();
+            assert!(
+                h.state.next_diagnostics_deadline().is_some(),
+                "pass pending"
+            );
+
+            let req = lsp_server::Request::new(
+                lsp_server::RequestId::from(7),
+                CodeLensRequest::METHOD.to_string(),
+                CodeLensParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            );
+            h.state.handle_request(req);
+
+            let mut lenses: Option<Vec<CodeLens>> = None;
+            while let Ok(msg) = h.receiver.try_recv() {
+                if let lsp_server::Message::Response(r) = msg {
+                    lenses = Some(
+                        serde_json::from_value(r.response_result.expect("codeLens ok"))
+                            .expect("lenses"),
+                    );
+                }
+            }
+            let titles: Vec<String> = lenses
+                .expect("a codeLens response")
+                .into_iter()
+                .filter_map(|l| l.command.map(|c| c.title))
+                .filter(|t| t.contains("Balance:"))
+                .collect();
+            assert_eq!(titles.len(), 1, "{titles:?}");
+            assert!(
+                titles[0].contains('⚠') && titles[0].contains("50"),
+                "the lens must reflect the edited (failing) assertion, got {titles:?}"
+            );
+            assert_eq!(
+                h.state.next_diagnostics_deadline(),
+                None,
+                "the request settled the pending pass"
+            );
+        }
+
+        #[test]
+        fn test_did_close_during_pending_pass_cancels_and_clears() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.change(&uri, 2, &version_text(5));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            h.state.on_did_close(lsp_types::DidCloseTextDocumentParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            });
+            assert_eq!(h.state.next_diagnostics_deadline(), None, "pass cancelled");
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1, "the close sends one clear");
+            assert!(mine[0].diagnostics.is_empty());
+
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before);
+            assert!(
+                for_doc(&h.published(), &uri).is_empty(),
+                "nothing may be republished for a closed document"
+            );
+        }
+
+        /// An immediate publish settles a pass pending for the same file. A
+        /// watched-file change inside the debounce window revalidates every
+        /// open buffer from its current text; the pass the edit scheduled
+        /// would only repeat that work.
+        #[test]
+        fn test_revalidation_settles_a_pending_pass() {
+            let mut h = Harness::new();
+            let a = h.uri("a.beancount");
+            let b = h.uri("b.beancount");
+            h.open(&a, &version_text(0));
+            h.open(&b, &version_text(0));
+            h.change(&a, 2, &version_text(4));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            h.advance(DIAGNOSTICS_DEBOUNCE / 2);
+            h.state
+                .on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: h.uri("other.beancount"),
+                        typ: lsp_types::FileChangeType::CHANGED,
+                    }],
+                });
+            assert_eq!(
+                h.state.diagnostics_passes,
+                before + 2,
+                "one per open buffer"
+            );
+            let published = h.published();
+            let pa = for_doc(&published, &a);
+            assert_eq!(pa.len(), 1);
+            assert_eq!(error_lines(pa[0]), vec![4], "revalidated from current text");
+            assert_eq!(
+                h.state.next_diagnostics_deadline(),
+                None,
+                "the revalidation must settle the pass the edit scheduled"
+            );
+
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before + 2, "no redundant pass");
+        }
+
+        /// After `shutdown` nothing more may be published, so the passes still
+        /// owed are dropped.
+        #[test]
+        fn test_shutdown_drops_pending_passes() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.open(&uri, &version_text(0));
+            h.change(&uri, 2, &version_text(1));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            h.state.handle_request(lsp_server::Request::new(
+                lsp_server::RequestId::from(1),
+                Shutdown::METHOD.to_string(),
+                serde_json::Value::Null,
+            ));
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert_eq!(h.state.diagnostics_passes, before);
+            assert!(for_doc(&h.published(), &uri).is_empty());
+        }
+
+        /// After `shutdown`, document and watched-file notifications are
+        /// ignored, so nothing is scheduled or published; `exit` still works.
+        #[test]
+        fn test_notifications_after_shutdown_are_ignored() {
+            let mut h = Harness::new();
+            let a = h.uri("a.beancount");
+            let b = h.uri("b.beancount");
+            let other = h.uri("other.beancount");
+            h.open(&a, &version_text(0));
+            h.state.handle_request(lsp_server::Request::new(
+                lsp_server::RequestId::from(1),
+                Shutdown::METHOD.to_string(),
+                serde_json::Value::Null,
+            ));
+            h.published();
+            let before = h.state.diagnostics_passes;
+
+            let notify = |h: &mut Harness, method: &str, params: serde_json::Value| {
+                h.state
+                    .handle_notification(lsp_server::Notification::new(method.to_string(), params));
+            };
+            notify(
+                &mut h,
+                DidOpenTextDocument::METHOD,
+                serde_json::to_value(lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: b.clone(),
+                        language_id: "beancount".to_string(),
+                        version: 1,
+                        text: version_text(1),
+                    },
+                })
+                .expect("params"),
+            );
+            notify(
+                &mut h,
+                DidChangeTextDocument::METHOD,
+                serde_json::to_value(change_params(&a, 2, &version_text(2))).expect("params"),
+            );
+            notify(
+                &mut h,
+                DidChangeWatchedFiles::METHOD,
+                serde_json::to_value(lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: other,
+                        typ: lsp_types::FileChangeType::CHANGED,
+                    }],
+                })
+                .expect("params"),
+            );
+
+            assert_eq!(h.state.diagnostics_passes, before, "no pass after shutdown");
+            assert_eq!(
+                h.state.next_diagnostics_deadline(),
+                None,
+                "nothing scheduled"
+            );
+            h.advance(DIAGNOSTICS_DEBOUNCE * 2);
+            h.state.run_due_diagnostics();
+            assert!(h.published().is_empty(), "nothing published after shutdown");
+            assert_eq!(
+                h.state.get_document_data(&a).0,
+                version_text(0),
+                "the change was not applied"
+            );
+
+            notify(&mut h, "exit", serde_json::Value::Null);
+            assert_eq!(h.state.pending_exit_code, Some(0), "exit is still handled");
+        }
+
+        /// A `didChange` with no `didOpen` before it is a client protocol
+        /// violation, but the server answered it with diagnostics for the
+        /// text it was given before debouncing existed, and still does,
+        /// immediately: there is no buffer for a deferred pass to read.
+        #[test]
+        fn test_did_change_without_open_publishes_from_given_text() {
+            let mut h = Harness::new();
+            let uri = h.uri("a.beancount");
+            h.change(&uri, 2, &version_text(3));
+
+            assert_eq!(h.state.diagnostics_passes, 1);
+            assert_eq!(h.state.next_diagnostics_deadline(), None);
+            let published = h.published();
+            let mine = for_doc(&published, &uri);
+            assert_eq!(mine.len(), 1);
+            assert_eq!(
+                mine[0].diagnostics,
+                reference_diagnostics("a.beancount", &version_text(3))
+            );
+        }
+    }
+
     /// Every `textDocument/publishDiagnostics` sent so far, as
     /// `(uri, [(code, 0-based line)])`.
     fn drain_published(
@@ -3021,6 +3691,7 @@ mod tests {
                 text: text.to_string(),
             }],
         });
+        state.flush_pending_diagnostics(&crate::path_to_uri(path).expect("file URI"));
     }
 
     /// The edited buffer of a multi-file ledger is validated from its text

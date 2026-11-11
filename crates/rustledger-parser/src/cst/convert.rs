@@ -1366,20 +1366,22 @@ fn convert_transaction(
     // (#2905); the transaction is kept, as for every header defect.
     let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
 
-    // Payee and narration: the shared slot rule (#2932), which reads the
-    // header's strings together with any invalid token among them, so that a
-    // string never moves to a different field under error recovery. Green
-    // `convert_transaction_header` feeds the same rule.
-    let (payee_str, narration_str) =
-        super::txn_header::header_payee_narration(node.header_tokens().map(|t| {
-            let decoded = (t.kind() == crate::SyntaxKind::STRING)
-                .then(|| decode_string_token(t.text()))
-                .flatten();
-            (t.kind(), decoded)
-        }));
-
-    let payee = payee_str.map(InternedStr::from);
-    let narration = InternedStr::from(narration_str);
+    // Payee and narration: the shared slot rule `txn_header::header_strings`
+    // (#2932), which reads the header's strings together with every
+    // unexpected token in the string slots (an invalid token, a number, a
+    // currency, an account, `~`, `@`, a second flag, ...), so that a string
+    // never moves to a different field under error recovery. Green
+    // `convert_transaction_header` and the typed `payee()` / `narration()`
+    // accessors use the same rule.
+    let slots = node.string_slots();
+    let nth = |i: usize| {
+        node.strings()
+            .nth(i)
+            .and_then(|s| s.text_decoded())
+            .unwrap_or_default()
+    };
+    let payee = slots.payee().map(|i| InternedStr::from(nth(i)));
+    let narration = InternedStr::from(slots.directive_narration().map(nth).unwrap_or_default());
 
     // Tags / links from the TRANSACTION node: the typed AST
     // accessor `tags()`/`links()` is scoped to the header region.

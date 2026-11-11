@@ -242,87 +242,153 @@ pub(super) fn first_header_defect_in(
     Some(defect)
 }
 
-/// The payee and narration of a transaction header, read from its tokens in
-/// source order (#2932). The one rule both converters use: red
-/// `convert_transaction` and green `convert_transaction_header`.
+/// Which header strings are the payee and the narration (#2932). Each index
+/// is the string's place among the header's `STRING` tokens, counted from 0.
 ///
-/// `tokens` is the header region, as for [`first_header_defect`]. Each item
-/// is a token's kind and, for a `STRING`, its decoded value (`None` for every
-/// other kind, and for a `STRING` that does not decode, which is skipped as
-/// before). Kinds other than `STRING`, `ERROR_TOKEN`, `TAG` and `LINK` are
-/// ignored.
-///
-/// beancount assigns strings by count: one string is the narration, two are
-/// the payee and the narration. Three or more are an error there (`Too many
-/// strings`); here the last one is the narration and there is no payee, as
-/// before. That rule reads only the strings. It is not enough once an invalid
-/// token (`ERROR_TOKEN`) stands where a string belongs: the transaction is
-/// kept under error recovery, and counting only the surviving strings moved
-/// them to a different field. In `* "p" <bad>` the one string left was read
-/// as the narration, though it was written as the payee.
-///
-/// The rule, so that no string ever changes field:
-///
-/// - An invalid token occupies a string slot only before the first tag or
-///   link. One after a tag or link is in the tag position, not a string
-///   slot, and changes nothing.
-/// - Two or more strings: the strings alone decide, as above. Two strings
-///   already name both fields, so an invalid token between or around them
-///   leaves each where it is: `* <bad> "p" "n"` and `* "p" <bad> "n"` both
-///   give payee `p`, narration `n`.
-/// - One string: it is the payee when an invalid token follows it in the
-///   string slots, which then held the narration, now empty. Otherwise it is
-///   the narration, with or without an invalid token before it. So
-///   `* "p" <bad>` gives payee `p` and an empty narration, and `* <bad> "n"`
-///   gives narration `n`.
-/// - No string: no payee, an empty narration.
-///
-/// The invalid token runs to the next blank, as in beancount's lexer, so a
-/// string glued to it is part of it and no string at all: `* "p" <bad>"y"`
-/// has the one string `p`, followed by an invalid token, so payee `p` and an
-/// empty narration. `y` survives in no field, rather than `p` moving into
-/// the narration.
-///
-/// Only the fields are recovered here. The invalid token is reported by the
-/// lexer whatever this returns, so the error count does not depend on it.
-pub(super) fn header_payee_narration<I>(tokens: I) -> (Option<String>, String)
-where
-    I: IntoIterator<Item = (SyntaxKind, Option<String>)>,
-{
-    let mut count: usize = 0;
-    let mut first: Option<String> = None;
-    let mut second: Option<String> = None;
-    let mut last: Option<String> = None;
-    let mut seen_tag_or_link = false;
-    let mut invalid_after_string = false;
+/// Computed by [`header_strings`], the one rule every reader of a header's
+/// payee and narration uses: red `convert_transaction`, green
+/// `convert_transaction_header`, and the typed `ast::Transaction::payee` /
+/// `narration` accessors (which the formatter reads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeaderStrings {
+    /// No string: no payee, an empty narration.
+    Empty,
+    /// One string, the narration; no payee.
+    Narration(usize),
+    /// One string, the payee: the slot after it held an unexpected token, so
+    /// the narration is empty.
+    Payee(usize),
+    /// Two strings, the payee and the narration.
+    PayeeNarration(usize, usize),
+    /// Three or more strings (beancount: `Too many strings`). The directive
+    /// keeps the last as its narration with no payee; the typed accessors
+    /// report neither. `last` is the index of the last string.
+    TooMany {
+        /// Index of the last string.
+        last: usize,
+    },
+}
 
-    for (kind, decoded) in tokens {
-        match kind {
-            SyntaxKind::STRING => {
-                let Some(s) = decoded else { continue };
-                count += 1;
-                invalid_after_string = false;
-                match count {
-                    1 => first = Some(s),
-                    2 => second = Some(s),
-                    _ => last = Some(s),
-                }
-            }
-            SyntaxKind::ERROR_TOKEN if !seen_tag_or_link && count > 0 => {
-                invalid_after_string = true;
-            }
-            SyntaxKind::TAG | SyntaxKind::LINK => seen_tag_or_link = true,
-            _ => {}
+impl HeaderStrings {
+    /// Index of the payee string, if there is one.
+    pub(super) const fn payee(self) -> Option<usize> {
+        match self {
+            Self::Payee(p) | Self::PayeeNarration(p, _) => Some(p),
+            Self::Empty | Self::Narration(_) | Self::TooMany { .. } => None,
         }
     }
 
-    match (count, first, second) {
-        (1, Some(s), _) if invalid_after_string => (Some(s), String::new()),
-        (1, Some(n), _) => (None, n),
-        (2, p, Some(n)) => (p, n),
-        // 3+: the last string is the narration (falls back to the third).
-        (3.., _, _) => (None, last.unwrap_or_default()),
-        _ => (None, String::new()),
+    /// Index of the narration string, if there is one. `None` for three or
+    /// more strings: the typed accessors call that ambiguous.
+    pub(super) const fn narration(self) -> Option<usize> {
+        match self {
+            Self::Narration(n) | Self::PayeeNarration(_, n) => Some(n),
+            Self::Empty | Self::Payee(_) | Self::TooMany { .. } => None,
+        }
+    }
+
+    /// Index of the string the directive's narration comes from: as
+    /// [`Self::narration`], except that three or more strings keep the last.
+    pub(super) const fn directive_narration(self) -> Option<usize> {
+        match self {
+            Self::TooMany { last } => Some(last),
+            other => other.narration(),
+        }
+    }
+}
+
+/// Assign a transaction header's strings to the payee and the narration
+/// (#2932).
+///
+/// `tokens` is the header region, as for [`first_header_defect`]; the ranges
+/// are read only for a one-letter `CURRENCY` flag's length, so any frame
+/// works.
+///
+/// beancount assigns strings by count: one string is the narration, two are
+/// the payee and the narration, more are an error. That reads only the
+/// strings. rledger keeps a transaction whose header holds an unexpected
+/// token (an invalid token, or a token the header grammar has no place for:
+/// a number, a currency, an account, `~`, `@`, a second flag, ...), and
+/// counting only the strings then moved a string to a different field:
+/// `* "p" 123` and `* "p" <bad>` loaded with the narration `p`, though `p`
+/// was written in the payee's place. beancount drops those transactions.
+///
+/// The rule, so that no string ever changes field:
+///
+/// - The string slots run from the flag to the first tag or link. A token in
+///   them that is not trivia (see `is_header_trivia`, which keeps the
+///   deprecated `|` and a comment out), the flag (the first flag token
+///   before any string, as [`first_header_defect`] counts it), a date before
+///   the first string (which [`first_header_defect`] accepts there too) or a
+///   string is an *unexpected token*, and it holds the slot it sits in. A
+///   mid-line `#!` or `#+` is one too (#2802). One after a tag or link is in
+///   the tag position, not a string slot, and changes nothing.
+/// - Two or more strings: the strings alone decide, as in beancount. Two
+///   strings already name both fields, so an unexpected token between or
+///   around them moves neither: `* <bad> "p" "n"` and `* "p" <bad> "n"` both
+///   give payee `p`, narration `n`.
+/// - One string: it is the payee only when an unexpected token follows it
+///   and none comes before it. That token held the narration slot, now
+///   empty: `* "p" <bad>` is payee `p`. With an unexpected token before the
+///   string, that token held the payee slot and the string is the narration,
+///   whatever follows: `* <bad> "n"` and `* <bad> "n" <bad>` are narration
+///   `n`. Otherwise it is the narration, as in beancount. So a token written
+///   after a string never moves that string into another field.
+/// - No string: no payee, an empty narration.
+///
+/// An invalid token runs to the next blank, as in beancount's lexer, so a
+/// string glued to one is part of it and no string at all: `* "p" <bad>"y"`
+/// has the one string `p`, followed by an unexpected token, so payee `p` and
+/// an empty narration; `y` survives in no field.
+///
+/// Only the fields are recovered here. The unexpected token is reported by
+/// the lexer or by [`first_header_defect`] whatever this returns, so the
+/// error count does not depend on it.
+pub(super) fn header_strings<I>(tokens: I) -> HeaderStrings
+where
+    I: IntoIterator<Item = (SyntaxKind, Range<usize>)>,
+{
+    let mut strings: usize = 0;
+    let mut seen_token = false;
+    let mut seen_flag = false;
+    let mut seen_tag_or_link = false;
+    let mut unexpected_before_string = false;
+    let mut unexpected_after_string = false;
+
+    for (kind, range) in tokens {
+        // A `#!` or `#+` after the first token is no comment (#2802), as in
+        // `first_header_defect`; before it, it is leading trivia.
+        let mid_line_comment =
+            seen_token && matches!(kind, SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE);
+        if is_header_trivia(kind) && !mid_line_comment {
+            continue;
+        }
+        seen_token = true;
+        match kind {
+            SyntaxKind::STRING => strings += 1,
+            SyntaxKind::TAG | SyntaxKind::LINK => seen_tag_or_link = true,
+            _ if seen_tag_or_link => {}
+            // The date, and any further date before the first string, which
+            // `first_header_defect` accepts in the flag position too.
+            SyntaxKind::DATE if strings == 0 => {}
+            k if k != SyntaxKind::DATE
+                && strings == 0
+                && !seen_flag
+                && is_flag_position_token(k, &range) =>
+            {
+                seen_flag = true;
+            }
+            _ if strings == 0 => unexpected_before_string = true,
+            _ => unexpected_after_string = true,
+        }
+    }
+
+    match strings {
+        0 => HeaderStrings::Empty,
+        1 if unexpected_after_string && !unexpected_before_string => HeaderStrings::Payee(0),
+        1 => HeaderStrings::Narration(0),
+        2 => HeaderStrings::PayeeNarration(0, 1),
+        n => HeaderStrings::TooMany { last: n - 1 },
     }
 }
 
@@ -595,44 +661,102 @@ mod tests {
         );
     }
 
-    /// #2932: the slot rule of [`header_payee_narration`], over every shape
-    /// it distinguishes. `S` is a string, `E` an invalid token, `T` a tag.
+    /// #2932: the slot rule of [`header_strings`], over every shape it
+    /// distinguishes. `s` is a string, `e` an unexpected token of the given
+    /// kind, `t` a tag. The expected payee and narration are string indexes.
     #[test]
-    fn test_header_payee_narration_moves_no_string() {
-        fn s(v: &str) -> (SyntaxKind, Option<String>) {
-            (SyntaxKind::STRING, Some(v.to_string()))
-        }
-        let e = || (SyntaxKind::ERROR_TOKEN, None);
-        let t = || (SyntaxKind::TAG, None);
-        let flag = || (SyntaxKind::STAR, None);
-        let cases: Vec<(Vec<(SyntaxKind, Option<String>)>, Option<&str>, &str)> = vec![
-            // Without an invalid token: beancount's count rule.
-            (vec![flag()], None, ""),
-            (vec![flag(), s("n")], None, "n"),
-            (vec![flag(), s("p"), s("n")], Some("p"), "n"),
-            (vec![flag(), s("a"), s("b"), s("c"), s("d")], None, "d"),
-            // E S: the string is the narration.
-            (vec![flag(), e(), s("n")], None, "n"),
-            // S E: the string keeps the payee slot; the narration is empty.
-            (vec![flag(), s("p"), e()], Some("p"), ""),
-            (vec![flag(), e(), s("p"), e()], Some("p"), ""),
+    fn test_header_strings_moves_no_string() {
+        use HeaderStrings as H;
+        let s = (SyntaxKind::STRING, "\"x\"");
+        let bad = (SyntaxKind::ERROR_TOKEN, "\u{11}");
+        let t = (SyntaxKind::TAG, "#t");
+        let l = (SyntaxKind::LINK, "^l");
+        let star = (SyntaxKind::STAR, "*");
+        let date = (SyntaxKind::DATE, "2024-01-02");
+        let cases: Vec<(Vec<(SyntaxKind, &str)>, HeaderStrings)> = vec![
+            // Without an unexpected token: beancount's count rule.
+            (vec![date, star], H::Empty),
+            (vec![date, star, s], H::Narration(0)),
+            (vec![date, (SyntaxKind::TXN_KW, "txn"), s], H::Narration(0)),
+            (vec![date, (SyntaxKind::CURRENCY, "P"), s], H::Narration(0)),
+            (vec![date, star, s, s], H::PayeeNarration(0, 1)),
+            (vec![date, star, s, s, s, s], H::TooMany { last: 3 }),
+            (vec![date, star, s, t, l], H::Narration(0)),
+            // No flag (#2905): the strings are read the same.
+            (vec![date, s, bad], H::Payee(0)),
+            // Before the string: it held the payee slot.
+            (vec![date, star, bad, s], H::Narration(0)),
+            (
+                vec![date, (SyntaxKind::FLAG, "!"), star, s],
+                H::Narration(0),
+            ),
+            // After the string: the string keeps the payee slot.
+            (vec![date, star, s, bad], H::Payee(0)),
+            (vec![date, star, s, bad, t, l], H::Payee(0)),
+            // Before AND after: the string stays the narration.
+            (vec![date, star, bad, s, bad], H::Narration(0)),
             // Two strings decide whatever surrounds them.
-            (vec![flag(), e(), s("p"), s("n")], Some("p"), "n"),
-            (vec![flag(), s("p"), e(), s("n")], Some("p"), "n"),
-            (vec![flag(), s("p"), s("n"), e()], Some("p"), "n"),
-            // An invalid token after a tag is in no string slot.
-            (vec![flag(), s("n"), t(), e()], None, "n"),
-            (vec![flag(), s("p"), e(), t()], Some("p"), ""),
-            // Only an invalid token: nothing to place.
-            (vec![flag(), e()], None, ""),
-            // A STRING that does not decode is skipped.
-            (vec![flag(), (SyntaxKind::STRING, None), s("n")], None, "n"),
+            (vec![date, star, bad, s, s], H::PayeeNarration(0, 1)),
+            (vec![date, star, s, bad, s], H::PayeeNarration(0, 1)),
+            (vec![date, star, s, s, bad], H::PayeeNarration(0, 1)),
+            // After a tag or link: no string slot.
+            (vec![date, star, s, t, bad], H::Narration(0)),
+            (
+                vec![date, star, s, l, (SyntaxKind::NUMBER, "1")],
+                H::Narration(0),
+            ),
+            // Trivia, the deprecated `|` and a comment hold no slot.
+            (
+                vec![date, star, s, (SyntaxKind::PIPE, "|")],
+                H::Narration(0),
+            ),
+            (
+                vec![date, star, s, (SyntaxKind::COMMENT, ";c")],
+                H::Narration(0),
+            ),
+            // A mid-line `#!` is no comment (#2802): it holds the slot.
+            (
+                vec![date, star, s, (SyntaxKind::SHEBANG, "#!x")],
+                H::Payee(0),
+            ),
+            // A date after the string holds its slot; before it, it is read
+            // as `first_header_defect` reads it, in the flag position.
+            (vec![date, star, s, date], H::Payee(0)),
+            (vec![date, star, date, s, bad], H::Payee(0)),
+            // Only unexpected tokens: nothing to place.
+            (vec![date, star, bad], H::Empty),
         ];
-        for (tokens, payee, narration) in cases {
+        // Every kind the header grammar has no place for after a string.
+        let junk = [
+            (SyntaxKind::NUMBER, "123"),
+            (SyntaxKind::CURRENCY, "USD"),
+            (SyntaxKind::CURRENCY, "A"),
+            (SyntaxKind::ACCOUNT, "Assets:A"),
+            (SyntaxKind::TILDE, "~"),
+            (SyntaxKind::AT, "@"),
+            (SyntaxKind::L_BRACE, "{"),
+            (SyntaxKind::L_PAREN, "("),
+            (SyntaxKind::COMMA, ","),
+            (SyntaxKind::COLON, ":"),
+            (SyntaxKind::STAR, "*"),
+            (SyntaxKind::PLUS, "+"),
+            (SyntaxKind::BOOL_TRUE, "TRUE"),
+            (SyntaxKind::META_KEY, "key:"),
+            (SyntaxKind::OPEN_KW, "open"),
+            (SyntaxKind::TXN_KW, "txn"),
+            (SyntaxKind::HASH, "#"),
+            (SyntaxKind::FLAG, "!"),
+            (SyntaxKind::ERROR_TOKEN, "\u{11}"),
+        ];
+        let mut all = cases;
+        for j in junk {
+            all.push((vec![date, star, s, j], H::Payee(0)));
+            all.push((vec![date, star, j, s], H::Narration(0)));
+            all.push((vec![date, star, j, s, j], H::Narration(0)));
+        }
+        for (tokens, want) in all {
             let shape = format!("{tokens:?}");
-            let (p, n) = header_payee_narration(tokens);
-            assert_eq!(p.as_deref(), payee, "{shape}");
-            assert_eq!(n, narration, "{shape}");
+            assert_eq!(header_strings(toks(&tokens)), want, "{shape}");
         }
     }
 

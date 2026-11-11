@@ -730,11 +730,15 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     which are unknown options now. An older blob would keep serving the
 ///     old values, and be read at the wrong offsets.
 ///
-/// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An invalid
-///     token among a transaction header's strings moves no string to a
-///     different field: `* "p" <bad>` keeps payee `p` and an empty narration,
-///     where `p` loaded as the narration with no payee. A v72 blob would keep
-///     serving the shifted fields. (v70 to v72 are held by parallel PRs.)
+/// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An
+///     unexpected token among a transaction header's strings moves no string
+///     to a different field: `* "p" <bad>` keeps payee `p` and an empty
+///     narration, where `p` loaded as the narration with no payee. Every such
+///     header is a parse error, and this cache is saved only for a load with
+///     no errors (`rledger`'s `loadcache`), so no blob holds the old fields;
+///     the bump only keeps the convention that a parser output change bumps
+///     both caches, which `rustledger-wasm` pins. (v70 to v72 are held by
+///     parallel PRs.)
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that

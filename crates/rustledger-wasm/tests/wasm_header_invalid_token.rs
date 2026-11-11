@@ -67,3 +67,32 @@ fn test_parse_invalid_token_before_the_strings_moves_neither() {
     assert_eq!(tags.get(0).as_string().as_deref(), Some("t"));
     assert_eq!(links.get(0).as_string().as_deref(), Some("l"));
 }
+
+/// A token after the string does not move it: with an unexpected token
+/// before it too, the string stays the narration.
+#[wasm_bindgen_test]
+fn test_parse_unexpected_token_before_and_after_keeps_the_narration() {
+    let (txn, errors) = parse_header("* \u{11} \"Lunch\" \u{11}");
+    assert_eq!(errors, 2, "each invalid token is reported");
+    assert!(get_field(&txn, "payee").is_undefined());
+    assert_eq!(
+        get_field(&txn, "narration").as_string().as_deref(),
+        Some("Lunch")
+    );
+}
+
+/// Any token the header grammar has no place for holds its slot, not only
+/// an invalid one.
+#[wasm_bindgen_test]
+fn test_parse_number_after_payee_keeps_the_payee() {
+    for header in ["* \"Cafe\" 123", "* \"Cafe\" USD", "* \"Cafe\" ~"] {
+        let (txn, errors) = parse_header(header);
+        assert_eq!(errors, 1, "{header:?}");
+        assert_eq!(
+            get_field(&txn, "payee").as_string().as_deref(),
+            Some("Cafe"),
+            "{header:?}"
+        );
+        assert!(get_field(&txn, "narration").is_undefined(), "{header:?}");
+    }
+}

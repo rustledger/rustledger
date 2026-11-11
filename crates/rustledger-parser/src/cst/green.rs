@@ -97,9 +97,11 @@ pub(super) fn convert_transaction_header(
     let mut flag = '*';
     let mut seen_flag = false;
     let mut seen_str_tag_link = false;
-    // Header strings, invalid tokens, tags and links in source order, for
-    // the shared payee/narration rule (`txn_header::header_payee_narration`).
-    let mut slots: Vec<(K, Option<String>)> = Vec::new();
+    // The header tokens, for the shared payee/narration rule
+    // (`txn_header::header_strings`), and the text of each header string.
+    let mut header_tokens: Vec<(K, std::ops::Range<usize>)> = Vec::new();
+    let mut strings: Vec<&str> = Vec::new();
+    let mut offset = base;
     let mut tags = rustledger_core::TagSet::new();
     let mut links = rustledger_core::LinkSet::new();
     // Leading trivia before the header stays in the header region (#2628).
@@ -119,7 +121,10 @@ pub(super) fn convert_transaction_header(
         };
         let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
         let text = t.text();
+        let at = offset;
+        offset += text.len();
         if header.in_header(kind) {
+            header_tokens.push((kind, at..offset));
             match kind {
                 // Leading trivia and the header's terminating newline.
                 K::NEWLINE => {}
@@ -132,17 +137,14 @@ pub(super) fn convert_transaction_header(
                 }
                 K::STRING => {
                     seen_str_tag_link = true;
-                    slots.push((kind, decode_string_token(text)));
+                    strings.push(text);
                 }
-                K::ERROR_TOKEN => slots.push((kind, None)),
                 K::TAG => {
                     seen_str_tag_link = true;
-                    slots.push((kind, None));
                     tags.insert(Tag::new(text.trim_start_matches('#')));
                 }
                 K::LINK => {
                     seen_str_tag_link = true;
-                    slots.push((kind, None));
                     links.insert(Link::new(text.trim_start_matches('^')));
                 }
                 // Flag region: the first flag-kind token before any STRING/TAG/LINK.
@@ -174,7 +176,15 @@ pub(super) fn convert_transaction_header(
     let date = date?;
 
     // The shared slot rule (#2932), as red `convert_transaction` uses it.
-    let (payee_str, narration_str) = super::txn_header::header_payee_narration(slots);
+    let slots = super::txn_header::header_strings(header_tokens);
+    let nth = |i: usize| {
+        strings
+            .get(i)
+            .and_then(|s| decode_string_token(s))
+            .unwrap_or_default()
+    };
+    let payee_str = slots.payee().map(nth);
+    let narration_str = slots.directive_narration().map(nth).unwrap_or_default();
 
     let txn = rustledger_core::directive::Transaction {
         date,
@@ -1560,7 +1570,7 @@ mod tests {
     /// and green agrees with `parse_red_only`.
     #[test]
     fn test_convert_transaction_header_invalid_token_moves_no_string() {
-        let cases: [(&str, Option<&str>, &str); 8] = [
+        let cases: [(&str, Option<&str>, &str); 11] = [
             ("* \u{11}\"x\"", None, ""),
             ("* \"p\" \u{11}\"y\"", Some("p"), ""),
             ("* \"p\" \u{11}", Some("p"), ""),
@@ -1569,6 +1579,9 @@ mod tests {
             ("txn \"p\" \u{11}", Some("p"), ""),
             ("* \"p\" \u{11} #t ^l", Some("p"), ""),
             ("* \"n\" #t \u{11}", None, "n"),
+            ("* \u{11} \"n\" \u{11}", None, "n"),
+            ("* \"p\" 123", Some("p"), ""),
+            ("txn USD \"n\" Assets:A", None, "n"),
         ];
         for (header, payee, narration) in cases {
             let src = format!("2020-01-01 {header}\n  A 1 USD\n  B\n");

@@ -82,6 +82,11 @@ pub struct ProcessedLedger {
     /// placeholder locations plugins gave the directives they created, so a
     /// query resolves both (#2825). Empty when the source did not load.
     pub source_map: rustledger_loader::SourceMap,
+    /// The transactions booking refused, as indices into `directives`
+    /// ([`rustledger_loader::Ledger::booking_refused`]): [`run_validation`]
+    /// sets them aside as the validating loader does. Empty when the source
+    /// did not load.
+    pub booking_refused: Vec<usize>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
@@ -156,6 +161,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
+            booking_refused: Vec::new(),
             options,
             errors,
             option_errors,
@@ -182,6 +188,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
+                booking_refused: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 option_errors,
@@ -216,6 +223,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             // fields move out: a blocking error, or a rejected
             // `booking_method` (#2911), whose E7002 is in `option_errors`.
             let query_blocked = ledger.blocks_queries();
+            let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
@@ -229,6 +237,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directives,
                 directive_spans,
                 source_map,
+                booking_refused,
                 options,
                 errors,
                 option_errors,
@@ -241,6 +250,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
+            booking_refused: Vec::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
             option_errors,
@@ -260,18 +270,40 @@ pub fn has_fatal(errors: &[Error]) -> bool {
     errors.iter().any(|e| e.severity == Severity::Error)
 }
 
+/// A validating load's errors as WASM [`Error`]s, leaving out the
+/// advisory-only ones ([`rustledger_validate::is_advisory_only_code`]: E1004,
+/// closing an account with a balance), which `rledger check` and bean-check
+/// do not report either; `rledger lint closed-nonempty` does (#2937). For the
+/// surfaces that validate through the loader (`validateMultiFile`,
+/// `validateWithHost`, `Ledger.fromFiles`); [`run_validation`] leaves them out
+/// the same way.
+pub fn reported_ledger_errors(errors: Vec<rustledger_loader::LedgerError>) -> Vec<Error> {
+    errors
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(Error::from)
+        .collect()
+}
+
 /// Run validation on a loaded ledger and return validation errors.
+///
+/// Which errors stop validation is `rledger check`'s rule, the validating
+/// loader's: none do. A transaction booking refused is set aside
+/// ([`rustledger_loader::Ledger::booking_refused`]): Early sees it as written
+/// and Late does not, and the session reports the account errors Early held
+/// for it, as `process` does. This used to return nothing on any
+/// severity-error in `load.errors`, so a STRICT ledger with an ambiguous
+/// reduction reported its booking error and not the `Balance failed` that
+/// follows it, which `check` and bean-check both report (#2937). A source
+/// that failed to parse or load has no directives here, so nothing is
+/// validated for it.
+///
+/// Advisory-only diagnostics
+/// ([`rustledger_validate::ErrorCode::is_advisory_only`]: E1004, closing an
+/// account with a balance) are left out, as `check` and bean-check leave them
+/// out; `rledger lint closed-nonempty` reports them (#2937).
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     use rustledger_validate::ValidationSession;
-
-    // Skip validation only when loading produced a genuine *error* (parse or
-    // booking failure) — those make the directive stream unsound to validate.
-    // A warning must NOT skip validation, or real diagnostics (E1001, balance
-    // residuals, …) would be silently dropped for any ledger that also emits a
-    // plugin warning.
-    if has_fatal(&load.errors) {
-        return Vec::new();
-    }
 
     // Build date→line mapping from parse result for error locations
     let mut date_to_line: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -303,15 +335,31 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // With the kept spans, as `rledger check` and the FFI validate: the pad
     // rule reads them as beancount's line order, so an "Attempt to pad an
     // entry with cost" lists tied positions as they do (#2901).
+    let refused = |index: &usize| load.booking_refused.binary_search(index).is_ok();
     let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
         let spanned = spanned_directives(&load.directives, &load.directive_spans);
-        let (session, mut errors) = session.run_early_spanned(&spanned, today);
-        let (session, late_errs) = session.run_late_spanned(&spanned, today);
+        let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
+        let mut booked = Vec::with_capacity(spanned.len());
+        for (index, directive) in spanned.into_iter().enumerate() {
+            if refused(&index) {
+                session.note_refused_by_booking(&directive);
+            } else {
+                booked.push(directive);
+            }
+        }
+        let (session, late_errs) = session.run_late_spanned(&booked, today);
         errors.extend(late_errs);
         (session, errors)
     } else {
         let (session, mut errors) = session.run_early(&load.directives, today);
-        let (session, late_errs) = session.run_late(&load.directives, today);
+        let booked: Vec<Directive> = load
+            .directives
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !refused(index))
+            .map(|(_, directive)| directive.clone())
+            .collect();
+        let (session, late_errs) = session.run_late(&booked, today);
         errors.extend(late_errs);
         (session, errors)
     };
@@ -319,6 +367,7 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
 
     errors
         .iter()
+        .filter(|err| !err.code.is_advisory_only())
         .map(|err| {
             let fallback_line = date_to_line.get(&err.date.to_string()).copied();
             validation_error_to_wasm(err, &load.lookup, None, fallback_line)

@@ -446,7 +446,13 @@ use crate::types::{Error, LedgerOptions};
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
 /// and held v91 before #2930 took v92. v93 is held by #2931.)
-pub const CACHE_VERSION: u32 = 94;
+/// v97: loader v69, unchanged. Both payloads' error lists move (#2937): an
+/// account closed with a balance is no longer reported (E1004 is
+/// advisory-only, as in `rledger check`), and a `ParsedLedger` validates
+/// after a booking error, setting the refused transaction aside, so it
+/// reports the `Balance failed` that follows one. An older blob would keep
+/// serving the old errors. (v95 and v96 are held by open PRs.)
+pub const CACHE_VERSION: u32 = 97;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -581,6 +587,19 @@ fn strip_header(bytes: &[u8], expected_magic: [u8; 8]) -> Result<&[u8], String> 
     Ok(data)
 }
 
+/// The archive in an aligned buffer, as rkyv reads it.
+///
+/// The archive starts `HEADER_SIZE` (12) bytes into the blob, so it is at best
+/// 4-aligned however the caller's buffer is aligned, and an archive holding an
+/// 8-aligned value was refused ("unaligned pointer") depending on where the
+/// bytes happened to land (#2937, found by its cache round trip). Copying it
+/// costs one pass over the bytes and leaves the format unchanged.
+fn aligned(data: &[u8]) -> rkyv::util::AlignedVec {
+    let mut buffer = rkyv::util::AlignedVec::with_capacity(data.len());
+    buffer.extend_from_slice(data);
+    buffer
+}
+
 /// Prepend the cache header to rkyv-serialized data.
 fn prepend_header(magic: [u8; 8], data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(HEADER_SIZE + data.len());
@@ -599,8 +618,8 @@ pub fn serialize_parsed(payload: &ParsedLedgerPayload) -> Result<Vec<u8>, String
 
 /// Deserialize a [`ParsedLedgerPayload`] from bytes.
 pub fn deserialize_parsed(bytes: &[u8]) -> Result<ParsedLedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_PARSED)?;
-    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned(strip_header(bytes, *MAGIC_PARSED)?);
+    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 
@@ -613,8 +632,8 @@ pub fn serialize_ledger(payload: &LedgerPayload) -> Result<Vec<u8>, String> {
 
 /// Deserialize a [`LedgerPayload`] from bytes.
 pub fn deserialize_ledger(bytes: &[u8]) -> Result<LedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_LEDGER)?;
-    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned(strip_header(bytes, *MAGIC_LEDGER)?);
+    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 

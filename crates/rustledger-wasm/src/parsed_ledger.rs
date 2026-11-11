@@ -794,7 +794,7 @@ impl Ledger {
                 // cache payload so a restored ledger pads alike.
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
-                let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
+                let mut errors = crate::helpers::reported_ledger_errors(ledger.errors);
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 

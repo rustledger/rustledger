@@ -20,6 +20,7 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
+use rustledger_ffi_component_tests::{component_built, component_path};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -47,11 +48,6 @@ impl rustledger::ledger::host::Host for Host {
     fn decrypt(&mut self, _ciphertext: Vec<u8>) -> Result<String, String> {
         Err("corpus test host does not decrypt".to_string())
     }
-}
-
-fn component_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/debug/rustledger_ffi_component.wasm")
 }
 
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
@@ -140,8 +136,7 @@ fn wit_kind(d: &rustledger::ledger::types::Directive) -> (&'static str, String) 
 
 #[test]
 fn corpus_loads_identically_via_native_and_component() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let files = corpus_files();
@@ -332,8 +327,7 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
 /// the coupling.
 #[test]
 fn plugin_feature_gate_message_is_stable() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;

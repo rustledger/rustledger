@@ -800,9 +800,22 @@ jobs:
       # on zero assertions (availability-gated-tests rule, AGENTS.md).
       - name: Run parity tests
         run: |
-          cargo test -p rustledger-ffi-component-tests -- --nocapture 2>&1 | tee parity-output.log
+          # The default `bash -e` has no pipefail, so without it `tee` would
+          # hide a failing (or uncompilable) test run and only a skip marker
+          # could turn this step red.
+          set -o pipefail
+          # `--lib --tests` leaves out the doc-test binary, which has no tests
+          # and would always report `0 passed`; every remaining binary (the
+          # resolver unit tests, corpus_parity, parity) must run something.
+          cargo test -p rustledger-ffi-component-tests --lib --tests -- --nocapture 2>&1 | tee parity-output.log
           if grep -q "skip: component wasm not built" parity-output.log; then
             echo "::error::parity tests skipped despite the component being built — artifact path drift"
+            exit 1
+          fi
+          ran=$(grep -cE '^test result: ok\. [1-9][0-9]* passed' parity-output.log)
+          results=$(grep -c '^test result: ' parity-output.log)
+          if [ "$ran" -lt 3 ] || [ "$ran" -ne "$results" ]; then
+            echo "::error::expected every parity test binary (at least 3) to pass a nonzero number of tests; got $ran of $results"
             exit 1
           fi
 

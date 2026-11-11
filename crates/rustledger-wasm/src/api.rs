@@ -136,8 +136,8 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = "validateSource")]
 pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     let load = load_and_book(source);
-    // `run_validation` first: it gates on `load.errors`, and an invalid option
-    // must not stop a ledger's real validation errors from being found (#2299).
+    // Validation runs whatever loaded, as `rledger check` does (#2937); an
+    // invalid option, reported beside it, does not stop it (#2299).
     let validation_errors = run_validation(&load);
     let mut errors = load.reported_errors();
     errors.extend(validation_errors);

@@ -448,13 +448,13 @@ use crate::types::{Error, LedgerOptions};
 /// make are at new lines (their place in the plugin's sorted list, as in
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
-/// and held v91 before #2930 took v92. v93 is held by #2931.)
+/// and held v91 before #2930 took v92. v93 was never released.)
 /// v97: loader v69, unchanged. Both payloads' error lists move (#2937): an
 /// account closed with a balance is no longer reported (E1004 is
 /// advisory-only, as in `rledger check`), and a `ParsedLedger` validates
 /// after a booking error, setting the refused transaction aside, so it
 /// reports the `Balance failed` that follows one. An older blob would keep
-/// serving the old errors. (v95 and v96 are held by open PRs.)
+/// serving the old errors. (v95 is held by #2931; v96 was never released.)
 pub const CACHE_VERSION: u32 = 97;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

@@ -92,13 +92,13 @@ pub struct ProcessedLedger {
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
     /// `errors` on purpose.
     ///
-    /// `errors` is what [`has_fatal`] gates on, and that gate means "the
-    /// directive stream is unsound to work with" — a parse or booking failure.
-    /// An invalid option does not make directives unsound, so folding these in
-    /// here would make [`run_validation`] skip, and a ledger with a typo'd
-    /// option would silently stop reporting its real validation errors (the
-    /// exact drop #2292 fixed for plugin warnings). Surfaces that *report*
-    /// diagnostics merge this in; surfaces that gate on soundness do not.
+    /// `errors` is what [`has_fatal`] gates on: whether a surface may work
+    /// with the directive stream, and whether a ledger is valid. An invalid
+    /// option is reported but does not make the directives unsound, so it is
+    /// kept out of that gate. ([`run_validation`] no longer gates on `errors`
+    /// at all: it validates whatever loaded, as `rledger check` does, #2937.)
+    /// Surfaces that *report* diagnostics merge this in; surfaces that gate on
+    /// soundness do not.
     pub option_errors: Vec<Error>,
     /// Whether a query over the source refuses: it failed to parse, a
     /// transaction failed to book
@@ -336,33 +336,27 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // rule reads them as beancount's line order, so an "Attempt to pad an
     // entry with cost" lists tied positions as they do (#2901).
     let refused = |index: &usize| load.booking_refused.binary_search(index).is_ok();
-    let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
-        let spanned = spanned_directives(&load.directives, &load.directive_spans);
-        let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
-        let mut booked = Vec::with_capacity(spanned.len());
-        for (index, directive) in spanned.into_iter().enumerate() {
-            if refused(&index) {
-                session.note_refused_by_booking(&directive);
-            } else {
-                booked.push(directive);
-            }
+    // `load_and_book` keeps one span per directive (it unzips them from the
+    // loader's stream), so the spans always line up; the refused indices are
+    // positions in that same stream, and a refused transaction is noted by its
+    // span, so a stream without them could not be validated as `check` does.
+    debug_assert_eq!(
+        load.directive_spans.len(),
+        load.directives.len(),
+        "load_and_book keeps one span per directive"
+    );
+    let spanned = spanned_directives(&load.directives, &load.directive_spans);
+    let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
+    let mut booked = Vec::with_capacity(spanned.len());
+    for (index, directive) in spanned.into_iter().enumerate() {
+        if refused(&index) {
+            session.note_refused_by_booking(&directive);
+        } else {
+            booked.push(directive);
         }
-        let (session, late_errs) = session.run_late_spanned(&booked, today);
-        errors.extend(late_errs);
-        (session, errors)
-    } else {
-        let (session, mut errors) = session.run_early(&load.directives, today);
-        let booked: Vec<Directive> = load
-            .directives
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !refused(index))
-            .map(|(_, directive)| directive.clone())
-            .collect();
-        let (session, late_errs) = session.run_late(&booked, today);
-        errors.extend(late_errs);
-        (session, errors)
-    };
+    }
+    let (session, late_errs) = session.run_late_spanned(&booked, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
 
     errors
@@ -791,10 +785,10 @@ mod option_diagnostic_tests {
         );
     }
 
-    /// The trap in the obvious fix. `run_validation` skips when
-    /// `has_fatal(&load.errors)`, so folding option errors into `errors` would
-    /// make a typo'd option silently swallow every real validation error —
-    /// the same drop #2292 fixed for plugin warnings.
+    /// An invalid option must not cost the ledger its real validation errors,
+    /// the drop #2292 fixed for plugin warnings. `run_validation` used to skip
+    /// on any error in `load.errors`; it no longer gates on them (#2937), and
+    /// this pins that the option error does not suppress validation either way.
     #[test]
     fn an_invalid_option_does_not_suppress_validation() {
         let load = load_and_book(BAD_OPTION_AND_BAD_ACCOUNT);
@@ -875,8 +869,9 @@ mod option_diagnostic_tests {
 
     /// `reported_errors` is what every reporting surface reads and `errors` is
     /// what every soundness gate reads. If option diagnostics ever leak into
-    /// the second, `run_validation` starts skipping; if they ever fall out of
-    /// the first, surfaces go silent again. Both directions, pinned.
+    /// the second, a typo'd option makes a ledger unsound to work with; if they
+    /// ever fall out of the first, surfaces go silent again. Both directions,
+    /// pinned.
     #[test]
     fn option_diagnostics_are_reported_but_do_not_gate() {
         let load = load_and_book(BAD_OPTION);

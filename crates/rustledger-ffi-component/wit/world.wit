@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.18.0;
+package rustledger:ledger@3.19.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -534,6 +534,11 @@ interface ledger {
   /// synthesized `Padding` transactions in the returned entries (sorted by
   /// date, no source location) — balance-computing consumers want this; the
   /// `false`/default keeps the source-faithful stream (#1628).
+  ///
+  /// `errors` ends with the ledger's option diagnostics (E7001 to E7011,
+  /// `severity` `error` or `warning` as `rledger check` reports them, `phase`
+  /// `parse`, no line), after the load's and validation's; before 3.19.0
+  /// they were never reported (#2929).
   load: func(source: string, filename: string, expand-pads: bool) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
   /// By default the include graph is confined to the entry file's directory
@@ -549,11 +554,27 @@ interface ledger {
   /// names. `expand-pads` materializes `pad` directives into synthesized
   /// `Padding` transactions in the returned entries (see `load`); default
   /// `false` keeps the source-faithful stream (#1628).
+  ///
+  /// `errors` holds what `rledger check` reports for the ledger: the load's,
+  /// the `plugins`', the validation findings (a failed balance assertion,
+  /// at its own line, which is a line of the file it is in), then the option
+  /// diagnostics, as `load` lists them. Before 3.19.0 it held no validation
+  /// finding and no option diagnostic (#2929, #2935). `plugins` run unless the
+  /// load reported an error (a warning, a validation finding or an option
+  /// diagnostic does not stop them; before 3.19.0 a warning did).
   load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>, expand-pads: bool) -> load-result;
 
-  /// Validate source text (parse + semantic checks).
+  /// Validate source text (parse + semantic checks). `errors` ends with the
+  /// option diagnostics, as `load` lists them, counted in neither count, and
+  /// `valid` is false only when an entry has `severity` `error`; before
+  /// 3.19.0 the option diagnostics were missing and a warning made `valid`
+  /// false (#2929).
   validate: func(source: string) -> validate-result;
-  /// Like `validate`, but from a file path.
+  /// Like `validate`, but the ledger is loaded from a file path with its
+  /// includes (confined to the entry file's directory tree, as `query-file`
+  /// confines them) and validated as `rledger check` validates it, each
+  /// finding at its own line. Before 3.19.0 the file's text was validated as
+  /// one source, its includes unread (#2935).
   validate-file: func(path: string) -> validate-result;
 
   /// Run a BQL query against source text.

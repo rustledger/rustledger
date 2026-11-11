@@ -1611,3 +1611,94 @@ fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
     }
     Ok(())
 }
+
+/// The ledgers `rledger check` is pinned to in
+/// `rustledger/tests/ffi_check_parity_test.rs` (#2929, #2935).
+mod check_parity_cases {
+    include!("../../rustledger/tests/ffi_check_parity/cases.rs");
+}
+use check_parity_cases::{CHECK_PARITY_CASES, CheckParityCase};
+
+/// Severity, line, message of each error, sorted: what the WIT record carries.
+fn severity_line_message(
+    errors: &[rustledger::ledger::types::Error],
+) -> Vec<(String, Option<u32>, String)> {
+    let mut rows: Vec<_> = errors
+        .iter()
+        .map(|e| (e.severity.clone(), e.line, e.message.clone()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn expected_rows(case: &CheckParityCase) -> Vec<(String, Option<u32>, String)> {
+    let mut rows: Vec<_> = case
+        .diagnostics
+        .iter()
+        .map(|d| (d.severity.to_string(), d.line, d.message.to_string()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Through the built component, `load`, `load-file`, `validate` and
+/// `validate-file` report what `rledger check` reports for the same ledger:
+/// the option diagnostics (#2929), and the validation findings of a ledger
+/// with includes, each at its own line (#2935). The native tests in
+/// `rustledger-ffi-component` compare codes and files too, which the WIT
+/// `error` record has no field for.
+#[test]
+fn check_parity_through_the_component() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    for case in CHECK_PARITY_CASES {
+        let dir = tempfile::tempdir()?;
+        for (path, text) in case.files {
+            std::fs::write(dir.path().join(path), text)?;
+        }
+        let entry = format!("/work/{}", case.entry);
+        let want = expected_rows(case);
+        let (mut store, inst) = instantiate_in(dir.path())?;
+        let ledger = inst.rustledger_ledger_ledger();
+
+        let loaded = ledger.call_load_file(&mut store, &entry, false, &[], false)?;
+        assert_eq!(
+            severity_line_message(&loaded.errors),
+            want,
+            "{} via load-file",
+            case.name
+        );
+        let validated = ledger.call_validate_file(&mut store, &entry)?;
+        assert_eq!(
+            severity_line_message(&validated.errors),
+            want,
+            "{} via validate-file",
+            case.name
+        );
+        assert!(!validated.valid, "{}", case.name);
+        assert_eq!(validated.parse_error_count, 0, "{}", case.name);
+        assert_eq!(validated.validate_error_count, 2, "{}", case.name);
+
+        if case.is_single_file() {
+            let source = case.entry_text();
+            let loaded = ledger.call_load(&mut store, source, "<string>", false)?;
+            assert_eq!(
+                severity_line_message(&loaded.errors),
+                want,
+                "{} via load",
+                case.name
+            );
+            let validated = ledger.call_validate(&mut store, source)?;
+            assert_eq!(
+                severity_line_message(&validated.errors),
+                want,
+                "{} via validate",
+                case.name
+            );
+            assert_eq!(validated.parse_error_count, 0, "{}", case.name);
+        }
+    }
+    Ok(())
+}

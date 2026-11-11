@@ -480,6 +480,9 @@ pub struct LedgerError {
     /// Whether this is [`Ledger::query_refusal`]: a rejected option that
     /// would change the ledger's figures. See [`Self::blocks_queries`].
     option_refusal: bool,
+    /// Whether the validator reported this. See
+    /// [`Self::is_validation_finding`].
+    validation_finding: bool,
 }
 
 /// Error severity level.
@@ -521,6 +524,7 @@ impl LedgerError {
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: false,
         }
     }
 
@@ -539,6 +543,7 @@ impl LedgerError {
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: false,
         }
     }
 
@@ -579,6 +584,20 @@ impl LedgerError {
     #[must_use]
     pub const fn is_plugin_failure(&self) -> bool {
         self.plugin_failure
+    }
+
+    /// Whether the validator reported this (the Early and Late validation
+    /// passes and their finalize step), not the load, booking or a plugin.
+    ///
+    /// A finding describes the ledger as written; it does not make the
+    /// booked directives unsound to work with. A surface that runs more work
+    /// over a validated load (the FFI's host plugins, #2935) gates on the
+    /// other errors only, so a failed `balance` does not stop that work. The
+    /// code does not tell them apart: booking raises the validator's E4xxx
+    /// codes too ([`Self::is_booking_failure`]).
+    #[must_use]
+    pub const fn is_validation_finding(&self) -> bool {
+        self.validation_finding
     }
 
     /// Mark this error as a plugin failure ([`Self::is_plugin_failure`]).
@@ -2252,6 +2271,7 @@ fn ledger_errors_extend(
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: true,
         });
     }
 }
@@ -2484,6 +2504,86 @@ mod validation_options_tests {
 
         assert_eq!(vo.inferred_tolerance_default.get("CLP"), Some(&dec!(0.5)));
         assert_eq!(vo.account_types[0], "Activos");
+    }
+}
+
+#[cfg(test)]
+mod option_errors_tests {
+    use super::{ErrorSeverity, option_warnings_to_errors};
+    use crate::Options;
+
+    /// The shared mapping (#2929) reads severity, code and phase off each
+    /// warning and keeps its message: an E7002 (error) and an E7003
+    /// (warning, last value wins) come out as `rledger check` prints them,
+    /// with no location, since a warning has none.
+    #[test]
+    fn test_option_warnings_to_errors_reads_each_warning() {
+        let mut opts = Options::new();
+        opts.set("booking_method", "fifo");
+        opts.set("title", "A");
+        opts.set("title", "B");
+        assert_eq!(opts.warnings.len(), 2, "{:?}", opts.warnings);
+
+        let errors = option_warnings_to_errors(&opts.warnings);
+
+        assert_eq!(errors.len(), opts.warnings.len());
+        for (err, warning) in errors.iter().zip(&opts.warnings) {
+            assert_eq!(err.code, warning.code);
+            assert_eq!(err.message, warning.message);
+            assert_eq!(err.phase, warning.phase());
+            let expected = if warning.is_error() {
+                ErrorSeverity::Error
+            } else {
+                ErrorSeverity::Warning
+            };
+            assert_eq!(err.severity, expected, "{}", warning.code);
+            assert!(err.location.is_none(), "{}", warning.code);
+            assert!(!err.is_validation_finding());
+            assert!(!err.blocks_queries());
+        }
+        assert_eq!(errors[0].code, "E7002");
+        assert_eq!(errors[0].severity, ErrorSeverity::Error);
+        assert_eq!(errors[1].code, "E7003");
+        assert_eq!(errors[1].severity, ErrorSeverity::Warning);
+    }
+
+    /// `is_validation_finding` holds for what the validator reported (a
+    /// failed `balance`) and not for a booking failure, though booking raises
+    /// the validator's codes: the FFI's host plugins are gated on the second
+    /// and must not be on the first (#2935).
+    #[cfg(feature = "validation")]
+    #[test]
+    fn test_is_validation_finding_marks_the_validators_errors_only() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "2024-01-01 open Assets:A USD\n\
+             2024-01-01 open Assets:B\n\
+             2024-01-02 balance Assets:A 5 USD\n\
+             2024-01-03 * \"sell what is not held\"\n  Assets:B  -1 HOOL {}\n  Assets:A\n",
+        );
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let options = super::LoadOptions {
+            validate: true,
+            ..Default::default()
+        };
+        let ledger = super::process(raw, &options).expect("processes");
+
+        let balance = ledger
+            .errors
+            .iter()
+            .find(|e| e.code == "E2001")
+            .unwrap_or_else(|| panic!("a failed balance: {:?}", ledger.errors));
+        assert!(balance.is_validation_finding());
+        let booking = ledger
+            .errors
+            .iter()
+            .find(|e| e.is_booking_failure())
+            .unwrap_or_else(|| panic!("a booking failure: {:?}", ledger.errors));
+        assert!(!booking.is_validation_finding(), "{booking:?}");
     }
 }
 

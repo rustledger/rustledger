@@ -25,6 +25,17 @@ pub struct Error {
     /// Non-ledger contexts (e.g., query parsing) reuse the default `"parse"` value,
     /// which is acceptable since those errors are also syntactic in nature.
     pub phase: String,
+    /// The diagnostic code (`E2001`, `E7002`, ...), when the error has one.
+    ///
+    /// Not on the WIT `error` record, which has no field for it; kept here so
+    /// the drift guards can compare codes with `rledger check` (#2935).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The file `line` is in, when the error has a location: on a multi-file
+    /// load it need not be the entry file. Not on the WIT `error` record
+    /// either; see [`Self::code`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 impl Error {
@@ -37,7 +48,17 @@ impl Error {
             entry_index: None,
             severity: "error".to_string(),
             phase: "parse".to_string(),
+            code: None,
+            file: None,
         }
+    }
+
+    /// Whether this is an error rather than a warning: what `valid` and the
+    /// host-plugin gate count (#2929). A warning never makes a load invalid,
+    /// as `rledger check` exits 0 on one.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.severity == "error"
     }
 
     pub const fn with_line(mut self, line: u32) -> Self {

@@ -9365,14 +9365,18 @@ pub(super) fn report_invalid_tokens_of_error_line(
             account_glue_end = None;
             if range.start < end {
                 let tail = &stripped[end..range.end];
-                // A `;` right after the account starts beancount's comment,
-                // which takes the rest of the line
-                // (`<BOM><BOM>kk:<BOM>;c <BOM>1.5`).
-                if tail.starts_with(';') {
-                    break;
+                // `runs` index ` {tail}`: one byte before `end`.
+                let (runs, comment) = invalid_runs(&format!(" {tail}"));
+                for run in runs {
+                    let at = end + run.start - 1..end + run.end - 1;
+                    report(at.clone(), &stripped[at], out);
                 }
-                if !invalid_runs(&format!(" {tail}")).is_empty() {
-                    report(end..range.end, tail, out);
+                // A `;` where beancount's tokens leave off starts its
+                // comment, which takes the rest of the line: right after the
+                // account (`<BOM><BOM>kk:<BOM>;c <BOM>1.5`) or after a later
+                // token of the tail (`<BOM>assets:A~<BOM>1:A;c $x`).
+                if comment {
+                    break;
                 }
                 continue;
             }
@@ -9390,9 +9394,13 @@ pub(super) fn report_invalid_tokens_of_error_line(
             {
                 if let Some(blank) = text.find([' ', '\t']) {
                     let rest_start = range.start + blank;
-                    for run in invalid_runs(&text[blank..]) {
+                    let (runs, comment) = invalid_runs(&text[blank..]);
+                    for run in runs {
                         let at = rest_start + run.start..rest_start + run.end;
                         report(at.clone(), &stripped[at], out);
+                    }
+                    if comment {
+                        break;
                     }
                 }
                 continue;
@@ -9434,20 +9442,30 @@ pub(super) fn report_invalid_tokens_of_error_line(
 /// heading line: each blank-free run beancount cannot read whole, as ranges
 /// into `rest`. A run is invalid when the lexer makes an error token of any
 /// of it, or when a lone capital in it is glued to the token after it
-/// (beancount's `CAPITAL` needs a blank after it). Comments end the line.
-fn invalid_runs(rest: &str) -> Vec<std::ops::Range<usize>> {
-    use crate::logos_lexer::Token;
+/// (beancount's `CAPITAL` needs a blank after it). A comment ends the line,
+/// and the second value says whether one did.
+///
+/// A `{#` is read as beancount reads it, a `{` and then whatever the `#`
+/// starts (`{#t` is a brace and a tag, no invalid token): the lexer resumes
+/// right after the brace, mid-line, so the cost stays linear in `rest`.
+fn invalid_runs(rest: &str) -> (Vec<std::ops::Range<usize>>, bool) {
+    use crate::logos_lexer::{Token, TokenIter};
     let mut out = Vec::new();
     // The open run: its range and whether it is invalid so far.
     let mut run: Option<(std::ops::Range<usize>, bool)> = None;
     let mut after_lone_capital = false;
+    // Where the token before this one starts: a lone capital there starts
+    // beancount's invalid token.
+    let mut prev_start = 0;
     let close = |run: &mut Option<(std::ops::Range<usize>, bool)>,
                  out: &mut Vec<std::ops::Range<usize>>| {
         if let Some((range, true)) = run.take() {
             out.push(range);
         }
     };
-    for (token, span) in crate::logos_lexer::TokenIter::new(rest, true) {
+    let mut tokens = TokenIter::new(rest, true);
+    let mut comment = false;
+    while let Some((token, span)) = tokens.next() {
         match token {
             Token::Whitespace(_) | Token::Newline => {
                 close(&mut run, &mut out);
@@ -9456,24 +9474,47 @@ fn invalid_runs(rest: &str) -> Vec<std::ops::Range<usize>> {
             Token::Comment(_)
             | Token::PercentComment(_)
             | Token::Shebang(_)
-            | Token::EmacsDirective(_) => break,
+            | Token::EmacsDirective(_) => {
+                comment = true;
+                break;
+            }
+            Token::LBraceHash => {
+                let brace_end = span.start + 1;
+                match run.as_mut() {
+                    Some((range, _)) => range.end = brace_end,
+                    None => run = Some((span.start..brace_end, false)),
+                }
+                after_lone_capital = false;
+                tokens = TokenIter::new_mid_line(rest, true, brace_end);
+            }
             _ => {
                 // BOMs beancount reads into an account are no invalid token.
                 let invalid = matches!(token, Token::Error(t) if !is_bom_account_token(rest, span.start, t))
                     || after_lone_capital;
+                // A run's range starts where beancount's invalid token does,
+                // past the valid tokens before it (`{#t{#$x` is `$x`).
+                let start = if after_lone_capital {
+                    prev_start
+                } else {
+                    span.start
+                };
                 match run.as_mut() {
                     Some((range, bad)) => {
+                        if invalid && !*bad {
+                            range.start = start;
+                        }
                         range.end = span.end;
                         *bad |= invalid;
                     }
                     None => run = Some((span.start..span.end, invalid)),
                 }
                 after_lone_capital = matches!(token, Token::Currency(c) if c.len() == 1);
+                prev_start = span.start;
             }
         }
     }
     close(&mut run, &mut out);
-    out
+    (out, comment)
 }
 
 /// Whether `prefix`, the text of an `ERROR_NODE` line before its first invalid

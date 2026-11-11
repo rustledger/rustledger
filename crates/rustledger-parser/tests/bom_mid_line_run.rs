@@ -559,7 +559,11 @@ fn test_parse_bom_account_in_metadata_keeps_booking_method_check() {
 /// account (`<BOM>"s"`, `~<BOM>1:A`, `<BOM>x`) is no second error; an
 /// account inside a heading's invalid token (`Heading,Ü:A`) is that token,
 /// not one more error; an invalid token after a heading's first word is
-/// one; and a comment after a BOM-led key ends the line.
+/// one; and a comment after a BOM-led key ends the line. Round 10: a
+/// comment right after a later BOM-led account of the tail ends the line
+/// too, a token after it included (`~<BOM>1:A;c $x`); and after a `<BOM>*`
+/// heading, `{#t` is a brace and a tag, as beancount lexes it, while a `$x`
+/// glued after a `{#` is still one invalid token.
 #[test]
 fn test_parse_bom_led_line_tails_count_as_beancount() {
     for (line, errors) in [
@@ -569,6 +573,14 @@ fn test_parse_bom_led_line_tails_count_as_beancount() {
         (format!("{BOM}* Heading,\u{DC}:A"), 2),
         (format!("{BOM}* Heading{BOM}a-b:C{{  1{BOM}2"), 2),
         (format!("{BOM}{BOM}kk:{BOM};c\t{BOM}1.5"), 1),
+        (format!("{BOM}assets:A~{BOM}1:A;c $x"), 1),
+        (format!("{BOM}assets:A,{BOM}a-b:C;c $x $y"), 1),
+        (
+            format!("{BOM}{BOM}{BOM}assets:A\"x\"{BOM}a-b:C;c\t{BOM}1.5"),
+            1,
+        ),
+        (format!("{BOM}* H {{#t"), 1),
+        (format!("{BOM}* H {{#t{{#$x {{#\"a b\""), 2),
     ] {
         let src = format!("{HEAD}{line}\n");
         let result = parse_both(&src);
@@ -594,11 +606,12 @@ fn test_parse_bom_glued_unicode_account_after_error_line_is_not_counted_twice() 
     assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
 }
 
-/// An account word only partly inside an invalid token is still reported as
-/// written: masking the token keeps it out of the account search but never
-/// shows in the message (`G:\u{3A8}@3O+.1`, not the masked text).
+/// An account word only partly inside an invalid token keeps main's message,
+/// the whole word as written (`G:\u{3A8}@3O+.1`), not the text masked for
+/// the account search. This pins main's message, not beancount's behavior:
+/// beancount's account there is `G:\u{3A8}`, and the rest another token.
 #[test]
-fn test_parse_partly_invalid_account_word_is_reported_as_written() {
+fn test_parse_partly_invalid_account_word_keeps_mains_message() {
     let src = format!("{HEAD}{BOM}\tG:\u{3A8}@3O+.1\n");
     let result = parse_both(&src);
     assert!(
@@ -606,6 +619,24 @@ fn test_parse_partly_invalid_account_word_is_reported_as_written() {
             .errors
             .iter()
             .any(|e| e.kind == ParseErrorKind::InvalidAccount("G:\u{3A8}@3O+.1".to_string())),
+        "{:?}",
+        result.errors
+    );
+}
+
+/// The account search skips invalid tokens only on a line that starts with
+/// a BOM: on any other line an account inside one is still main's `P0006`
+/// (`Heading,Ü:A` alone is one error, an invalid account), so masking stays
+/// limited to the lines it was made for. Masking every line regressed 63
+/// fuzz inputs of the parse-error parity harness.
+#[test]
+fn test_parse_invalid_account_on_bom_free_line_keeps_its_p0006() {
+    let src = format!("{HEAD}Heading,\u{DC}:A\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+    assert_eq!(
+        result.errors[0].kind,
+        ParseErrorKind::InvalidAccount("Heading,\u{DC}:A".to_string()),
         "{:?}",
         result.errors
     );

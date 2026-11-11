@@ -934,6 +934,16 @@ impl<'src> TokenIter<'src> {
         }
     }
 
+    /// Tokenize `source` from `from`, a char boundary in the middle of a
+    /// line: no line-start rule (`#` comment, `*` heading, indentation)
+    /// applies to the first token, as none would to a token there.
+    pub(crate) fn new_mid_line(source: &'src str, keep_whitespace: bool, from: usize) -> Self {
+        let mut tokens = Self::new(source, keep_whitespace);
+        tokens.lexer.bump(from);
+        tokens.at_line_start = false;
+        tokens
+    }
+
     /// Replace the lexer with one over `source[..lex_end]`, positioned at
     /// `from`. In tests, count the bytes the new lexer can see, so the
     /// linear-cost guard can tell a restart over the rest of the file from
@@ -2064,19 +2074,22 @@ mod tests {
     /// after it, and a 1 MB line took over a minute.
     #[test]
     fn test_tokenize_long_bom_runs_are_linear() {
+        const SHORT: usize = 20_000;
+        const LONG: usize = 350_000;
         let bom = crate::bom::BOM;
-        // A short run first, so a quadratic version fails on the counts in a
-        // few seconds rather than running for minutes on the 1 MB one.
-        for count in [20_000, 350_000] {
+        // Each shape at a short run, then at a 1 MB one: the byte counters
+        // (the primary guard) must stay linear in both, and the long one runs
+        // on its own thread under a time budget from the short one's time, as
+        // a backstop for a rescan the counters do not see (a lookahead that
+        // trims the rest of the run itself). Linear, the long run takes about
+        // `LONG / SHORT` times the short one; quadratic, the square of that.
+        // The budget allows four times the linear ratio, plus two seconds of
+        // slack, so a quadratic version fails once the budget runs out
+        // instead of hanging.
+        let shapes = |count: usize| {
             let run = bom.repeat(count);
             let accounts = format!("~{bom}1:A").repeat(count / 2);
-            // A wall-clock bound too, generous even for a slow debug build,
-            // as a backstop for a rescan the byte counters (the primary
-            // guard) do not see, such as a lookahead that trims the rest of
-            // the run itself: linear, the short run takes well under a
-            // second, and the 1 MB one would take hours quadratic.
-            let started = std::time::Instant::now();
-            check_linear_bom_run(&[
+            vec![
                 format!("x\n{run}a\n"),
                 format!("x\n{run}Assets:A\n"),
                 format!("x {run}a\n"),
@@ -2088,33 +2101,53 @@ mod tests {
                 format!("x\n{bom}assets:A{accounts}\n"),
                 format!("x $x {bom}assets:A{accounts}\n"),
                 format!("x\n{bom}Assets:A{accounts}\n"),
-            ]);
-            if count == 20_000 {
-                let took = started.elapsed();
-                assert!(took.as_secs() < 30, "{count} BOMs took {took:?}");
-            }
+                // A `<BOM>*` heading rest of `{#` tokens, each resuming the
+                // rest's lexer after its brace.
+                format!("x\n{bom}* H{}\n", " {#t{#$x".repeat(count / 2)),
+            ]
+        };
+        for (short, long) in shapes(SHORT).into_iter().zip(shapes(LONG)) {
+            let short_took = linear_bom_run_cost(&short);
+            let budget = short_took * u32::try_from(4 * LONG / SHORT).expect("a small ratio")
+                + std::time::Duration::from_secs(2);
+            let (done, wait) = std::sync::mpsc::channel();
+            let shape = long.chars().take(12).collect::<String>();
+            std::thread::spawn(move || {
+                let took = linear_bom_run_cost(&long);
+                // The receiver is gone only once the test has failed.
+                let _ = done.send(took);
+            });
+            let took = wait.recv_timeout(budget).unwrap_or_else(|_| {
+                panic!(
+                    "{shape:?}...: the 1 MB run took over {budget:?}, against {short_took:?} \
+                     for the short one: quadratic"
+                )
+            });
+            assert!(took <= budget, "{shape:?}...: {took:?} over {budget:?}");
         }
     }
 
-    fn check_linear_bom_run(sources: &[String]) {
-        for source in sources {
-            test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(0));
-            test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
-            let tokens = tokenize_lossless(source);
-            assert!(!tokens.is_empty());
-            // The whole parse too: its error recovery asks about each BOM
-            // token, and a lookahead over the rest of the run per BOM was
-            // quadratic there while the lexer was linear.
-            let result = crate::parse(source);
-            assert!(!result.errors.is_empty());
-            let scanned = test_counters::ERROR_SCANNED_BYTES.with(std::cell::Cell::get);
-            let restarted = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
-            assert!(
-                scanned <= 8 * source.len() && restarted <= 8 * source.len(),
-                "{} bytes: {scanned} scanned in errors, {restarted} seen by restarts",
-                source.len()
-            );
-        }
+    /// Lex and parse `source`, check the byte counters stayed linear in its
+    /// length, and return how long it took.
+    fn linear_bom_run_cost(source: &str) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(0));
+        test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
+        let tokens = tokenize_lossless(source);
+        assert!(!tokens.is_empty());
+        // The whole parse too: its error recovery asks about each BOM
+        // token, and a lookahead over the rest of the run per BOM was
+        // quadratic there while the lexer was linear.
+        let result = crate::parse(source);
+        assert!(!result.errors.is_empty());
+        let scanned = test_counters::ERROR_SCANNED_BYTES.with(std::cell::Cell::get);
+        let restarted = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
+        assert!(
+            scanned <= 8 * source.len() && restarted <= 8 * source.len(),
+            "{} bytes: {scanned} scanned in errors, {restarted} seen by restarts",
+            source.len()
+        );
+        started.elapsed()
     }
 
     /// The error tokens of `source`, through the lossless (CST) tokenizer.

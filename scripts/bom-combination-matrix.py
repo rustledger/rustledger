@@ -30,7 +30,9 @@ against it row by row, without needing Python at test time.
           reads only with its BOM
 
    and, alone on a line (`TAIL_TOKENS`), that account with a tail that makes
-   its end observable: `<BOM>"s"`, `~<BOM>1:A`, `<BOM>x`.
+   its end observable: `<BOM>"s"`, `~<BOM>1:A`, `<BOM>x`, and a later BOM-led
+   account ending at a comment with a token after it (`~<BOM>1:A;c $x`,
+   `,<BOM>a-b:C;c $x`).
 
    Line-start prefixes (`PREFIXES`), put before the line, so before the
    indentation of an indented line:
@@ -47,7 +49,7 @@ against it row by row, without needing Python at test time.
    account, a directive's header, after a date alone, a metadata line under a
    header with no narration, and an indented line whose first token is glued
    to a BOM after the indentation (a run, and a `;`), and a `<BOM>*` heading
-   line.
+   line, plain and after a `{#t` (a brace and a tag in beancount).
 
 2. Hand-picked inputs (`EXTRA`): each shape a review of #2931 found, so that
    each stays pinned whatever the generators above cover.
@@ -141,6 +143,10 @@ TAIL_TOKENS = {
     "s": BOM + "assets:A{i}" + BOM + "\"s\"",
     "u": BOM + "assets:A{i}~" + BOM + "1:A",
     "x": BOM + "assets:A{i}" + BOM + "x",
+    # A comment after a later BOM-led account of the tail takes the rest of
+    # the line, a token after it included.
+    "v": BOM + "assets:A{i}~" + BOM + "1:A;c $x",
+    "w": BOM + "assets:A{i}," + BOM + "a-b:C;c $x",
 }
 
 PREFIXES = {
@@ -175,6 +181,8 @@ CONTEXTS = [
     # A `<BOM>*` heading line, whose rest beancount lexes after the first
     # blank.
     ("heading", "", BOM + "* Heading {T}", ""),
+    # The same after a `{#t`, which beancount lexes as a `{` and a tag.
+    ("heading-brace-hash", "", BOM + "* H {{#t {T}", ""),
 ]
 
 # Shapes the reviews of #2931 found, after HEAD.
@@ -228,6 +236,8 @@ EXTRA = [
     BOM + "assets:A;c\n",
     "2024-01-02 open Assets:C USD \"BAD\"\n  kk: " + BOM + "Assets:D\n",
     "2024-01-02 open Assets:C USD \"BAD\"\n  kk: " + BOM + "assets:D\n",
+    # Round 10: a BOM-led account where a price expects its amount.
+    "2024-01-02 price USD 1 " + BOM + "assets:A1 1\n",
 ]
 
 PROBE_SEED = 2931

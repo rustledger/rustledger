@@ -61,6 +61,68 @@ const BAD_LEDGER: &str = "\
 ";
 
 #[test]
+fn test_cross_group_agent_matches_cli_with_repeated_groups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "groups.beancount",
+        concat!(
+            "2024-01-01 open Assets:UnitA:Cash USD\n",
+            "2024-01-01 open Assets:UnitB:Cash USD\n",
+            "2024-01-01 open Income:UnitA USD\n",
+            "2024-01-02 * \"cross\"\n",
+            "  Assets:UnitA:Cash -10 USD\n",
+            "  Assets:UnitB:Cash 10 USD\n"
+        ),
+    );
+    let path = file.to_str().unwrap();
+    let args = [
+        "lint",
+        "cross-group",
+        path,
+        "--group",
+        "A=Assets:UnitA,Income:UnitA",
+        "--group",
+        "B=Assets:UnitB",
+        "--format",
+        "json",
+        "--fail-on-findings",
+    ];
+    let (agent_code, env, _) = run_in(tmp.path(), &args);
+    let (cli_code, output) = rledger_stdout(tmp.path(), &args);
+    assert_eq!(cli_code, 1, "{output}");
+    assert_eq!(agent_code, cli_code, "{env}");
+    assert_eq!(
+        env["result"]["stdout"].as_str(),
+        Some(output.as_str()),
+        "{env}"
+    );
+    assert_eq!(
+        env["result"]["data"]["findings"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn test_cross_group_agent_rejects_missing_group_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "groups.beancount", GOOD_LEDGER);
+    let args = [
+        "lint",
+        "cross-group",
+        file.to_str().unwrap(),
+        "--group",
+        "A=Assets:Cash",
+        "--group",
+        "Assets:Other",
+        "--format",
+        "json",
+    ];
+    let (code, env, _) = run_in(tmp.path(), &args);
+    assert_ne!(code, 0, "{env}");
+}
+
+#[test]
 fn test_lint_linked_transit_matches_cli_and_accepts_repeated_accounts() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(

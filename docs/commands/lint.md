@@ -10,7 +10,7 @@ one exit rule:
 | Exit | Meaning |
 |------|---------|
 | 0 | It answered, whether or not it found anything |
-| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on`) |
+| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on` or `cross-group --fail-on-findings`) |
 | 2 | It could not answer: a missing file, a file that does not load, or a ledger or configuration it refuses, as `rledger check` exits 2 on a file it cannot read |
 
 ## Usage
@@ -23,6 +23,7 @@ rledger lint <LINT> <FILE>... [OPTIONS]
 |------|-----------------|
 | `transfers` | Likely inter-account transfer pairs; `--apply` links them |
 | `linked-transit` | Explicitly linked transfers through a transit account whose legs do not agree |
+| `cross-group` | Transactions touching more than one configured account group |
 | `closed-nonempty` | Accounts closed while still holding a balance (`check` stays silent on these, as `bean-check` does) |
 | `control-chars` | Control characters in narrations, payees, metadata and comments |
 
@@ -36,6 +37,7 @@ has load errors (a parse error, a missing include) depends on what it reads:
 | Lint | Reads | Load errors | Booking or plugin failure |
 |------|-------|-------------|---------------------------|
 | `linked-transit` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
+| `cross-group` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
 | `closed-nonempty` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
 | `transfers --apply` | The source, as written | Refused before any file is written, exit 2 | Not run |
 | `transfers` (preview) | The source, as written | Answers over what parsed, with a warning | Not run |
@@ -69,6 +71,40 @@ warning: main.beancount: has load errors, so findings may be incomplete: ...
 
 Warnings go to stderr; in `ag-rledger` they are the envelope's `warnings`,
 this one with the code `LOAD_ERRORS`.
+
+## cross-group
+
+Report transactions with postings in two or more user-defined account groups:
+
+```bash
+rledger lint cross-group main.beancount \
+  --group UnitA=Assets:UnitA,Income:UnitA,Expenses:UnitA \
+  --group UnitB=Assets:UnitB,Income:UnitB,Expenses:UnitB \
+  --format json --fail-on-findings
+```
+
+Each `--group` names a group and one or more comma-separated account
+prefixes. Group names use ASCII letters, digits, `_`, or `-`. At least two
+distinct groups are required; repeat a group name to
+add prefixes. Multiple group specifications may alternatively be separated
+by semicolons in one value. A prefix matches itself or a descendant separated by `:`, not
+a similarly named sibling. Invalid prefixes or overlapping prefixes assigned
+to different groups are refused. Prefixes that match no opened or posted
+account produce a warning.
+
+The report includes the location, date, narration and participating accounts
+for each crossing, and the number of distinct unassigned posting accounts.
+Repeated input paths and included files are deduplicated. It reads the booked
+ledger with plugins and validation; validation diagnostics are warnings, not
+proof that the ledger is valid. Transactions a plugin inserts without a
+distinct source location are refused rather than silently merged. A shared
+source transaction that differs across input ledgers is also refused.
+
+`--fail-on-findings` exits 1 on a crossing; without it findings are advisory.
+Exit 2 means the lint could not answer. This audit detects account-group
+co-occurrence, not a transfer, gateway, legal classification, or settlement.
+It does not prevent edits outside the lint. `ag-rledger lint cross-group`
+accepts the same options.
 
 ## linked-transit
 

@@ -922,9 +922,10 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|linked-transit|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
+            "ag-rledger lint <transfers|linked-transit|cross-group|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
              [--amount-tolerance <amount>] [--apply]  |  \
+             cross-group: --group <name=prefix[,prefix...]>... [--fail-on-findings]  |  \
              linked-transit: --link-prefix <prefix> --account <account>... \
              [--fail-on <mismatch,missing,ambiguous,matched>]",
         ))
@@ -2086,13 +2087,14 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
 const LINTS: &[&str] = &[
     "transfers",
     "linked-transit",
+    "cross-group",
     "closed-nonempty",
     "control-chars",
 ];
 
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
     use rustledger::cmd::lint::{
-        Args, LintKind, closed_nonempty, control_chars, linked_transit, transfers,
+        Args, LintKind, closed_nonempty, control_chars, cross_group, linked_transit, transfers,
     };
     let subcommand = req.arg(0).ok_or_else(|| {
         command_error(
@@ -2144,6 +2146,16 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
+        "cross-group" => LintKind::CrossGroup(cross_group::Args {
+            files,
+            group: string_flag(req, "group", None).into_iter().collect(),
+            fail_on_findings: bool_flag(req, "fail-on-findings", None),
+            format: match format {
+                "text" => rustledger::cmd::lint::OutputFormat::Text,
+                "json" => rustledger::cmd::lint::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
+        }),
         "closed-nonempty" => LintKind::ClosedNonempty(closed_nonempty::Args {
             files,
             format: match format {
@@ -2165,6 +2177,7 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
     let files = match &lint {
         LintKind::Transfers(args) => &args.files,
         LintKind::LinkedTransit(args) => &args.files,
+        LintKind::CrossGroup(args) => &args.files,
         LintKind::ClosedNonempty(args) => &args.files,
         LintKind::ControlChars(args) => &args.files,
     };
@@ -2842,6 +2855,7 @@ const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
 /// account each).
 const MULTI_VALUE_COMMAND_FLAGS: &[(&[&str], &str)] = &[
     (&["lint"], "account"),
+    (&["lint"], "group"),
     (&["lint"], "fail-on"),
     (&["check", "c"], "lint"),
 ];
@@ -2949,7 +2963,10 @@ fn merge_repeated_value_flags(args: Vec<String>, is_alias: impl Fn(&str) -> bool
             .clone()
             .map(|(_, _, _, value)| value.as_str())
             .collect();
-        replace.push((*first, format!("--{long}={}", joined.join(","))));
+        // A group itself contains comma-separated prefixes; keep repeated
+        // groups distinct so an invalid missing group name stays invalid.
+        let separator = if *long == "group" { ";" } else { "," };
+        replace.push((*first, format!("--{long}={}", joined.join(separator))));
         for (pos, width, _, _) in occurrences.by_ref() {
             for slot in drop.iter_mut().skip(*pos).take(*width) {
                 *slot = true;

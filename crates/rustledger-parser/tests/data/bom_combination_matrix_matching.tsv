@@ -3,7 +3,8 @@
 # sources, written by tests/bom_combination_matrix.rs with
 # `BOM_MATRIX_UPDATE=1`. An update refuses a row in it that now counts a line
 # differently (a regression from matching); a row in neither this list nor
-# the known list is new to the table.
+# the known list is new to the table. The last line seals the list: its row
+# count and a hash of the rows, checked in either mode.
 00012fcd5649d541
 0009db1591d3f1eb
 000c72bb3f4b16d0
@@ -6722,3 +6723,4 @@ ffdc3b070d03dc46
 ffde8450ecf04453
 ffef8ae1230d11e1
 fffc7f89f8b10779
+# total 6718 a8ab9463c00c791b

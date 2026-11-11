@@ -678,6 +678,11 @@ def main():
         help="the parse_error_lines example built from main",
     )
     args = ap.parse_args()
+    import beancount
+
+    # The table records beancount 3.2.3's counts and token boundaries.
+    if beancount.__version__ != "3.2.3":
+        sys.exit(f"error: beancount {beancount.__version__}, expected 3.2.3")
     parity = load("parity", REPO / "scripts/compat-parse-error-parity.py")
     is_not_syntax = load("matrix", REPO / "scripts/stray-char-matrix.py").is_not_syntax
     seen = set()

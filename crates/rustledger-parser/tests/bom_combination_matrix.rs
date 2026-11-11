@@ -40,7 +40,11 @@
 //! does an update take in a line counted further from beancount than the
 //! known list recorded (than beancount's count, for a row that matched), even
 //! one main is no closer on: that needs `BOM_MATRIX_RELABEL=1` and a reason in
-//! the known row's fourth column.
+//! the known row, written for exactly the new counts. The matching list
+//! (`data/bom_combination_matrix_matching.tsv`) must be exactly the rows that
+//! match now, and the hand-kept exceptions
+//! (`data/bom_combination_matrix_exceptions.tsv`) exactly the lines no rule
+//! explains.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -53,6 +57,7 @@ const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
 const KNOWN_PATH: &str = "tests/data/bom_combination_matrix_known.tsv";
 const WORSE_THAN_MAIN: &str = include_str!("data/bom_combination_matrix_worse_than_main.tsv");
 const TEXTS: &str = include_str!("data/bom_combination_matrix_texts.tsv");
+const EXCEPTIONS: &str = include_str!("data/bom_combination_matrix_exceptions.tsv");
 const TEXTS_PATH: &str = "tests/data/bom_combination_matrix_texts.tsv";
 const MATCHING: &str = include_str!("data/bom_combination_matrix_matching.tsv");
 const MATCHING_PATH: &str = "tests/data/bom_combination_matrix_matching.tsv";
@@ -64,7 +69,8 @@ const MATCHING_HEADER: &str = "\
 # sources, written by tests/bom_combination_matrix.rs with
 # `BOM_MATRIX_UPDATE=1`. An update refuses a row in it that now counts a line
 # differently (a regression from matching); a row in neither this list nor
-# the known list is new to the table.
+# the known list is new to the table. The last line seals the list: its row
+# count and a hash of the rows, checked in either mode.
 ";
 
 /// The 64-bit FNV-1a hash of `s`, in hex.
@@ -99,12 +105,16 @@ const KNOWN_HEADER: &str = "\
 # beancount 3.2.3's, written by tests/bom_combination_matrix.rs with
 # `BOM_MATRIX_UPDATE=1` and checked by it. One per line:
 #
-#   <source after the two `open` lines>  <rledger's counts>  <causes>  [<reason>]
+#   <source after the two `open` lines>  <rledger's counts>  <causes>  [<for counts>  <reason>]
 #
-# The optional fourth column is a reason, written by hand, for a row that
-# counts a line further from beancount than the list recorded before; an
-# update refuses such a row without one (and without `BOM_MATRIX_RELABEL=1`),
-# and keeps the reason it finds.
+# The two optional columns are a reason, written by hand, for a row that
+# counts a line further from beancount than recorded before (the list's
+# counts, or beancount's for a row that matched), and the counts it was
+# written for. An update refuses such a row unless `BOM_MATRIX_RELABEL=1` is
+# set and the reason was written for exactly its new counts; it keeps a
+# reason only while the counts are those, so a later change needs a new one.
+# For a row that matched, add its line by hand, with the new counts in both
+# count columns.
 #
 # The causes are those of the input's differing lines, joined by `+`; the
 # test assigns each line one (`cause`; one of two parts names both, joined
@@ -260,6 +270,51 @@ fn lone_capital_glued(line: &str) -> bool {
     })
 }
 
+/// The hand-kept exceptions (`data/bom_combination_matrix_exceptions.tsv`): a
+/// line no rule explains, by input and line, with why.
+fn exceptions() -> BTreeMap<(&'static str, usize), &'static str> {
+    EXCEPTIONS
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            assert_eq!(f.len(), 3, "malformed exception line: {l:?}");
+            assert!(!f[2].trim().is_empty(), "no reason: {l:?}");
+            ((f[0], f[1].parse().expect("a line number")), f[2])
+        })
+        .collect()
+}
+
+/// Whether line `l`'s difference is an end-of-file error put on another
+/// line: beancount reports errors on the line after the input's last line
+/// (`l` is that line, or the last line with that one after it), rledger the
+/// same number on the last line, and the two lines together agree.
+fn eof_error_on_last_line(lines: &[&str], l: usize, counts: &Counts) -> bool {
+    let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
+    // `lines` ends with the empty text after the final `\n`.
+    let last = lines.len().saturating_sub(1);
+    let eof = last + 1;
+    (l == last || l == eof)
+        && get(&counts.bc, eof) > 0
+        && get(&counts.rl, eof) == 0
+        && get(&counts.bc, last) + get(&counts.bc, eof) == get(&counts.rl, last)
+}
+
+/// Whether beancount skips a line that starts with `s` (an org-mode heading,
+/// a comment, or another of its ignored line starts), as rledger's lexer
+/// decides it (`beancount_ignores_line`).
+fn skipped_line_start(s: &str) -> bool {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(';'), _) => true,
+        (Some('#'), Some(next)) => {
+            next != '\n' && !(next.is_ascii_alphanumeric() || "-_/.".contains(next))
+        }
+        (Some('*' | ':' | '!' | '&' | '?' | '%'), Some(next)) => next != '\n',
+        _ => false,
+    }
+}
+
 /// A `{#` with a tag character right after it.
 fn brace_hash_before_tag(line: &str) -> bool {
     line.match_indices("{#").any(|(i, _)| {
@@ -305,11 +360,6 @@ impl BomRoles {
     /// Whether a BOM-led account starts in `span`.
     fn account_in(&self, span: &std::ops::Range<usize>) -> bool {
         self.accounts.iter().any(|a| span.contains(&a.start))
-    }
-
-    /// Whether `span` holds a BOM inside an invalid token.
-    fn inner_in(&self, span: &std::ops::Range<usize>) -> bool {
-        self.inner.iter().any(|i| span.contains(i))
     }
 }
 
@@ -453,12 +503,11 @@ impl LineFacts<'_> {
     /// one invalid token to beancount) rledger counts the line exactly as
     /// beancount does: its count moves by the line's whole difference.
     fn inner_boms_are_the_difference(&self) -> bool {
-        self.roles.inner_in(&self.span)
-            && rledger_counts(&ordinary_inner_boms(self.input, self.roles, &self.span))
-                .get(&self.line)
-                .copied()
-                .unwrap_or(0)
-                == self.bc
+        rledger_counts(&ordinary_inner_boms(self.input, self.roles, &self.span))
+            .get(&self.line)
+            .copied()
+            .unwrap_or(0)
+            == self.bc
     }
 }
 
@@ -488,10 +537,10 @@ const GLUED_CONSTRUCT: &str = "bom-glued-to-account&extra-construct-error";
 ///   characters.
 ///
 /// A glued or construct share only ever adds errors, so it is positive. A
-/// hash-bang share may be negative, and usually is: rledger reads a mid-line
-/// `#!` / `#+` as one token to the end of the line, counting fewer errors
-/// there than beancount (-2 to -3 on every `bom-glued-to-account&mid-line-hash-bang`
-/// row).
+/// hash-bang share is usually negative: rledger reads a mid-line `#!` / `#+`
+/// as one token to the end of the line, counting fewer errors there than
+/// beancount. On the `bom-glued-to-account&mid-line-hash-bang` rows it is
+/// usually -2 to -4 (-1 on one row), and positive (+1) on one row.
 fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
     let count = |s: &str| rledger_counts(s).get(&f.line).copied().unwrap_or(0);
     let mut src = f.input.to_string();
@@ -547,7 +596,13 @@ fn glued_boms_replace_construct(f: &LineFacts<'_>) -> bool {
 
 /// The cause of line `l`'s difference, or `None` when no rule explains it.
 /// `lines` are the input's lines (line `k` is `lines[k - 1]`).
-fn cause(lines: &[&str], l: usize, counts: &Counts, input: &str) -> Option<&'static str> {
+fn cause(
+    lines: &[&str],
+    l: usize,
+    counts: &Counts,
+    input: &str,
+    tail: &str,
+) -> Option<&'static str> {
     let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
     let (b, r, m) = (get(&counts.bc, l), get(&counts.rl, l), get(&counts.main, l));
     let line = |k: usize| {
@@ -673,11 +728,13 @@ fn cause(lines: &[&str], l: usize, counts: &Counts, input: &str) -> Option<&'sta
             // without a BOM on the line; the heading rest reads it as beancount
             // does since #2928.
             "brace-hash-before-tag"
-        } else if r < b && text.starts_with(BOM) && strip_boms(text).starts_with([';', '%']) {
+        } else if r < b && text.starts_with(BOM) && skipped_line_start(strip_boms(text)) {
             // A BOM that starts its line keeps its own extent (#2928's
-            // deliberate line-start rule, for concatenated files), so a `;` or
-            // `%` after it starts a comment that hides the rest of the line,
-            // where beancount's invalid token runs through it and lexes on.
+            // deliberate line-start rule, for concatenated files), so a line
+            // start beancount skips after it (`;`, `%`, `!`, `*`, `:`, `&`,
+            // `?`, a `#` not before a tag character) hides the rest of the
+            // line here, where beancount's invalid token runs through it and
+            // lexes on.
             "line-start-bom-before-comment"
         } else if r < b && boms > 0 && facts.inner_boms_are_the_difference() {
             // A run with a BOM inside it, on a line whose BOM diagnostic already
@@ -698,17 +755,32 @@ fn cause(lines: &[&str], l: usize, counts: &Counts, input: &str) -> Option<&'sta
             // its own error again and rledger counts the line as beancount
             // does.
             "bom-account-under-line-diagnostic"
-        } else if r < b {
-            // beancount reports a later grammar error after the line's first
-            // error, rledger one diagnostic for the line.
-            "one-diagnostic-per-line"
-        } else if ["poptag", "popmeta"]
-            .iter()
-            .any(|p| strip_boms(text).starts_with(p))
+        } else if r < b
+            && ["poptag", "popmeta"]
+                .iter()
+                .any(|p| strip_boms(text).starts_with(p))
         {
             // A pop of a tag or key not pushed (its push failed): beancount
             // reports it, rledger does not.
             "pop-without-push"
+        } else if r < b && facts.later_grammar_is_the_difference() {
+            // beancount reports grammar errors after the line's first error,
+            // rledger one diagnostic for the line: its count is beancount's
+            // less exactly those (the table's later-grammar column).
+            "one-diagnostic-per-line"
+        } else if eof_error_on_last_line(lines, l, counts) {
+            // An error at the end of the file (an unclosed construct on the
+            // last line): beancount reports it on the line after the last,
+            // rledger on the last line, the same number of errors.
+            "eof-error-on-last-line"
+        } else if !text.contains(BOM) && r == m {
+            // A line with no BOM, counted exactly as main counts it: a
+            // difference from beancount that has nothing to do with #2928.
+            "bom-free-line-as-on-main"
+        } else if exceptions().contains_key(&(tail, l)) {
+            // Listed by hand, with its reason, in
+            // data/bom_combination_matrix_exceptions.tsv.
+            "listed-exception"
         } else if r > b && (r == m || parts_hold(&[CONSTRUCT], &facts)) {
             // rledger reports one more construct-level error (a custom value, a
             // price's link, a header's stray token, a pipe) on a line
@@ -736,6 +808,8 @@ struct RowResult {
     entry: Option<Result<Entry, String>>,
     worse: Vec<Worse>,
     texts: String,
+    /// The lines `listed-exception` explained.
+    excepted: Vec<usize>,
 }
 
 /// A line rledger counts further from beancount than main: its number, cause
@@ -831,12 +905,14 @@ fn check_row(line: &str) -> RowResult {
             entry: None,
             worse: Vec::new(),
             texts,
+            excepted: Vec::new(),
         };
     }
     let lines: Vec<&str> = input.split('\n').collect();
     let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
     let mut causes = BTreeSet::new();
     let mut unexplained = Vec::new();
+    let mut excepted = Vec::new();
     let mut worse = Vec::new();
     let differing: BTreeSet<usize> = counts.bc.keys().chain(counts.rl.keys()).copied().collect();
     for l in differing {
@@ -844,29 +920,44 @@ fn check_row(line: &str) -> RowResult {
         if b == r {
             continue;
         }
-        match cause(&lines, l, &counts, &input) {
-            Some(c) => {
-                causes.insert(c);
-                if r.abs_diff(b) > m.abs_diff(b) {
-                    let text = l.checked_sub(1).and_then(|i| lines.get(i)).copied();
-                    worse.push(Worse {
-                        line: l,
-                        cause: c,
-                        text: text.unwrap_or("").to_string(),
-                        bc: b,
-                        rl: r,
-                        analog_bc: get(&counts.analog_bc, l),
-                        analog_main: get(&counts.analog_main, l),
-                        input: input.clone(),
-                        hash_bang_bc: get(&counts.hash_bang_bc, l),
-                        bc_alone: counts.bc_alone.get(&l).copied(),
-                        boms: get(&counts.rl_bom, l),
-                        roles: counts.roles.clone(),
-                        later_grammar: get(&counts.later_grammar, l),
-                    });
-                }
+        if let Some(c) = cause(&lines, l, &counts, &input, &tail) {
+            causes.insert(c);
+            if c == "listed-exception" {
+                excepted.push(l);
             }
-            None => unexplained.push(l),
+            if r.abs_diff(b) > m.abs_diff(b) {
+                let text = l.checked_sub(1).and_then(|i| lines.get(i)).copied();
+                worse.push(Worse {
+                    line: l,
+                    cause: c,
+                    text: text.unwrap_or("").to_string(),
+                    bc: b,
+                    rl: r,
+                    analog_bc: get(&counts.analog_bc, l),
+                    analog_main: get(&counts.analog_main, l),
+                    input: input.clone(),
+                    hash_bang_bc: get(&counts.hash_bang_bc, l),
+                    bc_alone: counts.bc_alone.get(&l).copied(),
+                    boms: get(&counts.rl_bom, l),
+                    roles: counts.roles.clone(),
+                    later_grammar: get(&counts.later_grammar, l),
+                });
+            }
+        } else {
+            let f = LineFacts::new(
+                &input,
+                lines.get(l.wrapping_sub(1)).copied().unwrap_or(""),
+                l,
+                &counts,
+            );
+            let rewritten = rledger_counts(&ordinary_inner_boms(&input, &counts.roles, &f.span))
+                .get(&l)
+                .copied()
+                .unwrap_or(0);
+            unexplained.push(format!(
+                "{l} ({:?}: later grammar {}, rledger with inner BOMs made `$` {rewritten})",
+                f.text, f.later_grammar
+            ));
         }
     }
     let entry = if unexplained.is_empty() {
@@ -888,6 +979,7 @@ fn check_row(line: &str) -> RowResult {
         entry: Some(entry),
         worse,
         texts,
+        excepted,
     }
 }
 
@@ -1071,9 +1163,11 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
     let mut failures = Vec::new();
     let mut texts: Vec<(String, String)> = Vec::new();
     let mut bc_cells: BTreeMap<String, String> = BTreeMap::new();
+    let mut excepted: BTreeSet<(String, usize)> = BTreeSet::new();
     for line in DATA.lines() {
         rows += 1;
         let result = check_row(line);
+        excepted.extend(result.excepted.iter().map(|&l| (result.tail.clone(), l)));
         bc_cells.insert(result.tail.clone(), result.bc.clone());
         if !result.texts.is_empty() {
             texts.push((result.tail.clone(), result.texts.clone()));
@@ -1091,6 +1185,20 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         "{} input(s) differ from beancount on a line no rule explains:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    // A listed exception that no line needs any more (a rule explains it, or
+    // it matches) is stale.
+    let stale: Vec<String> = exceptions()
+        .keys()
+        .filter(|(t, l)| !excepted.contains(&((*t).to_string(), *l)))
+        .map(|(t, l)| format!("{t} line {l}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{} listed exception(s) no longer needed, remove them from \
+         data/bom_combination_matrix_exceptions.tsv:\n{}",
+        stale.len(),
+        stale.join("\n")
     );
     // Before any update: no update may accept a line further from beancount
     // than main.
@@ -1120,27 +1228,31 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         // Nor is it for a count that moves further from beancount than the
         // list recorded (or than beancount's own, for a row that matched),
         // even when main is no closer: that is a regression, which needs
-        // `BOM_MATRIX_RELABEL=1` and a reason, by hand, in the row's fourth
-        // column, before the update.
+        // `BOM_MATRIX_RELABEL=1` and a reason written by hand for exactly the
+        // new counts (`reason_holds`).
         let known = known_rows();
-        let matching: BTreeSet<&str> = MATCHING
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
+        let matching = matching_hashes();
         let regressions = regressed_rows(&computed, &bc_cells, &known, &matching);
         let relabel = std::env::var_os("BOM_MATRIX_RELABEL").is_some();
+        let counts_of: BTreeMap<&str, &str> = computed
+            .iter()
+            .map(|(t, c, _)| (t.as_str(), c.as_str()))
+            .collect();
         let refused: Vec<&String> = regressions
             .iter()
             .filter(|(tail, _)| {
-                !relabel || known.get(tail.as_str()).is_none_or(|row| row.2.is_none())
+                !relabel || !reason_holds(&known, tail, counts_of.get(tail.as_str()).copied())
             })
             .map(|(_, why)| why)
             .collect();
         assert!(
             refused.is_empty(),
-            "{} row(s) count a line further from beancount than the known list \
-             recorded; accept one only with BOM_MATRIX_RELABEL=1 and a reason in its \
-             known row's fourth column:\n{}",
+            "{} row(s) count a line further from beancount than recorded (the known \
+             list's counts, or beancount's for a row that matched). To accept one, \
+             give it a known-list line `<source>\\t<counts>\\t<causes>\\t<the same \
+             counts>\\t<reason>` (adding the line for a row that matched) and rerun \
+             with BOM_MATRIX_UPDATE=1 BOM_MATRIX_RELABEL=1; the reason holds only \
+             for those counts:\n{}",
             refused.len(),
             refused
                 .iter()
@@ -1150,8 +1262,16 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         );
         let mut out = KNOWN_HEADER.to_string();
         for (tail, counts, causes) in &computed {
-            match known.get(tail.as_str()).and_then(|row| row.2) {
-                Some(reason) => writeln!(out, "{tail}\t{counts}\t{causes}\t{reason}"),
+            // A reason is kept only while the counts are those it was
+            // written for.
+            match known
+                .get(tail.as_str())
+                .and_then(|row| row.2)
+                .filter(|(for_counts, _)| for_counts == counts)
+            {
+                Some((for_counts, reason)) => {
+                    writeln!(out, "{tail}\t{counts}\t{causes}\t{for_counts}\t{reason}")
+                }
                 None => writeln!(out, "{tail}\t{counts}\t{causes}"),
             }
             .expect("write to a String");
@@ -1170,9 +1290,11 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
             .map(|t| fnv(t))
             .collect();
         hashes.sort();
-        for h in hashes {
+        for h in &hashes {
             writeln!(out, "{h}").expect("write to a String");
         }
+        let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        writeln!(out, "{}", matching_seal(&refs)).expect("write to a String");
         std::fs::write(MATCHING_PATH, out).expect("write the matching list");
         return;
     }
@@ -1184,7 +1306,7 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         .map(|l| {
             let fields: Vec<&str> = l.split('\t').collect();
             assert!(
-                fields.len() == 3 || fields.len() == 4,
+                fields.len() == 3 || fields.len() == 5,
                 "malformed known line: {l:?}"
             );
             (fields[0], fields[1], fields[2])
@@ -1208,6 +1330,42 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
          diff):\n{}\n{}",
         gone.join("\n"),
         new.join("\n")
+    );
+
+    // The matching list must be exactly the rows that match now: a stale or
+    // cut list would let an update take a regression from matching for a
+    // new row.
+    let differing: BTreeSet<&str> = computed.iter().map(|(t, _, _)| t.as_str()).collect();
+    let matching_now: BTreeSet<String> = bc_cells
+        .keys()
+        .filter(|t| !differing.contains(t.as_str()))
+        .map(|t| fnv(t))
+        .collect();
+    let matching = matching_hashes();
+    let missing: Vec<&String> = matching_now
+        .iter()
+        .filter(|h| !matching.contains(h.as_str()))
+        .collect();
+    let extra: Vec<&&str> = matching
+        .iter()
+        .filter(|h| !matching_now.contains(**h))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the matching list is out of date (rerun with BOM_MATRIX_UPDATE=1 and read the \
+         diff): {} hash(es) missing, {} extra:\n{}\n{}",
+        missing.len(),
+        extra.len(),
+        missing
+            .iter()
+            .map(|h| format!("+ {h}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        extra
+            .iter()
+            .map(|h| format!("- {h}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     let recorded: BTreeSet<(&str, &str)> = TEXTS
@@ -1277,21 +1435,67 @@ fn relabeled_rows(
     out
 }
 
-/// The known list's rows, by source: rledger's counts, the causes, and the
-/// optional fourth column, a hand-written reason for a regression.
-fn known_rows() -> BTreeMap<&'static str, (&'static str, &'static str, Option<&'static str>)> {
+/// A known row: rledger's counts, the causes, and the optional hand-written
+/// regression reason with the counts it was written for.
+type KnownRow = (
+    &'static str,
+    &'static str,
+    Option<(&'static str, &'static str)>,
+);
+
+/// The known list's rows, by source.
+fn known_rows() -> BTreeMap<&'static str, KnownRow> {
     KNOWN
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
         .filter_map(|l| {
             let mut f = l.split('\t');
             let (tail, counts, causes) = (f.next()?, f.next()?, f.next()?);
-            Some((
-                tail,
-                (counts, causes, f.next().filter(|r| !r.trim().is_empty())),
-            ))
+            let reason = f
+                .next()
+                .zip(f.next())
+                .filter(|(_, why)| !why.trim().is_empty());
+            Some((tail, (counts, causes, reason)))
         })
         .collect()
+}
+
+/// Whether `tail`'s known row carries a regression reason written for
+/// exactly `counts`, rledger's counts now: a reason for other counts does
+/// not accept a later change.
+fn reason_holds(known: &BTreeMap<&str, KnownRow>, tail: &str, counts: Option<&str>) -> bool {
+    known
+        .get(tail)
+        .and_then(|row| row.2)
+        .is_some_and(|(for_counts, _)| Some(for_counts) == counts)
+}
+
+/// The matching list's hashes. Its last line, `# total <n> <digest>`, seals
+/// it: a list cut short or edited by hand no longer agrees with it, and
+/// fails here in either mode, so a stale list cannot quietly let an update
+/// take a regression from matching for a new row.
+fn matching_hashes() -> BTreeSet<&'static str> {
+    let hashes: Vec<&str> = MATCHING
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let seal = MATCHING
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("# total "))
+        .expect("the matching list has no `# total` line");
+    assert_eq!(
+        seal,
+        matching_seal(&hashes),
+        "the matching list does not agree with its own `# total` line: cut short or \
+         edited by hand? Restore it from git, or rerun with BOM_MATRIX_UPDATE=1."
+    );
+    hashes.into_iter().collect()
+}
+
+/// The `# total <n> <digest>` line for `hashes`, in the list's order.
+fn matching_seal(hashes: &[&str]) -> String {
+    format!("# total {} {}", hashes.len(), fnv(&hashes.join("\n")))
 }
 
 /// The rows with a line rledger now counts further from beancount than the
@@ -1300,19 +1504,22 @@ fn known_rows() -> BTreeMap<&'static str, (&'static str, &'static str, Option<&'
 fn regressed_rows(
     computed: &[(String, String, String)],
     bc_cells: &BTreeMap<String, String>,
-    known: &BTreeMap<&str, (&str, &str, Option<&str>)>,
+    known: &BTreeMap<&str, KnownRow>,
     matching: &BTreeSet<&str>,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (tail, counts, _) in computed {
         let bc = parse_cells(bc_cells.get(tail).map_or("", String::as_str));
         let now = parse_cells(counts);
-        let before = match known.get(tail.as_str()) {
-            Some(row) => parse_cells(row.0),
-            // It matched at the last update.
-            None if matching.contains(fnv(tail).as_str()) => bc.clone(),
+        // A row that matched at the last update regresses from beancount's
+        // own counts, whatever known row was added for it by hand since.
+        let before = if matching.contains(fnv(tail).as_str()) {
+            bc.clone()
+        } else if let Some(row) = known.get(tail.as_str()) {
+            parse_cells(row.0)
+        } else {
             // New to the table: nothing recorded to regress from.
-            None => continue,
+            continue;
         };
         let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
         let lines: BTreeSet<usize> = bc

@@ -37,8 +37,9 @@
 #   an ordinary invalid run, against beancount's count for that input; the
 #   construct error: main's overcount of the BOM-free analog), each share is
 #   not zero, and together they are exactly the line's difference. The glued
-#   and construct shares are positive; the `#!` / `#+` share is often
-#   negative, as rledger reads it as one token to the end of the line.
+#   and construct shares are positive; the `#!` / `#+` share is usually
+#   negative (-2 to -4; -1 on one row, +1 on one row), as rledger reads it
+#   as one token to the end of the line.
 <BOM>g 2024-01-02 * "n" <BOM>Assets:A0\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main was right only by miscounting a BOM
 <BOM>g 2024-01-02 * "n" <BOM>assets:A0\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 1 on main against beancount's 2, as this line counts here: main was right only by miscounting a BOM
 <BOM>g 2024-01-02 * "n" <BOM>Assets:A0$x\n  Assets:A  1 USD\n  Assets:B\n	3	like-main-without-bom	-	the input without its BOMs counts 2 on main against beancount's 3, as this line counts here: main was right only by miscounting a BOM

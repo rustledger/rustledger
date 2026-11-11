@@ -488,6 +488,10 @@ pub(crate) fn run_ledger_validation(
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
+    // Advisory-only diagnostics (E1004, closing an account with a balance)
+    // are not shown, as `rledger check` and bean-check do not report them;
+    // `rledger lint closed-nonempty` does (#2937).
+    errors.retain(|e| !e.code.is_advisory_only());
     // A validator could re-derive a booking failure word for word (an
     // inventory overflow is reported both by `apply` here and by
     // `update_inventories`); with failed transactions out of Late that no
@@ -3999,5 +4003,54 @@ plugin "auto_accounts"
                 end: Position::new(1, 27),
             }
         );
+    }
+}
+
+/// The LSP side of the drift guard for which findings every diagnostic
+/// surface reports (#2937): the editor's diagnostics are exactly what
+/// `rledger check`, WASM and the FFI report on the same ledgers. The LSP
+/// showed E1004 (closing an account with a balance), which `check` and
+/// bean-check do not report.
+#[cfg(test)]
+mod surface_agreement {
+    include!("../../../rustledger-loader/tests/surface_agreement/cases.rs");
+
+    use super::*;
+    use rustledger_parser::parse;
+
+    #[test]
+    fn diagnostics_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let result = parse(case.source);
+            let diagnostics = all_diagnostics(
+                &result,
+                case.source,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let mut got: Vec<(String, u32, String)> = diagnostics
+                .iter()
+                .map(|d| {
+                    let code = match &d.code {
+                        Some(lsp_types::NumberOrString::String(s)) => s.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (code, d.range.start.line + 1, d.message.clone())
+                })
+                .collect();
+            got.sort();
+            let mut want: Vec<&Finding> = case.findings.iter().collect();
+            want.sort_by_key(|f| (f.code, f.line));
+            let context = format!("{}: {got:?}", case.name);
+            assert_eq!(got.len(), want.len(), "{context}");
+            for ((code, line, message), finding) in got.iter().zip(&want) {
+                assert_eq!(code, finding.code, "{context}");
+                assert_eq!(*line, finding.line, "{context}");
+                assert!(message.starts_with(finding.message), "{context}");
+            }
+        }
     }
 }

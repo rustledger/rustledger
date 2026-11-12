@@ -215,7 +215,8 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
                 line: 1,
             },
         ],
-    },    // A refused `booking_method` in a source that also fails to parse. The
+    },
+    // A refused `booking_method` in a source that also fails to parse. The
     // load goes on past the parse error (#2949), so a query lists the parse
     // error first and then the refusal, as on a source that parses. Not run
     // through WASM `queryMultiFile`, which refuses on a parse error before a
@@ -245,5 +246,30 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
             file: MAIN,
             line: 1,
         }],
+    },
+    // A parse error and no option diagnostic: the parse error alone refuses
+    // the query, though the entries that did parse would give rows (review
+    // of #2946). WASM `queryMultiFile` runs it too: it refuses on a parse
+    // error before a `Ledger` exists, but there are no option diagnostics to
+    // miss (issue #2960).
+    QueryOptionCase {
+        name: "refused-by-parse-error-alone",
+        files: &[(
+            MAIN,
+            concat!(
+                "2024-01-01 open Assets:Cash\n",
+                "2024-01-01 open Income:Salary\n",
+                "2024-01-03 open\n",
+                "2024-01-04 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+            ),
+        )],
+        answers: false,
+        parse_errors: &[QueryError {
+            code: "P0012",
+            message: "parse error: unexpected input",
+            file: MAIN,
+            line: 3,
+        }],
+        errors: &[],
     },
 ];

@@ -22,15 +22,31 @@ pub fn parse_error_to_wasm(
     index: &rustledger_loader::LineIndex<'_>,
     file: Option<String>,
 ) -> Error {
-    Error::new(e.to_string())
+    parse_error_fields(e).with_file(file).with_span(
+        line_col_u32(index.line_col(e.span.start)),
+        line_col_u32(index.line_col(e.span.end)),
+    )
+}
+
+/// A parse error's message, code (`P` and its four-digit kind code), phase
+/// (`parse`) and hint, unlocated: WASM's one mapping of them, which
+/// [`parse_error_to_wasm`] and the multi-file
+/// [`crate::api::load_errors_to_errors`] both build on.
+///
+/// A deliberate copy of the loader's
+/// [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the FFI),
+/// not a call to it: that gives a `LedgerError`, which has no end position,
+/// and wants a `LoadError` and its `SourceMap`, which the single-source
+/// surfaces (`parse`, `format`, `validateSource`) never build. That function
+/// points back here, and `parse_error_mapping_parity` below pins the two to
+/// agree on message, code, phase, hint, file, line and column. Revisit if
+/// `LedgerError` gains an end position, at which point WASM should map from
+/// it.
+pub fn parse_error_fields(e: &rustledger_parser::ParseError) -> Error {
+    Error::new(e.message())
         .with_code(format!("P{:04}", e.kind_code()))
         .with_phase("parse")
         .with_hint(e.hint.clone())
-        .with_file(file)
-        .with_span(
-            line_col_u32(index.line_col(e.span.start)),
-            line_col_u32(index.line_col(e.span.end)),
-        )
 }
 
 /// Every parse error of `source` as [`parse_error_to_wasm`] reports it. The
@@ -820,6 +836,78 @@ mod warning_severity_tests {
         let got: Vec<_> = load.errors.iter().map(|e| (e.line, e.column)).collect();
         assert_eq!(got, [(Some(1), Some(26))]);
     }
+
+    /// The end of a parse error's and of a finding's span is where the span
+    /// really ends, counted in characters, not a copy of its start.
+    #[test]
+    fn test_error_end_positions_are_where_the_span_ends() {
+        let load =
+            load_and_book("\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n");
+        let mut got: Vec<_> = run_validation(&load)
+            .into_iter()
+            .map(|e| (e.code, e.line, e.column, e.end_line, e.end_column))
+            .collect();
+        got.sort();
+        // The finding is the balance directive: its span runs to the start of
+        // the next line, past its newline.
+        assert_eq!(
+            got,
+            [
+                (
+                    Some("E1001".to_string()),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(1)
+                ),
+                (
+                    Some("E2001".to_string()),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(1)
+                ),
+            ]
+        );
+
+        let load = load_and_book("2024-01-03 open Assets:Ü 10\n");
+        let got: Vec<_> = load
+            .errors
+            .iter()
+            .map(|e| (e.line, e.column, e.end_line, e.end_column))
+            .collect();
+        // The unexpected `10`, up to just past it: column 28 in characters,
+        // 29 in bytes.
+        assert_eq!(got, [(Some(1), Some(26), Some(1), Some(28))]);
+    }
+
+    /// A finding on a plugin's directive (a placeholder file id) is not
+    /// placed in the source text: its span says nothing about it. The FFI's
+    /// `test_a_plugin_directives_finding_maps_to_no_source_line`
+    /// (`rustledger-ffi-component/src/convert.rs`) pins the same rule there.
+    #[test]
+    fn test_a_plugin_directives_finding_maps_to_no_source_line() {
+        const SOURCE: &str = "plugin \"beancount.plugins.check_closing\"\n\
+             2024-01-01 open Assets:A\n\
+             2024-01-01 open Income:X\n\
+             2024-01-02 * \"x\"\n  Assets:A  10 USD\n    closing: TRUE\n  Income:X\n";
+        let load = load_and_book(SOURCE);
+        let errors = run_validation(&load);
+        let balance = errors
+            .iter()
+            .find(|e| e.message.starts_with("Balance failed for Assets:A"))
+            .unwrap_or_else(|| panic!("check_closing's balance fails: {errors:?}"));
+        assert_eq!(
+            (
+                balance.line,
+                balance.column,
+                balance.end_line,
+                balance.file.as_deref()
+            ),
+            (None, None, None, None),
+            "{balance:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1015,5 +1103,102 @@ mod option_diagnostic_tests {
             !has_fatal(&load.errors),
             "an invalid option must not read as an unsound directive stream"
         );
+    }
+}
+
+/// The drift guard of [`parse_error_fields`]' deliberate copy of the
+/// loader's [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the
+/// FFI and, inline, `rledger check`): the same parse errors, through the
+/// loader's mapping, the multi-file [`crate::api::load_errors_to_errors`] and
+/// the single-source [`parse_errors_to_wasm`], agree on message, code, phase,
+/// hint, file, line and column. After a BOM and a multi-byte character, so
+/// the columns count characters on every side.
+#[cfg(test)]
+mod parse_error_mapping_parity {
+    use super::*;
+
+    /// Message, code, phase, hint, file, line, column.
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+    );
+
+    const MAIN: &str = "main.beancount";
+    const SOURCE: &str = "\u{FEFF}2024-01-01 open Assets:A\n\
+        2024-01-03 open Assets:Ü 10\n\
+        \x20 2024-01-04 open Assets:B\n\
+        2024-01-05 open\n\
+        2024-01-06 * \u{FEFF}\"ab\"\n";
+
+    fn wasm_row(e: Error) -> Row {
+        (e.message, e.code, e.phase, e.hint, e.file, e.line, e.column)
+    }
+
+    #[test]
+    fn test_parse_error_mapping_agrees_with_the_loaders() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(MAIN, SOURCE);
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new(MAIN))
+            .expect("loads");
+        let failure = raw
+            .errors
+            .iter()
+            .find(|e| matches!(e, LoadError::ParseErrors { .. }))
+            .expect("the source fails to parse");
+
+        let canonical: Vec<Row> =
+            rustledger_loader::parse_errors_to_ledger_errors(failure, &raw.source_map)
+                .into_iter()
+                .map(|e| {
+                    let location = e.location.expect("located");
+                    (
+                        e.message,
+                        Some(e.code),
+                        Some(e.phase),
+                        e.hint,
+                        Some(location.file.display().to_string()),
+                        u32::try_from(location.line).ok(),
+                        u32::try_from(location.column).ok(),
+                    )
+                })
+                .collect();
+        // Sharp enough to catch a drift: several errors, one with a hint.
+        assert!(
+            canonical.len() >= 3 && canonical.iter().any(|row| row.3.is_some()),
+            "{canonical:?}"
+        );
+
+        let multi_file: Vec<Row> =
+            crate::api::load_errors_to_errors(std::slice::from_ref(failure), &raw.source_map)
+                .into_iter()
+                .map(|mut e| {
+                    // The path prefix of issue #2961.
+                    e.message = e
+                        .message
+                        .strip_prefix("main.beancount: ")
+                        .unwrap_or_else(|| panic!("prefixed: {}", e.message))
+                        .to_string();
+                    wasm_row(e)
+                })
+                .collect();
+        assert_eq!(multi_file, canonical, "load_errors_to_errors");
+
+        let single_source: Vec<Row> = parse_errors_to_wasm(&parse_beancount(SOURCE).errors, SOURCE)
+            .into_iter()
+            .map(|mut e| {
+                // The single-source surfaces name no file.
+                assert_eq!(e.file, None);
+                e.file = Some(MAIN.to_string());
+                wasm_row(e)
+            })
+            .collect();
+        assert_eq!(single_source, canonical, "parse_errors_to_wasm");
     }
 }

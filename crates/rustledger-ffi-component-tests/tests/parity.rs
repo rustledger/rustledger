@@ -274,6 +274,25 @@ fn query_short_circuits_on_parse_error() -> Result<()> {
         "parse error must surface, not be swallowed"
     );
     assert!(r.rows.is_empty(), "no rows on parse error");
+    // The load goes on past a parse error (#2949), so the entries that did
+    // parse would give rows: the parse error alone must still refuse
+    // (review of #2946).
+    let r = inst.rustledger_ledger_ledger().call_query(
+        &mut store,
+        "2024-01-01 open Assets:A\n2024-01-01 open Income:B\n2024-01-03 open\n\
+         2024-01-04 * \"x\"\n  Assets:A  1 USD\n  Income:B\n",
+        "SELECT account",
+    )?;
+    assert_eq!(
+        r.errors
+            .iter()
+            .map(|e| (e.code.as_deref(), e.line))
+            .collect::<Vec<_>>(),
+        [(Some("P0012"), Some(3))],
+        "{:?}",
+        r.errors
+    );
+    assert!(r.rows.is_empty(), "a parse error refuses: {:?}", r.rows);
     Ok(())
 }
 

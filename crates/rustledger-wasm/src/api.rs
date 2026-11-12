@@ -28,6 +28,16 @@ use crate::utils::LineLookup;
 /// placed through `source_map` (the load's).
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
+///
+/// A parse error's message, code, phase and hint are WASM's one mapping,
+/// [`crate::helpers::parse_error_fields`], which also documents why WASM
+/// does not call the loader's `parse_errors_to_ledger_errors`. Unlike the
+/// single-source surfaces, `rledger check` and the FFI, this prefixes the
+/// message with the file's path (`main.beancount: parse error: ...`),
+/// though the file is in its own field too: a pre-existing divergence of
+/// every multi-file surface (`validateMultiFile`, `Ledger`,
+/// `queryMultiFile`), tracked in issue #2961. Drop the prefix there, with
+/// the matching adjustment in `tests/wasm_query_option_errors.rs`.
 pub fn load_errors_to_errors(
     load_errors: &[LoadError],
     source_map: &rustledger_loader::SourceMap,
@@ -45,11 +55,10 @@ pub fn load_errors_to_errors(
                 for parse_error in parse_errors {
                     let span = parse_error.span();
                     let file = source_map.get_by_path(path);
-                    let mut err = Error::new(format!("{}: {}", path.display(), parse_error))
-                        .with_code(format!("P{:04}", parse_error.kind_code()))
-                        .with_phase("parse")
-                        .with_hint(parse_error.hint.clone())
+                    let mut err = crate::helpers::parse_error_fields(parse_error)
                         .with_file(Some(path.display().to_string()));
+                    // The path prefix of issue #2961 (see above).
+                    err.message = format!("{}: {}", path.display(), err.message);
                     if let Some(file) = file {
                         let (sl, sc) = file.line_col(span.0);
                         let (el, ec) = file.line_col(span.1);

@@ -1612,17 +1612,17 @@ fn regressed_rows(
 }
 
 /// Counts for line 3 only: rledger 1, beancount 2, main 1 (no further from
-/// beancount than main), main 1 on the BOM-free analog, and beancount
-/// `analog_bc` on it. Nothing else is set, so no rule before the last one
+/// beancount than main), and on the BOM-free analog main `analog_main` and
+/// beancount `analog_bc`. Nothing else is set, so no rule before the last one
 /// explains the line.
-fn late_analog_counts(analog_bc: usize) -> Counts {
+fn late_analog_counts(analog_bc: usize, analog_main: usize) -> Counts {
     let line3 = |n: usize| BTreeMap::from([(3, n)]);
     Counts {
         bc: line3(2),
         rl: line3(1),
         main: line3(1),
         analog_bc: line3(analog_bc),
-        analog_main: line3(1),
+        analog_main: line3(analog_main),
         hash_bang_bc: BTreeMap::new(),
         bc_alone: BTreeMap::new(),
         rl_bom: BTreeMap::new(),
@@ -1633,26 +1633,32 @@ fn late_analog_counts(analog_bc: usize) -> Counts {
 }
 
 /// The last rule of `cause`, `like-main-without-bom` on a line no further
-/// from beancount than main, holds only when beancount counts the BOM-free
-/// analog as it counts the line here. Where it counts the analog differently,
-/// the BOM changed beancount's count, so the difference is not main's old
-/// recovery gap: the line stays unexplained, even though main counts the
-/// analog as rledger counts the line.
+/// from beancount than main, holds only when both sides count the BOM-free
+/// analog as they count the line here: beancount as beancount, and main as
+/// rledger. Where beancount counts the analog differently, the BOM changed
+/// beancount's count; where main counts it differently from rledger's count
+/// here, the BOM changed rledger's. Either way the difference is not main's
+/// old recovery gap, so the line stays unexplained.
 #[test]
-fn test_cause_like_main_without_bom_needs_beancounts_analog_count() {
+fn test_cause_like_main_without_bom_needs_both_analog_counts() {
     let input =
         "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * \"x\" \u{FEFF}q\n";
     let lines: Vec<&str> = input.split('\n').collect();
     let tail = "made-up row, in no data file";
     assert_eq!(
-        cause(&lines, 3, &late_analog_counts(2), input, tail),
+        cause(&lines, 3, &late_analog_counts(2, 1), input, tail),
         Some("like-main-without-bom"),
-        "beancount counts the analog as the line: main's old gap"
+        "both sides count the analog as the line: main's old gap"
     );
     assert_eq!(
-        cause(&lines, 3, &late_analog_counts(3), input, tail),
+        cause(&lines, 3, &late_analog_counts(3, 1), input, tail),
         None,
         "beancount counts the analog differently: the BOM changed its count"
+    );
+    assert_eq!(
+        cause(&lines, 3, &late_analog_counts(2, 2), input, tail),
+        None,
+        "main counts the analog differently from rledger here: the BOM changed rledger's count"
     );
 }
 

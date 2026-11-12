@@ -26,9 +26,10 @@ pub struct Document {
     /// request handler (hover, semantic tokens, workspace symbols) that
     /// happens to parse a clean text between two passes does not change it.
     /// Kept across edits (unlike `parse_cache`) and dropped with the document
-    /// on close: it is what the buffer contributes to the view other files
-    /// are validated against while its current text is broken (see
-    /// `MainLoopState::publish_diagnostics`).
+    /// on close, or when a load of the ledger reads the buffer's current text
+    /// (see [`Self::forget_last_clean_parse`]): it is what the buffer
+    /// contributes to the view other files are validated against while its
+    /// current text is broken (see `MainLoopState::publish_diagnostics`).
     last_clean_parse: Option<Arc<ParseResult>>,
 }
 
@@ -77,6 +78,15 @@ impl Document {
         } else {
             self.last_clean_parse.clone()
         }
+    }
+
+    /// Drop the last clean parse, so that until this buffer next parses
+    /// cleanly it has no clean-view parse and its file is validated as the
+    /// ledger loaded it. For a buffer whose current text a load of the
+    /// ledger just read (it was saved): `rledger check` validates the saved
+    /// text, parse error and all, so the clean view does too.
+    pub fn forget_last_clean_parse(&mut self) {
+        self.last_clean_parse = None;
     }
 
     /// Invalidate the parse cache (called on content change).

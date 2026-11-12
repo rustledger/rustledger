@@ -1371,6 +1371,71 @@ include "level2.beancount"
         assert!(result.plugins.is_sorted_by_key(|p| p.file_id));
     }
 
+    /// [`test_load_plugins_are_collected_in_file_id_order`] on disk, through
+    /// the parallel pre-parse branch of `load_recursive`: that branch is
+    /// taken for ONE include that resolves to more than one file (a glob)
+    /// on a filesystem that `supports_parallel_read`, which the
+    /// `VirtualFileSystem` does not. Pre-parsing the siblings out of order
+    /// must not change the order their ids and plugins are given in: the
+    /// first sibling's nested include still comes before the second sibling,
+    /// and a plugin after the include still belongs to its own file.
+    #[test]
+    fn test_load_plugins_are_collected_in_file_id_order_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("sub/deep")).expect("mkdir");
+        std::fs::write(
+            dir.join("main.beancount"),
+            "plugin \"m1\"\ninclude \"sub/*.beancount\"\nplugin \"m2\"\n",
+        )
+        .expect("write main");
+        std::fs::write(
+            dir.join("sub/a.beancount"),
+            "plugin \"a1\"\ninclude \"deep/ac.beancount\"\nplugin \"a2\"\n",
+        )
+        .expect("write a");
+        std::fs::write(dir.join("sub/deep/ac.beancount"), "plugin \"ac\"\n").expect("write ac");
+        std::fs::write(dir.join("sub/b.beancount"), "plugin \"b\"\n").expect("write b");
+
+        let result = Loader::new()
+            .load(&dir.join("main.beancount"))
+            .expect("load");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let got: Vec<(&str, usize)> = result
+            .plugins
+            .iter()
+            .map(|p| (p.name.as_str(), p.file_id))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1", 0),
+                ("m2", 0),
+                ("a1", 1),
+                ("a2", 1),
+                ("ac", 2),
+                ("b", 3)
+            ]
+        );
+        assert!(result.plugins.is_sorted_by_key(|p| p.file_id));
+        let names: Vec<_> = result
+            .source_map
+            .files()
+            .iter()
+            .map(|f| f.path.file_name().expect("file name").to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "main.beancount",
+                "a.beancount",
+                "ac.beancount",
+                "b.beancount"
+            ]
+        );
+    }
+
     #[test]
     fn test_virtual_filesystem_missing_include() {
         let mut vfs = VirtualFileSystem::new();

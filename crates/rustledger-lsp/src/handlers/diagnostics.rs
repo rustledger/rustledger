@@ -1192,6 +1192,13 @@ pub(crate) struct FileDiagTarget<'a> {
 /// `B -> C` leave `A` as `C` only in that order. So the result is a stable
 /// sort by `file_id`, which depends on the view's contents alone, not on the
 /// order its files are listed in (#2949).
+///
+/// The `file_id`s are the stored load's, so the set and order of the files
+/// are those of the last load: this is the order `check` runs the view's
+/// plugins in for the files that load found, in the order it found them. A
+/// view whose buffer added, removed or reordered an `include` line keeps the
+/// old file order until the ledger is next loaded, where `check` on that text
+/// would follow the new one.
 fn view_plugins(stored: &[Plugin], view: &[(u16, &ParseResult)]) -> Vec<Plugin> {
     let in_view = |fid: usize| view.iter().any(|(f, _)| usize::from(*f) == fid);
     let mut merged: Vec<Plugin> = stored

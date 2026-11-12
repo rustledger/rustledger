@@ -424,9 +424,53 @@ impl MainLoopState {
     /// Reload the journal file (e.g., after a file change).
     pub fn reload_journal(&mut self) {
         if let Some(ref path) = self.journal_file {
-            let mut state = self.ledger_state.write();
-            if let Err(e) = state.load(path) {
-                tracing::error!("Failed to reload journal file: {e}");
+            let loaded = self.ledger_state.write().load(path);
+            match loaded {
+                Ok(_) => self.forget_clean_parses_of_loaded_buffers(),
+                Err(e) => tracing::error!("Failed to reload journal file: {e}"),
+            }
+        }
+    }
+
+    /// After a load of the ledger: every open buffer whose current text is
+    /// the text that load read for its file is now as loaded (it was saved),
+    /// so it gives up its last clean parse
+    /// ([`crate::vfs::Document::forget_last_clean_parse`]). Until it next
+    /// parses cleanly, its file is then validated as `rledger check`
+    /// validates the saved text, parse error and all, and not as the last
+    /// clean text a diagnostics pass saw. A buffer whose text differs from
+    /// what was loaded (unsaved edits on top of the save) keeps it.
+    ///
+    /// There is no `didSave` handler: the watched-file change that a save
+    /// raises, and the reload it triggers, is the save signal. Matching the
+    /// text, not the event, also covers a root adopted from a file already
+    /// saved broken, and an external write that happens to equal the buffer.
+    fn forget_clean_parses_of_loaded_buffers(&mut self) {
+        // The loaded text of every file, keyed by canonical path, collected
+        // under the ledger-state read lock and released before the VFS write
+        // lock is taken (the order `open_buffer_parses` keeps).
+        let loaded: HashMap<PathBuf, rustledger_loader::SourceText> = {
+            let guard = self.ledger_state.read();
+            let Some(ledger) = guard.ledger() else {
+                return;
+            };
+            ledger
+                .source_map
+                .files()
+                .iter()
+                .filter_map(|f| Some((f.path.canonicalize().ok()?, f.source.clone())))
+                .collect()
+        };
+        let paths: Vec<PathBuf> = self.vfs.read().paths().cloned().collect();
+        let mut vfs = self.vfs.write();
+        for path in paths {
+            let Some(source) = path.canonicalize().ok().and_then(|c| loaded.get(&c)) else {
+                continue;
+            };
+            if let Some(doc) = vfs.get_mut(&path)
+                && doc.text() == source.as_str()
+            {
+                doc.forget_last_clean_parse();
             }
         }
     }
@@ -1977,6 +2021,7 @@ impl MainLoopState {
                     );
                     *self.ledger_state.write() = probe;
                     self.journal_file = Some(root);
+                    self.forget_clean_parses_of_loaded_buffers();
                     return true;
                 }
                 continue;
@@ -1993,6 +2038,7 @@ impl MainLoopState {
                     );
                     *self.ledger_state.write() = state;
                     self.journal_file = Some(root);
+                    self.forget_clean_parses_of_loaded_buffers();
                     return true;
                 }
                 // It loaded a moment ago and does not now. Treat the cache as
@@ -2303,8 +2349,10 @@ impl MainLoopState {
     ///   parse when that has no error, else the last text of it a diagnostics
     ///   pass saw parse cleanly ([`crate::vfs::Document::clean_view_parse`]).
     ///   A buffer no pass has seen parse cleanly since it was opened is not
-    ///   overlaid, and its file is as loaded. The plugins run in the order
-    ///   `check` runs them for those texts, by file and then declaration.
+    ///   overlaid, and its file is as loaded; so is a buffer whose current
+    ///   text a load has since read (it was saved broken, see below). The
+    ///   plugins run by file and then declaration, as `check` runs them for
+    ///   those texts, with the files in the order of the last load.
     ///   Every file other than the one being published (the unopened
     ///   includes that are cross-published from here, and the other open
     ///   buffers' own passes) is validated against this view.
@@ -2312,10 +2360,13 @@ impl MainLoopState {
     ///   buffer's current text in its place, parse error or not, and the
     ///   plugins that text declares. Its diagnostics are what `rledger check`
     ///   reports for the ledger with that text, so a syntax error does not
-    ///   hide the other findings in it. One caveat: the set of FILES is the
-    ///   one the ledger loaded, so an `include` line added, removed or
-    ///   changed in a buffer takes effect when the ledger is next loaded, and
-    ///   until then the buffer's own diagnostics can differ from `check`'s.
+    ///   hide the other findings in it. One caveat: the set AND ORDER of the
+    ///   files come from the last load, so an `include` line added, removed,
+    ///   changed or moved in a buffer takes effect when the ledger is next
+    ///   loaded, and until then the buffer's own diagnostics (and, through
+    ///   the clean view, other files') can differ from `check`'s. The order
+    ///   matters as plugins run file by file in it, and same-day entries of
+    ///   two files tie-break by it.
     ///
     /// For a buffer that parses cleanly the two views are the same, so there
     /// is ONE validation, as before. Only a broken buffer costs a second one,
@@ -2333,7 +2384,12 @@ impl MainLoopState {
     /// every pass and a revalidation publishes each file the same way however
     /// many buffers it publishes. A file SAVED broken is in the ledger as
     /// loaded with its parse error, so its includes are validated as `rledger
-    /// check` validates them. Closing a buffer drops its clean-view parse,
+    /// check` validates them: the load that reads it (a watched-file reload,
+    /// or root adoption) also drops the last clean parse of an open buffer
+    /// holding that same text (`forget_clean_parses_of_loaded_buffers`), so
+    /// the buffer counts as loaded until it next parses cleanly. A buffer
+    /// edited past what was saved keeps its last clean parse. Closing a
+    /// buffer drops its clean-view parse,
     /// and every other ledger file is republished from the view without it
     /// (see `on_did_close`).
     fn publish_diagnostics(&mut self, uri: &Uri, text: &str) {
@@ -4225,6 +4281,120 @@ mod tests {
         let published = drain_published(&receiver);
         assert_eq!(last_published_for(&published, &main), Some(vec![]));
         assert_eq!(shown_for(&published, &b, vec![]), vec![], "{published:?}");
+    }
+
+    /// [`MAIN_ON_DISK`] with `Assets:Q` opened too, so b is clean.
+    const MAIN_WITH_Q: &str = "include \"b.beancount\"\n\
+                               2024-01-01 open Assets:X\n\
+                               2024-01-01 open Equity:E\n\
+                               2024-01-01 open Assets:Q\n";
+
+    /// Main with the `Assets:Q` open removed and a line that does not parse
+    /// (0-based line 1).
+    const MAIN_BROKEN_NO_Q: &str = "include \"b.beancount\"\ngarbage\n\
+                                    2024-01-01 open Assets:X\n\
+                                    2024-01-01 open Equity:E\n";
+
+    /// Tell `state` that `path` changed on disk.
+    fn disk_changed(state: &mut MainLoopState, path: &std::path::Path) {
+        state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
+            changes: vec![lsp_types::FileEvent {
+                uri: crate::path_to_uri(path).expect("file URI"),
+                typ: lsp_types::FileChangeType::CHANGED,
+            }],
+        });
+    }
+
+    /// Review round 5 of #2949: a buffer SAVED broken is as loaded. Main is
+    /// opened clean (with `Assets:Q`), then broken while dropping that open;
+    /// until it is saved, b is validated against main's last clean text and
+    /// stays clean. Once the broken text is saved and the ledger reloaded,
+    /// b gets the E1001 `rledger check` reports for the ledger on disk,
+    /// and keeps it while main stays broken.
+    #[test]
+    fn a_buffer_saved_broken_is_validated_as_loaded() {
+        let (_tmp, main, b) = ledger_dir(MAIN_WITH_Q);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, MAIN_WITH_Q);
+        let published = drain_published(&receiver);
+        assert_eq!(last_published_for(&published, &main), Some(vec![]));
+        let mut b_shown = shown_for(&published, &b, vec![]);
+        assert_eq!(b_shown, vec![], "{published:?}");
+
+        change_doc(&mut state, &main, 2, MAIN_BROKEN_NO_Q);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![("P0012".to_string(), 1)]),
+            "{published:?}"
+        );
+        b_shown = shown_for(&published, &b, b_shown);
+        assert_eq!(
+            b_shown,
+            vec![],
+            "unsaved: main's last clean text: {published:?}"
+        );
+
+        std::fs::write(&main, MAIN_BROKEN_NO_Q).expect("save main");
+        disk_changed(&mut state, &main);
+        let published = drain_published(&receiver);
+        let on_disk = check_codes(
+            &[
+                ("main.beancount", MAIN_BROKEN_NO_Q),
+                ("b.beancount", B_TEXT),
+            ],
+            "b.beancount",
+        );
+        assert_eq!(Some(on_disk.clone()), b_own(), "the reference itself");
+        b_shown = shown_for(&published, &b, b_shown);
+        assert_eq!(
+            sorted(b_shown.clone()),
+            on_disk,
+            "saved: as check: {published:?}"
+        );
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![("P0012".to_string(), 1)]),
+            "{published:?}"
+        );
+
+        // Still broken after a further edit: the file stays as loaded.
+        change_doc(
+            &mut state,
+            &main,
+            3,
+            &format!("{MAIN_BROKEN_NO_Q}more garbage\n"),
+        );
+        let published = drain_published(&receiver);
+        b_shown = shown_for(&published, &b, b_shown);
+        assert_eq!(sorted(b_shown), on_disk, "{published:?}");
+    }
+
+    /// The other half of the round-5 rule: a reload that reads a text other
+    /// than the buffer's (the buffer was edited past what was saved) leaves
+    /// the buffer its last clean parse, so b stays validated against it.
+    #[test]
+    fn a_buffer_edited_past_its_saved_text_keeps_its_last_clean_text() {
+        let (_tmp, main, b) = ledger_dir(MAIN_WITH_Q);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, MAIN_WITH_Q);
+        let published = drain_published(&receiver);
+        let mut b_shown = shown_for(&published, &b, vec![]);
+        assert_eq!(b_shown, vec![], "{published:?}");
+
+        change_doc(&mut state, &main, 2, MAIN_BROKEN_NO_Q);
+        std::fs::write(&main, format!("{MAIN_BROKEN_NO_Q}; saved earlier\n")).expect("save main");
+        disk_changed(&mut state, &main);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![("P0012".to_string(), 1)]),
+            "{published:?}"
+        );
+        b_shown = shown_for(&published, &b, b_shown);
+        assert_eq!(b_shown, vec![], "main's last clean text: {published:?}");
     }
 
     /// A ledger whose main includes `b` (which uses two accounts it never

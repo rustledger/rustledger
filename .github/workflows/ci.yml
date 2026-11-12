@@ -60,6 +60,11 @@ jobs:
               # check.
               - 'scripts/regen-bindings.sh'
               - 'crates/rustledger-wasm/bindings/**'
+              # This workflow itself: a PR that changes only the cargo
+              # commands below (#2963 widened Test and Doctests to the whole
+              # workspace) would otherwise skip the very jobs it changes and
+              # merge them untried.
+              - '.github/workflows/ci.yml'
             # Files that can break the slim (release) build without being
             # Rust code; see the `slim-build-no-wasmtime` job.
             slim:
@@ -561,12 +566,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `--workspace` on Check, Clippy and Documentation: without it cargo
-        # acts on `default-members` only, which leaves out rustledger-wasm and
-        # the three FFI crates, so a lint in one of them reached main unseen
-        # (a `redundant_pub_crate` in rustledger-wasm, from #2952). All four
-        # build on the host target, so no extra target or feature set is
-        # needed. Test and Doctests still cover `default-members` only.
+        # `--workspace` on every entry (and on Doctests below): without it
+        # cargo acts on `default-members` only, which leaves out
+        # rustledger-wasm and the three FFI crates. A lint in one of them
+        # reached main unseen (a `redundant_pub_crate` in rustledger-wasm,
+        # from #2952), and their native tests, including the drift guards that
+        # pin the wasm and FFI surfaces to the canonical pipeline, ran only on
+        # developer machines (#2963). All four build and test on the host
+        # target, so no extra target or feature set is needed.
+        #
+        # Test excludes rustledger-ffi-component-tests: its tests need the
+        # wasip2 component built first and print a skip marker without it.
+        # The `Component Parity (wasip2)` job builds the component, runs them,
+        # and fails on that marker, so running them here would only add a
+        # green no-op.
         include:
           - name: Check
             cmd: cargo check --workspace --all-features --all-targets
@@ -575,7 +588,7 @@ jobs:
             cmd: cargo clippy --workspace --all-features --all-targets -- -D warnings
             components: clippy
           - name: Test
-            cmd: cargo nextest run --all-features
+            cmd: cargo nextest run --workspace --all-features --exclude rustledger-ffi-component-tests
             components: ""
             install: nextest
           - name: Documentation
@@ -622,6 +635,22 @@ jobs:
         run: ${{ matrix.cmd }}
         env:
           RUSTDOCFLAGS: ${{ matrix.env == 'RUSTDOCFLAGS=-Dwarnings' && '-Dwarnings' || '' }}
+      # `--all-features` turns on rustledger-wasm's `ts-export`, whose tests
+      # write per-type TypeScript files under the gitignored
+      # `crates/rustledger-wasm/bindings/bindings/`. No test may write a
+      # tracked file: the checked-in bindings are regenerated and diffed by
+      # the `bindings-fresh` job, and the JSON Schema export test is
+      # `#[ignore]` and env-gated for exactly that reason. Fail if that ever
+      # changes, so a test that rewrites the source tree cannot pass quietly.
+      - name: Tests left the checkout clean
+        if: matrix.name == 'Test'
+        run: |
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "::error::the test run modified or created files in the checkout"
+            echo "$dirty"
+            exit 1
+          fi
   # Doctests (nextest doesn't support them, only on code changes)
   doctest:
     name: Doctests
@@ -637,8 +666,9 @@ jobs:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # `--workspace`: see the `ci` matrix above (#2963).
       - name: Run doctests
-        run: cargo test --doc --all-features
+        run: cargo test --workspace --doc --all-features
   # Regression tests - user-reported issues (only on code changes)
   regressions:
     name: Regression Tests

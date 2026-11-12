@@ -28,7 +28,7 @@ use crate::utils::LineLookup;
 /// placed through `source_map` (the load's).
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
-pub(crate) fn load_errors_to_errors(
+pub fn load_errors_to_errors(
     load_errors: &[LoadError],
     source_map: &rustledger_loader::SourceMap,
 ) -> Vec<Error> {

@@ -730,20 +730,28 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     which are unknown options now. An older blob would keep serving the
 ///     old values, and be read at the wrong offsets.
 ///
-/// v70: PARSER OUTPUT changed, no archived layout moved (#2928). A mid-file
-///     BOM in the middle of a line starts an invalid token that runs to the
-///     next blank, as in beancount, so a `"` after it opens no string and a
-///     `#!` or `#+` after it is no token of its own; only a BOM that starts
-///     its line keeps its own extent. An older blob would keep serving such a
-///     file with its old errors and values (the narration a quote after a
-///     BOM opened).
+/// v71: LOADER OUTPUT changed, no archived layout moved (#2925). A `documents`
+///     option in an included file is ignored with the `E7009` warning, as in
+///     beancount, which keeps only the top-level file's roots: its directory
+///     is no longer scanned, so the `document` entries found under it are
+///     gone. A v69 blob of a ledger whose include sets an existing
+///     `documents` root would keep serving those entries with no `E7009`.
+///     (v70 was held by #2931 and never released.)
+///
+/// v72: PARSER OUTPUT changed, no archived layout moved (#2931, for #2928).
+///     A mid-file BOM in the middle of a line starts an invalid token that
+///     runs to the next blank, as in beancount, so a `"` after it opens no
+///     string and a `#!` or `#+` after it is no token of its own; only a BOM
+///     that starts its line keeps its own extent. An older blob would keep
+///     serving such a file with its old errors and values (the narration a
+///     quote after a BOM opened). (v73 and v74 are held by open PRs.)
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 70;
+pub const CACHE_VERSION: u32 = 72;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1622,9 +1630,11 @@ mod tests {
         // encoding moves, so the arrays still hold.
         // v69 (#2925) drops two fields from `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
-        // v70 (#2928) runs a mid-line BOM to the next blank; no archived
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived encoding moves, so the arrays still hold.
+        // v72 (#2931) runs a mid-line BOM to the next blank; no archived
         // encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 70;
+        const FIXTURE_VERSION: u32 = 72;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1777,9 +1787,11 @@ mod tests {
         // the hash below is unchanged.
         // v69 (#2925) drops two fields from `CachedOptions`, not from
         // `MetaValue`; the hash below is unchanged.
-        // v70 (#2928) runs a mid-line BOM to the next blank; the hash below
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived layout moves, so the hash below is unchanged.
+        // v72 (#2931) runs a mid-line BOM to the next blank; the hash below
         // is unchanged.
-        const FIXTURE_VERSION: u32 = 70;
+        const FIXTURE_VERSION: u32 = 72;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

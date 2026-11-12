@@ -771,6 +771,9 @@ impl Ledger {
         let booking_method = load_result
             .options
             .effective_booking_method(load_options.booking_method);
+        // The option diagnostics, read before `process` consumes the options,
+        // so both arms below report them, as `validate_with_filesystem` does.
+        let option_errors = option_warnings_to_errors(&load_result.options.warnings);
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
@@ -794,7 +797,7 @@ impl Ledger {
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors = crate::helpers::reported_ledger_errors(ledger.errors);
-                errors.extend(option_warnings_to_errors(&ledger.options.warnings));
+                errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
@@ -829,7 +832,9 @@ impl Ledger {
                 booking_method,
                 summary_accounts,
                 tolerance_multiplier,
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                    .chain(option_errors)
+                    .collect(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: true,
                 created_tables: std::cell::RefCell::default(),
@@ -1122,7 +1127,7 @@ impl Ledger {
 }
 
 #[cfg(test)]
-mod option_warning_severity_tests {
+pub mod option_warning_severity_tests {
     use super::*;
     use crate::types::Severity;
     use rustledger_loader::OptionWarning;
@@ -1133,6 +1138,7 @@ mod option_warning_severity_tests {
             message: "msg".to_string(),
             option: "title".to_string(),
             value: "v".to_string(),
+            site: None,
         }
     }
 
@@ -1485,6 +1491,77 @@ mod option_warning_severity_tests {
         assert!(
             parsed.is_valid(),
             "a warning-only ledger is valid; `rledger check` exits 0 on it"
+        );
+    }
+
+    /// Two files: an E7003 in the main file at line 3, and in the included
+    /// one an invalid `name_equity` (E7008, line 1) and a valid
+    /// `booking_method` (E7009, line 2) (#2925).
+    pub fn included_option_files() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                "main.beancount".to_string(),
+                "option \"title\" \"a\"\ninclude \"sub.beancount\"\noption \"title\" \"b\"\n\
+                 2024-01-01 open Assets:A\n"
+                    .to_string(),
+            ),
+            (
+                "sub.beancount".to_string(),
+                "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"\n"
+                    .to_string(),
+            ),
+        ])
+    }
+
+    /// `(code, file, line)` of every option diagnostic, in the loader's
+    /// order, as the loader locates them: what `rledger check` prints.
+    pub fn loader_located(
+        files: HashMap<String, String>,
+    ) -> Vec<(Option<String>, Option<String>, Option<u32>)> {
+        let mut loader = rustledger_loader::Loader::new().with_filesystem(Box::new(
+            rustledger_loader::VirtualFileSystem::from_files(files),
+        ));
+        let load = loader.load(Path::new("main.beancount")).expect("load");
+        load.options
+            .warnings
+            .iter()
+            .map(|w| {
+                let site = w.site.as_ref().expect("a loaded option has a site");
+                (
+                    Some(w.code.to_string()),
+                    Some(site.file.clone()),
+                    u32::try_from(site.line).ok(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drift guard (#2925): the multi-file `Ledger` reports each option
+    /// diagnostic at the file and line the loader gives it, which is what
+    /// `rledger check` prints, an included file's among them.
+    #[test]
+    fn ledger_option_errors_are_located_like_check() {
+        let ledger =
+            Ledger::from_file_map(included_option_files(), "main.beancount").expect("ledger");
+        let located: Vec<_> = ledger
+            .errors
+            .iter()
+            .filter(|e| e.code.as_deref().is_some_and(|c| c.starts_with("E70")))
+            .map(|e| (e.code.clone(), e.file.clone(), e.line))
+            .collect();
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            located,
+            [
+                (s("E7003"), s("main.beancount"), Some(3)),
+                (s("E7008"), s("sub.beancount"), Some(1)),
+                (s("E7009"), s("sub.beancount"), Some(2)),
+            ]
+        );
+        assert_eq!(located, loader_located(included_option_files()));
+        assert!(
+            !ledger.is_valid(),
+            "E7008 in an include is an error, exit 1"
         );
     }
 }

@@ -456,12 +456,20 @@ use crate::types::{Error, LedgerOptions};
 /// reports the `Balance failed` that follows one. An older blob would keep
 /// serving the old errors. (v95 was held by #2931 and never released; v96
 /// was never released.)
-/// v100: loader v70, PARSER OUTPUT changed (#2928). A BOM in the middle of a
-/// line starts an invalid token that runs to the next blank, as in beancount,
-/// so a quote after it opens no string; an older blob would keep serving such
-/// a file with its old errors and values. (v93 and v95 were never released:
-/// #2931 held them before #2920 took v94 and #2947 took v97; v98, v99 and
-/// v101 are held by open PRs.)
+/// v99: loader v71 (#2925). Both payloads' option diagnostics move: each
+/// carries its option's line, and a `Ledger`'s its file too, and an invalid
+/// option in an included file is its converter's error (`E7002`, `E7008`,
+/// ...) instead of the `E7009` warning, which is left for a value the
+/// converter accepts. The loader also ignores a `documents` option in an
+/// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
+/// no location and the old codes, and a `Ledger` with such an option as
+/// valid. (v98 is held by #2944.)
+/// v100: loader v72, PARSER OUTPUT changed (#2931, for #2928). A BOM in the
+/// middle of a line starts an invalid token that runs to the next blank, as
+/// in beancount, so a quote after it opens no string; an older blob would
+/// keep serving such a file with its old errors and values. (v93 and v95
+/// were never released: #2931 held them before #2920 took v94 and #2947 took
+/// v97; v101 to v103 are held by open PRs.)
 pub const CACHE_VERSION: u32 = 100;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
@@ -494,7 +502,7 @@ pub const CACHE_VERSION: u32 = 100;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 70;
+const LOADER_CACHE_VERSION_PIN: u32 = 72;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -1123,7 +1131,7 @@ option "operating_currency" "USD"
             query_refused: false,
         })
         .unwrap();
-        bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CACHE_VERSION + 1).to_le_bytes());
         assert!(
             deserialize_ledger(&bytes)
                 .unwrap_err()

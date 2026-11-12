@@ -1327,6 +1327,50 @@ include "level2.beancount"
         assert!(result.errors.is_empty());
     }
 
+    /// Plugins are collected in `file_id` order, each file's in declaration
+    /// order: a file gets its id and pushes its plugins in one step, before
+    /// its includes are followed (even a plugin declared after an include).
+    /// The LSP relies on this to order a view's plugins as this loader would
+    /// (`view_plugins` in `rustledger-lsp`, #2949), so this pins it.
+    #[test]
+    fn test_load_plugins_are_collected_in_file_id_order() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "plugin \"m1\"\ninclude \"a.beancount\"\nplugin \"m2\"\ninclude \"c.beancount\"\n",
+        );
+        vfs.add_file(
+            "a.beancount",
+            "plugin \"a1\"\ninclude \"a_child.beancount\"\nplugin \"a2\"\n",
+        );
+        vfs.add_file("a_child.beancount", "plugin \"ac\"\n");
+        vfs.add_file("c.beancount", "plugin \"c\"\n");
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let got: Vec<(&str, usize)> = result
+            .plugins
+            .iter()
+            .map(|p| (p.name.as_str(), p.file_id))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1", 0),
+                ("m2", 0),
+                ("a1", 1),
+                ("a2", 1),
+                ("ac", 2),
+                ("c", 3)
+            ]
+        );
+        assert!(result.plugins.is_sorted_by_key(|p| p.file_id));
+    }
+
     #[test]
     fn test_virtual_filesystem_missing_include() {
         let mut vfs = VirtualFileSystem::new();

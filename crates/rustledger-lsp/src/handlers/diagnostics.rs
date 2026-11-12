@@ -1181,32 +1181,32 @@ pub(crate) struct FileDiagTarget<'a> {
 
 /// The plugins of a view (see [`ledger_diagnostics_multi`]): `stored`, with
 /// every file in `view` declaring its parse's plugins instead of its stored
-/// ones. A replaced file's plugins take the place of its first stored one, so
-/// declaration order is kept; those of a file that had none are appended.
+/// ones, in the order the loader would collect them for those texts.
+///
+/// That order is by `file_id`, each file's plugins in declaration order: the
+/// loader gives a file its id and pushes its plugins in the same step, before
+/// it follows that file's includes, so both follow one pre-order walk and the
+/// loader's list is sorted by `file_id` (pinned by the loader's
+/// `test_load_plugins_are_collected_in_file_id_order`). The order matters,
+/// as plugins run in it: two `rename_accounts` chaining `A -> B` and
+/// `B -> C` leave `A` as `C` only in that order. So the result is a stable
+/// sort by `file_id`, which depends on the view's contents alone, not on the
+/// order its files are listed in (#2949).
 fn view_plugins(stored: &[Plugin], view: &[(u16, &ParseResult)]) -> Vec<Plugin> {
-    let fresh_for = |fid: usize| {
-        view.iter()
-            .find(|(f, _)| usize::from(*f) == fid)
-            .map(|(_, parsed)| parse_result_to_plugins(&parsed.plugins, fid))
-    };
-    let mut emitted: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut merged = Vec::with_capacity(stored.len());
-    for plugin in stored {
-        match fresh_for(plugin.file_id) {
-            Some(fresh) => {
-                if emitted.insert(plugin.file_id) {
-                    merged.extend(fresh);
-                }
-            }
-            None => merged.push(plugin.clone()),
-        }
-    }
+    let in_view = |fid: usize| view.iter().any(|(f, _)| usize::from(*f) == fid);
+    let mut merged: Vec<Plugin> = stored
+        .iter()
+        .filter(|p| !in_view(p.file_id))
+        .cloned()
+        .collect();
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for (fid, parsed) in view {
-        let fid = usize::from(*fid);
-        if emitted.insert(fid) {
-            merged.extend(parse_result_to_plugins(&parsed.plugins, fid));
+        if seen.insert(*fid) {
+            merged.extend(parse_result_to_plugins(&parsed.plugins, usize::from(*fid)));
         }
     }
+    // Stable: a file's plugins keep their declaration order.
+    merged.sort_by_key(|p| p.file_id);
     merged
 }
 
@@ -1234,8 +1234,11 @@ fn view_plugins(stored: &[Plugin], view: &[(u16, &ParseResult)]) -> Vec<Plugin> 
 /// for which file is the caller's rule (`MainLoopState::publish_diagnostics`).
 /// A file in `view` contributes BOTH its directives and its plugin
 /// declarations, which replace the ledger's for that file; every other file
-/// keeps what the ledger loaded. So the result depends on the view alone, not
-/// on which of its files is being published (#2949).
+/// keeps what the ledger loaded. The plugins then run in the order the loader
+/// would collect them for those texts (see [`view_plugins`]), not in the
+/// order `view` lists its files, so the result depends on the view's contents
+/// alone: not on which of its files is being published, nor on the order the
+/// open buffers are visited in (#2949).
 ///
 /// Requires a loaded ledger; falls back to parse-only diagnostics otherwise
 /// (the caller only uses this path for multi-file ledgers).
@@ -1372,9 +1375,10 @@ mod tests {
     use rustledger_parser::parse;
 
     /// A view's plugins: each file in the view declares its parse's plugins
-    /// in place of its stored ones, at the position of its first stored one;
-    /// files outside the view keep theirs; a view file that had none stored
-    /// has its plugins appended.
+    /// in place of its stored ones; files outside the view keep theirs; and
+    /// all are in the loader's order, by `file_id` and then declaration,
+    /// whatever order the view lists its files in, including a view file
+    /// that had none stored and sits between two that did.
     #[test]
     fn test_view_plugins_replaces_each_view_files_plugins_in_place() {
         let stored = parse_result_to_plugins(&parse("plugin \"a\"\nplugin \"b\"\n").plugins, 0)
@@ -1383,6 +1387,33 @@ mod tests {
             .collect::<Vec<_>>();
         let main = parse("plugin \"m\"\n");
         let c = parse("plugin \"c\"\n");
+        let between = parse("plugin \"y1\"\nplugin \"y2\"\n");
+        let late = parse("plugin \"z\"\n");
+        let stored_gap = parse_result_to_plugins(&parse("plugin \"a\"\n").plugins, 0)
+            .into_iter()
+            .chain(parse_result_to_plugins(&parse("plugin \"x\"\n").plugins, 2))
+            .collect::<Vec<_>>();
+        let gap_names = |view: &[(u16, &ParseResult)]| {
+            view_plugins(&stored_gap, view)
+                .into_iter()
+                .map(|p| (p.name, p.file_id))
+                .collect::<Vec<_>>()
+        };
+        let expected: [(String, usize); 5] = [
+            ("m".into(), 0),
+            ("y1".into(), 1),
+            ("y2".into(), 1),
+            ("x".into(), 2),
+            ("z".into(), 3),
+        ];
+        assert_eq!(
+            gap_names(&[(3, &late), (1, &between), (0, &main)]),
+            expected
+        );
+        assert_eq!(
+            gap_names(&[(0, &main), (1, &between), (3, &late)]),
+            expected
+        );
         let names = |plugins: Vec<Plugin>| {
             plugins
                 .into_iter()

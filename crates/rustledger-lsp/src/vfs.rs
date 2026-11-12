@@ -20,11 +20,15 @@ pub struct Document {
     version: i32,
     /// Cached parse result (lazily computed, invalidated on change).
     parse_cache: Option<Arc<ParseResult>>,
-    /// The latest parse of this buffer that had no parse error, if it has had
-    /// one since it was opened. Kept across edits (unlike `parse_cache`) and
-    /// dropped with the document on close: it is what the buffer contributes
-    /// to the view other files are validated against while its current text
-    /// is broken (see `MainLoopState::publish_diagnostics`).
+    /// The latest parse of this buffer that a diagnostics pass saw with no
+    /// parse error, if one has since it was opened. Recorded only by
+    /// [`Self::clean_view_parse`], never by [`Self::parse_result`], so a
+    /// request handler (hover, semantic tokens, workspace symbols) that
+    /// happens to parse a clean text between two passes does not change it.
+    /// Kept across edits (unlike `parse_cache`) and dropped with the document
+    /// on close: it is what the buffer contributes to the view other files
+    /// are validated against while its current text is broken (see
+    /// `MainLoopState::publish_diagnostics`).
     last_clean_parse: Option<Arc<ParseResult>>,
 }
 
@@ -53,21 +57,22 @@ impl Document {
     pub fn parse_result(&mut self) -> Arc<ParseResult> {
         if self.parse_cache.is_none() {
             let text = self.content.to_string();
-            let parsed = Arc::new(parse(&text));
-            if parsed.errors.is_empty() {
-                self.last_clean_parse = Some(Arc::clone(&parsed));
-            }
-            self.parse_cache = Some(parsed);
+            self.parse_cache = Some(Arc::new(parse(&text)));
         }
         self.parse_cache.clone().unwrap()
     }
 
     /// What this buffer contributes to the clean view: its current parse if
-    /// that has no error, else the latest one that had none, else `None` (the
-    /// buffer has not parsed cleanly since it was opened).
+    /// that has no error (recorded then as its last clean parse), else the
+    /// last clean parse recorded here, else `None`.
+    ///
+    /// Only diagnostics passes call this, so a broken buffer's part of the
+    /// clean view is the last text a diagnostics pass saw parse cleanly, and
+    /// does not depend on the timing of requests between passes.
     pub fn clean_view_parse(&mut self) -> Option<Arc<ParseResult>> {
         let current = self.parse_result();
         if current.errors.is_empty() {
+            self.last_clean_parse = Some(Arc::clone(&current));
             Some(current)
         } else {
             self.last_clean_parse.clone()
@@ -227,5 +232,45 @@ mod tests {
         vfs.close(&path);
         vfs.open(path.clone(), "garbage\n".to_string(), 5);
         assert_eq!(clean_view(&mut vfs), None);
+    }
+
+    /// A request handler's parse (`parse_result`, as hover or semantic
+    /// tokens call it) of a clean text between two diagnostics passes does
+    /// not become the clean view: only a pass (`clean_view_parse`) records
+    /// one, so the clean view does not depend on request timing.
+    #[test]
+    fn test_clean_view_parse_ignores_clean_texts_only_a_request_parsed() {
+        let mut vfs = Vfs::new();
+        let path = PathBuf::from("/test.beancount");
+        let clean_view = |vfs: &mut Vfs| {
+            vfs.get_mut(&path)
+                .and_then(Document::clean_view_parse)
+                .map(|p| p.directives.len())
+        };
+
+        // A pass sees one clean `open`.
+        vfs.open(path.clone(), "2024-01-01 open Assets:A\n".to_string(), 1);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // Within the debounce window: a clean text with two `open`s that
+        // only a request parses, then a broken one the next pass sees.
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n".to_string(),
+            2,
+        );
+        let requested = vfs
+            .get_document_data(&path)
+            .map(|(_, p)| p.directives.len());
+        assert_eq!(requested, Some(2));
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\ngarbage\n".to_string(),
+            3,
+        );
+
+        // The pass falls back to the text the previous PASS saw, as it
+        // would had the request not run.
+        assert_eq!(clean_view(&mut vfs), Some(1));
     }
 }

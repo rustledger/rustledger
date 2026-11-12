@@ -2300,12 +2300,14 @@ impl MainLoopState {
     ///
     /// - The CLEAN view: the ledger as loaded, with each open buffer's
     ///   clean-view parse overlaid, directives AND plugin lines: its current
-    ///   parse when that has no error, else the latest parse of it that had
-    ///   none ([`crate::vfs::Document::clean_view_parse`]). A buffer that has
-    ///   not parsed cleanly since it was opened is not overlaid, and its file
-    ///   is as loaded. Every file other than the one being published (the
-    ///   unopened includes that are cross-published from here, and the other
-    ///   open buffers' own passes) is validated against this view.
+    ///   parse when that has no error, else the last text of it a diagnostics
+    ///   pass saw parse cleanly ([`crate::vfs::Document::clean_view_parse`]).
+    ///   A buffer no pass has seen parse cleanly since it was opened is not
+    ///   overlaid, and its file is as loaded. The plugins run in the order
+    ///   `check` runs them for those texts, by file and then declaration.
+    ///   Every file other than the one being published (the unopened
+    ///   includes that are cross-published from here, and the other open
+    ///   buffers' own passes) is validated against this view.
     /// - The OWN view of the published buffer: the clean view with this
     ///   buffer's current text in its place, parse error or not, and the
     ///   plugins that text declares. Its diagnostics are what `rledger check`
@@ -4356,6 +4358,175 @@ mod tests {
             !for_b[0].iter().any(|(code, _)| code == "E1001"),
             "with main's plugin: {published:?}"
         );
+    }
+
+    const RENAME_ACCOUNTS: &str = "beancount_reds_plugins.rename_accounts.rename_accounts";
+
+    /// A `rename_accounts` line renaming `from` to `to`. Two of them chain
+    /// (`A -> B`, `B -> C`) only when they run in that order, so they pin the
+    /// order a view's plugins run in.
+    fn rename_line(from: &str, to: &str) -> String {
+        format!("plugin \"{RENAME_ACCOUNTS}\" \"{{'{from}': '{to}'}}\"\n")
+    }
+
+    /// A transaction on `Expenses:A`, which only the chain `A -> B -> C`
+    /// takes to the opened `Expenses:C`.
+    const RENAMED_TXN: &str = "2024-01-02 * \"x\"\n  Expenses:A  1 USD\n  Assets:Cash  -1 USD\n";
+
+    /// What `rledger check` reports for `target` once `files` (name, text;
+    /// `main.beancount` is the root) are saved, as `(code, 0-based line)`,
+    /// sorted. It is the reference the LSP's publishes are compared with.
+    fn check_codes(files: &[(&str, &str)], target: &str) -> Vec<(String, u32)> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        for (name, text) in files {
+            std::fs::write(dir.join(name), text).expect("write ledger file");
+        }
+        let ledger = rustledger_loader::load(
+            &dir.join("main.beancount"),
+            &rustledger_loader::LoadOptions::default(),
+        )
+        .expect("load");
+        let mut codes: Vec<(String, u32)> = ledger
+            .errors
+            .iter()
+            .filter_map(|e| {
+                let loc = e.location.as_ref()?;
+                (loc.file.file_name()? == target).then(|| {
+                    let line = u32::try_from(loc.line).expect("line fits u32") - 1;
+                    (e.code.clone(), line)
+                })
+            })
+            .collect();
+        codes.sort();
+        codes
+    }
+
+    fn sorted(mut codes: Vec<(String, u32)>) -> Vec<(String, u32)> {
+        codes.sort();
+        codes
+    }
+
+    /// Review round 4 of #2949: a buffer's plugins run where `check` runs
+    /// them, by file and then declaration, not after those of the files the
+    /// ledger loaded. b declares `B -> C`; main's unsaved `A -> B` runs
+    /// first, as it does in `check` once main is saved, so b's `Expenses:A`
+    /// ends up as the opened `Expenses:C`.
+    #[test]
+    fn a_buffers_plugins_run_in_checks_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        let main_on_disk = "include \"b.beancount\"\n";
+        let b_text = format!(
+            "{}2024-01-01 open Expenses:C\n2024-01-01 open Assets:Cash\n{RENAMED_TXN}",
+            rename_line("Expenses:B", "Expenses:C")
+        );
+        std::fs::write(&main, main_on_disk).expect("write main");
+        std::fs::write(&b, &b_text).expect("write b");
+
+        let on_disk = check_codes(
+            &[("main.beancount", main_on_disk), ("b.beancount", &b_text)],
+            "b.beancount",
+        );
+        assert_eq!(on_disk, [("E1001".to_string(), 3)], "Expenses:A unopened");
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_on_disk);
+        let published = drain_published(&receiver);
+        let shown = sorted(shown_for(&published, &b, vec![]));
+        assert_eq!(shown, on_disk, "{published:?}");
+
+        let main_unsaved = format!("{}{main_on_disk}", rename_line("Expenses:A", "Expenses:B"));
+        change_doc(&mut state, &main, 2, &main_unsaved);
+        let published = drain_published(&receiver);
+        let saved = check_codes(
+            &[("main.beancount", &main_unsaved), ("b.beancount", &b_text)],
+            "b.beancount",
+        );
+        assert_eq!(saved, [], "A -> B -> C opens it");
+        assert_eq!(
+            sorted(shown_for(&published, &b, shown)),
+            saved,
+            "the LSP agrees with check on the saved texts: {published:?}"
+        );
+    }
+
+    /// Review round 4 of #2949: the clean view's plugins run in `check`'s
+    /// order whichever buffer's pass computes it. Main's unsaved `A -> B` and
+    /// c's unsaved `B -> C` are both buffers' (neither file has a stored
+    /// plugin); editing either buffer, and one revalidation of both, publish
+    /// b as `check` reports it once both are saved.
+    #[test]
+    fn the_clean_views_plugin_order_does_not_depend_on_the_published_buffer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        let c = dir.join("c.beancount");
+        let main_on_disk = "include \"b.beancount\"\ninclude \"c.beancount\"\n";
+        let b_text =
+            format!("2024-01-01 open Expenses:C\n2024-01-01 open Assets:Cash\n{RENAMED_TXN}");
+        let c_on_disk = "2024-01-01 open Assets:Other\n";
+        std::fs::write(&main, main_on_disk).expect("write main");
+        std::fs::write(&b, &b_text).expect("write b");
+        std::fs::write(&c, c_on_disk).expect("write c");
+
+        let main_unsaved = format!("{}{main_on_disk}", rename_line("Expenses:A", "Expenses:B"));
+        let c_unsaved = format!("{}{c_on_disk}", rename_line("Expenses:B", "Expenses:C"));
+        let saved = check_codes(
+            &[
+                ("main.beancount", &main_unsaved),
+                ("b.beancount", &b_text),
+                ("c.beancount", &c_unsaved),
+            ],
+            "b.beancount",
+        );
+        assert_eq!(saved, [], "A -> B -> C opens it");
+        let on_disk = check_codes(
+            &[
+                ("main.beancount", main_on_disk),
+                ("b.beancount", &b_text),
+                ("c.beancount", c_on_disk),
+            ],
+            "b.beancount",
+        );
+        assert_eq!(on_disk, [("E1001".to_string(), 2)], "Expenses:A unopened");
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_on_disk);
+        open_doc(&mut state, &c, c_on_disk);
+        change_doc(&mut state, &main, 2, &main_unsaved);
+        change_doc(&mut state, &c, 2, &c_unsaved);
+        let published = drain_published(&receiver);
+        let mut shown = sorted(shown_for(&published, &b, on_disk));
+        assert_eq!(shown, saved, "{published:?}");
+
+        for (path, text) in [(&c, &c_unsaved), (&main, &main_unsaved)] {
+            change_doc(&mut state, path, 3, text);
+            let published = drain_published(&receiver);
+            shown = sorted(shown_for(&published, &b, shown));
+            assert_eq!(
+                shown,
+                saved,
+                "editing {} publishes b as check does: {published:?}",
+                path.display()
+            );
+        }
+
+        state.revalidate_open_documents();
+        let published = drain_published(&receiver);
+        let b_uri = crate::path_to_uri(&b).expect("file URI");
+        let for_b = published
+            .iter()
+            .filter(|(u, _)| u.as_str() == b_uri.as_str()) // ratchet-allow: uri-string-eq comparing what was sent on the wire
+            .map(|(_, codes)| sorted(codes.clone()));
+        for codes in for_b {
+            assert_eq!(codes, saved, "every publish of b agrees: {published:?}");
+        }
     }
 
     /// Closing a buffer republishes the OTHER open ledger buffers too: b's

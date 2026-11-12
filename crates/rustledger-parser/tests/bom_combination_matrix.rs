@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use rustledger_parser::cst::parse_red_only;
-use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse};
+use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse, parse_date};
 
 const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
 const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
@@ -232,21 +232,21 @@ fn indented(line: &str) -> bool {
     strip_boms(line).starts_with(is_blank)
 }
 
+/// A date alone on its line, before any blanks or a CRLF's `\r` (which
+/// beancount's lexer skips): a `DATE` token (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`,
+/// so `2024/01/02` and `2024-01-021` too) that is a real calendar date, as
+/// the parser's own `parse_date` decides it. beancount reports an invalid
+/// one (`2024-13-45`) on its own line, rledger too, so no `unexpected EOL`
+/// moves; and it reads a BOM-led date (`<BOM>2024-01-02`) as one invalid
+/// token, which reports nothing on the next line either.
 fn date_alone(line: &str) -> bool {
-    let s = strip_boms(line)
-        .trim_end_matches([' ', '\t', '\r'])
-        .as_bytes();
-    s.len() == 10
-        && s.iter().enumerate().all(|(i, b)| {
-            if i == 4 || i == 7 {
-                *b == b'-'
-            } else {
-                b.is_ascii_digit()
-            }
-        })
+    parse_date(line.trim_end_matches([' ', '\t', '\r'])).is_ok()
 }
 
 fn words(line: &str) -> impl Iterator<Item = &str> {
+    // The empty-word filter changes no result: the only caller,
+    // `lone_capital_glued`, asks for a word's first character, which an
+    // empty word does not have.
     line.split(is_blank).filter(|w| !w.is_empty())
 }
 
@@ -325,7 +325,11 @@ fn eof_error_on_last_line(lines: &[&str], l: usize, counts: &Counts) -> bool {
     // `bc[eof] > 0` cannot change the result: with the other three holding
     // and `bc[eof]` 0, line `eof` counts 0 on both sides and line `last`
     // counts `bc[last]` on both, so `l` is a line with `b == r`, which the
-    // only caller, `check_row`, skips.
+    // only caller, `check_row`, skips. Nor can `l >= last` / `l >= eof`
+    // for either `==` of the first test: no line past `eof` has a count on
+    // either side (an error is at most at the end of the input, which is on
+    // line `eof`, after the final `\n`), so none is asked.
+    // `rl[eof] <= 0` is `rl[eof] == 0` for a count.
     (l == last || l == eof)
         && get(&counts.bc, eof) > 0
         && get(&counts.rl, eof) == 0
@@ -389,7 +393,9 @@ impl BomRoles {
         }
     }
 
-    /// Whether a BOM-led account starts in `span`.
+    /// Whether a BOM-led account starts in `span`. Asking for its last byte
+    /// instead would change nothing: an `ACCOUNT` token holds no `\n`, so it
+    /// starts and ends on one line.
     fn account_in(&self, span: &std::ops::Range<usize>) -> bool {
         self.accounts.iter().any(|a| span.contains(&a.start))
     }
@@ -407,6 +413,10 @@ fn ordinary_accounts(src: &str, roles: &BomRoles) -> String {
     let mut at = 0;
     for account in &roles.accounts {
         out.push_str(&src[at..account.start]);
+        // Any other valid account name (`Assets:Y`, `Equity:Z`) gives the
+        // same counts: both lexers read it as one `ACCOUNT`, the parser
+        // checks an account's name only for validity, and a parse count
+        // never depends on whether the account is open.
         out.push_str("Assets:X");
         at = account.end;
     }
@@ -430,6 +440,10 @@ fn ordinary_inner_boms(src: &str, roles: &BomRoles, span: &std::ops::Range<usize
     // rewrite to the line, as the doc says.
     for &i in roles.inner.iter().filter(|i| span.contains(i)) {
         out.push_str(&src[at..i]);
+        // A `$`, which starts no token on either side, and not a letter: an
+        // `x` makes `t<BOM>n` the keyword `txn`, a token rledger reads on
+        // (`$n0 t<BOM>n`, pinned by
+        // `test_cause_inner_bom_under_line_error_rewrites_to_no_token`).
         out.push('$');
         at = i + BOM.len_utf8();
     }
@@ -478,7 +492,12 @@ fn line_span(input: &str, l: usize) -> std::ops::Range<usize> {
         if k + 1 == l {
             // Taking the `\n` in as well would change nothing: the span is
             // only asked whether an account or an inner BOM starts in it,
-            // and neither starts at a `\n`.
+            // and neither starts at a `\n`. `k + 1 >= l` would change only
+            // line 0's span (the first line's for the end of the input),
+            // which nothing reads: `cause` names line 0 (`l == 0`, or the
+            // early `like-main-without-bom`, which reads no span) before
+            // anything reads it, and `holds` reads a span only for a cause
+            // `cause` never gives line 0.
             return start..start + line.len();
         }
         start += line.len() + 1;
@@ -622,15 +641,22 @@ fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
                 share
             }
             HASH_BANG => {
-                // On the table's rows this check changes nothing: with no
-                // mid-line `#!` / `#+` on the line, the analog leaves it as
-                // it was, so `after` is `r` and the table's hash-bang count
-                // is `b`, a zero share, turned away below.
+                // Needed: the analog rewrites every `#!` / `#+` of the input
+                // past a line's first character, not only this line's, and
+                // also one after a line-start BOM, which `mid_line_hash_bang`
+                // does not count (`<BOM>#!x $y`: rledger 1, the analog 2).
+                // So a line with no mid-line `#!` / `#+` can still have a
+                // share, from another line's rewrite or from beancount's
+                // count for the analog, and would be named for a hash-bang
+                // it does not hold. Pinned on made-up counts by
+                // `test_cause_glued_hash_bang_needs_a_hash_bang_on_the_line`.
                 if !mid_line_hash_bang(f.text) {
                     return false;
                 }
                 src = hash_bang_analog(&src);
                 let after = count(&src);
+                // `b` is still `f.bc` here, so either can be read: only this
+                // arm sets it, and no cause names `HASH_BANG` twice.
                 let share = (signed(r) - signed(b)) - (signed(after) - signed(f.hash_bang_bc));
                 // Read by no later part today (`HASH_BANG` is the last part
                 // of every cause that names it); kept so that a part after
@@ -638,19 +664,26 @@ fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
                 (r, b) = (after, f.hash_bang_bc);
                 share
             }
-            CONSTRUCT => signed(f.analog_main) - signed(f.analog_bc),
+            CONSTRUCT => {
+                // A construct error only ever adds one. `share <= 0` would
+                // change nothing: a zero share is turned away below.
+                let share = signed(f.analog_main) - signed(f.analog_bc);
+                if share < 0 {
+                    return false;
+                }
+                share
+            }
             // Every caller passes parts of the three above: `cause` its own
             // lists, `holds` only after checking each part.
             _ => unreachable!("not a part of a composite cause: {part}"),
         };
-        // Every part's share is not zero, and a construct error only ever
-        // adds one. The zero check is the only one that turns away a zero
+        // Every part's share is not zero. The zero check is the only one that turns away a zero
         // `GLUED` share (its arm leaves zero here), which the matrix test
         // needs: without it a line the rewrite leaves as it was is named
         // `GLUED_HASH_BANG`. It is also what makes the order of `GLUED` and
         // `GLUED_HASH_BANG` in `cause` change no result (see the comment
         // there).
-        if share == 0 || (*part == CONSTRUCT && share < 0) {
+        if share == 0 {
             return false;
         }
         shares += share;
@@ -685,6 +718,9 @@ fn cause(
 ) -> Option<&'static str> {
     let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
     let (b, r, m) = (get(&counts.bc, l), get(&counts.rl, l), get(&counts.main, l));
+    // Every `r > b` and `r < b` below could be `r >= b` and `r <= b`: the
+    // only caller, `check_row`, skips `b == r`, and no test asks such a
+    // line. (`l == 0` could be `l <= 0` too, for a line number.)
     let line = |k: usize| {
         k.checked_sub(1)
             .and_then(|i| lines.get(i))
@@ -863,7 +899,9 @@ fn cause(
             "bom-account-under-line-diagnostic"
         } else if r < b
             // No BOM is stripped first: a BOM-led `<BOM>poptag` is one
-            // invalid token to beancount, which reports no pop for it.
+            // invalid token to beancount, which reports no pop for it
+            // (`2024-01-02 open` then `<BOM>poptag #t`, pinned by
+            // `test_cause_pop_without_push_needs_fewer_errors`).
             && ["poptag", "popmeta"].iter().any(|p| text.starts_with(p))
         {
             // A pop of a tag or key not pushed (its push failed): beancount
@@ -1216,49 +1254,50 @@ const fn signed(n: usize) -> i64 {
 
 /// Whether an accepted further-than-main line holds for its cause.
 fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
-    if a.cause == "like-main-without-bom" {
-        return w.analog_bc == w.bc && w.analog_main == w.rl;
+    match a.cause {
+        "like-main-without-bom" => w.analog_bc == w.bc && w.analog_main == w.rl,
+        "inner-bom-under-line-error" => w.facts().inner_boms_are_the_difference(),
+        "bom-account-under-line-diagnostic" => w.facts().account_grammar_error_is_the_difference(),
+        "one-diagnostic-per-line" => w.facts().later_grammar_is_the_difference(),
+        "invalid-account-after-invalid-token" => {
+            alone_counts(a, w).is_some_and(|(alone, bc_alone)| {
+                let (off_alone, off_here) = (
+                    signed(alone) - signed(bc_alone),
+                    signed(w.rl) - signed(w.bc),
+                );
+                // Off the same way alone, and at least as far; or counted
+                // the same alone by rledger, with beancount reporting less
+                // here only because of its recovery after the line before.
+                // `w.bc <= bc_alone` would change nothing: with `alone ==
+                // w.rl` and `w.bc == bc_alone` the line is off as far alone
+                // as here, which the first test takes.
+                (off_alone.signum() == off_here.signum() && off_alone.abs() >= off_here.abs())
+                    || (alone == w.rl && w.bc < bc_alone)
+            })
+        }
+        cause if RECOVERY_CAUSES.contains(&cause) => {
+            alone_counts(a, w).is_some_and(|(alone, bc_alone)| alone == bc_alone)
+        }
+        cause
+            if cause
+                .split('&')
+                .all(|p| [GLUED, HASH_BANG, CONSTRUCT].contains(&p)) =>
+        {
+            parts_hold(&cause.split('&').collect::<Vec<_>>(), &w.facts())
+        }
+        _ => false,
     }
-    if a.cause == "inner-bom-under-line-error" {
-        return w.facts().inner_boms_are_the_difference();
-    }
-    if a.cause == "bom-account-under-line-diagnostic" {
-        return w.facts().account_grammar_error_is_the_difference();
-    }
-    if a.cause == "one-diagnostic-per-line" {
-        return w.facts().later_grammar_is_the_difference();
-    }
-    let parts: Vec<&str> = a.cause.split('&').collect();
-    if parts
-        .iter()
-        .all(|p| [GLUED, HASH_BANG, CONSTRUCT].contains(p))
-    {
-        return parts_hold(&parts, &w.facts());
-    }
-    let Some(bc_alone) = a.standalone else {
-        return false;
-    };
+}
+
+/// For a cause checked by the line alone: rledger's count for the line
+/// alone and the accepted standalone beancount count, or `None` when the
+/// accepted line gives none or the table's standalone count is another.
+fn alone_counts(a: &Accepted<'_>, w: &Worse) -> Option<(usize, usize)> {
+    let bc_alone = a.standalone?;
     if w.bc_alone.is_some_and(|table| table != bc_alone) {
-        return false;
+        return None;
     }
-    let alone = standalone_count(&w.text);
-    if RECOVERY_CAUSES.contains(&a.cause) {
-        return alone == bc_alone;
-    }
-    if a.cause == "invalid-account-after-invalid-token" {
-        let (off_alone, off_here) = (
-            signed(alone) - signed(bc_alone),
-            signed(w.rl) - signed(w.bc),
-        );
-        // Off the same way alone, and at least as far; or counted the same
-        // alone by rledger, with beancount reporting less here only because
-        // of its recovery after the line before.
-        let off_as_alone = (off_alone.signum() == off_here.signum()
-            && off_alone.abs() >= off_here.abs())
-            || (alone == w.rl && w.bc < bc_alone);
-        return off_as_alone;
-    }
-    false
+    Some((standalone_count(&w.text), bc_alone))
 }
 
 /// Check every line further from beancount than main against the accepted
@@ -1739,6 +1778,36 @@ fn table_row(tail: &str) -> (String, Counts) {
     (input, counts)
 }
 
+/// The row `scripts/bom-combination-matrix.py` would write for an input the
+/// table does not hold, its columns recorded by hand from bean-check 3.2.3
+/// and main's `parse_error_lines`, so its counts are real: `tail` is the
+/// input after the head, escaped as the table writes it, and `columns` the
+/// nine columns after it (beancount, main, the BOM-free analog's beancount
+/// and main, the hash-bang analog's beancount, beancount alone, the account
+/// and inner BOM roles, the later grammar errors), blank-separated, `-` for
+/// an empty one. rledger's counts are its own, as for a table row.
+fn recorded_row(tail: &str, columns: &str) -> (String, Counts) {
+    let columns: Vec<&str> = columns
+        .split(' ')
+        .map(|c| if c == "-" { "" } else { c })
+        .collect();
+    assert_eq!(
+        columns.len(),
+        9,
+        "nine columns after the input: {columns:?}"
+    );
+    let (_, input, counts) = row_counts(&format!("{HEAD}{tail}\t{}", columns.join("\t")));
+    (input, counts)
+}
+
+/// `cause` of line `l` of the recorded row `tail` / `columns`
+/// (`recorded_row`).
+fn recorded_cause(tail: &str, columns: &str, l: usize) -> Option<&'static str> {
+    let (input, counts) = recorded_row(tail, columns);
+    let lines: Vec<&str> = input.split('\n').collect();
+    cause(&lines, l, &counts, &input, "recorded row, in no data file")
+}
+
 /// `counts` with beancount's lexer reading a BOM-led account where line 3,
 /// `text`, has its `Assets:A` (so the rewrite to `Assets:X` keeps the
 /// line's count).
@@ -1798,12 +1867,14 @@ fn test_cause_listed_exception_needs_its_reason_counts() {
         cause(&lines, l, &counts, &input, tail),
         Some("listed-exception")
     );
-    counts.main.insert(l, m + 1);
-    assert_eq!(
-        cause(&lines, l, &counts, &input, tail),
-        None,
-        "main's count is no longer the reason's: a stale reason"
-    );
+    for main in [m + 1, m - 1] {
+        counts.main.insert(l, main);
+        assert_eq!(
+            cause(&lines, l, &counts, &input, tail),
+            None,
+            "main's count is {main}, no longer the reason's: a stale reason"
+        );
+    }
 }
 
 /// The glued-BOM causes need a BOM-led account on the line: with none,
@@ -1923,6 +1994,13 @@ fn test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic
         None,
         "no BOM inside an invalid token on the line, on made-up counts"
     );
+    let mut on_line1 = line3_counts(1, 0, 1, 1);
+    on_line1.roles.inner.push(1);
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q", &on_line1),
+        None,
+        "an inner BOM on another line only, on made-up counts"
+    );
     assert_eq!(
         cause_with(&|c| {
             c.rl_bom.remove(&3);
@@ -1960,6 +2038,29 @@ fn test_cause_brace_hash_before_tag_needs_more_errors() {
         None,
         "no tag character after the `{{#`"
     );
+}
+
+/// `brace-hash-before-tag` takes each character a tag starts with
+/// (beancount's `TAG`, `#[A-Za-z0-9-_/.]+`). Real counts (`recorded_row`):
+/// beancount 1 and rledger 2 for `"x" {#_`, `"x" {#.` and `"x" {#a`. rledger
+/// counts `"x" {#-`, `"x" {#/` and `"x" {#1` 1, as beancount does, so their
+/// counts here are made up.
+#[test]
+fn test_cause_brace_hash_before_tag_takes_each_tag_character() {
+    for tail in ["\"x\" {#_\\n", "\"x\" {#.\\n", "\"x\" {#a\\n"] {
+        assert_eq!(
+            recorded_cause(tail, "3:1 3:2 3:1 3:2 3:1 3:1 - - -", 3),
+            Some("brace-hash-before-tag"),
+            "{tail}"
+        );
+    }
+    for text in ["\"x\" {#-", "\"x\" {#/", "\"x\" {#1"] {
+        assert_eq!(
+            line3_cause(text, &line3_counts(1, 2, 1, 0)),
+            Some("brace-hash-before-tag"),
+            "{text}"
+        );
+    }
 }
 
 /// `line-start-bom-before-comment` explains an error fewer than beancount's
@@ -2002,6 +2103,68 @@ fn test_cause_line_start_bom_before_comment_needs_a_bom() {
         made_up_cause("2024-01-02 open\n\u{FEFF};c", 4, &with_open(2, 1, 1)),
         Some("line-start-bom-before-comment")
     );
+    // A BOM later on the line is not one at its start: `;c <BOM>` after the
+    // open (real counts, `recorded_row`: beancount 1 on line 4, rledger 0)
+    // is main's old gap, the BOM-free analog counted alike on both sides.
+    assert_eq!(
+        recorded_cause(
+            "2024-01-02 open\\n;c <BOM>\\n",
+            "4:1 3:1 4:1 3:1 4:1 3:0,4:0 - - -",
+            4
+        ),
+        Some("like-main-without-bom"),
+        "a BOM later on the skipped line"
+    );
+}
+
+/// `line-start-bom-before-comment` takes each line start beancount skips,
+/// after every BOM the line starts with. Real counts (`recorded_row`):
+/// beancount 2 for `<BOM>:x $y` and the like (its invalid token through
+/// the line start, and `$y`), 3 for `<BOM># x $y`, rledger 1 (its `P0026`)
+/// on each. Made-up counts for the rest: `<BOM>*x` and `<BOM>;` (a `;`
+/// needs nothing after it) are the cause; a `*` or `#` with nothing after it
+/// is no skipped line start, nor is a `#` before a tag character (beancount's
+/// `TAG`, `#[A-Za-z0-9-_/.]+`); rledger counts each of these 1, as
+/// beancount does.
+#[test]
+fn test_cause_line_start_bom_before_comment_takes_each_skipped_start() {
+    for tail in [
+        "<BOM>:x $y\\n",
+        "<BOM>&x $y\\n",
+        "<BOM>?x $y\\n",
+        "<BOM>!x $y\\n",
+        "<BOM>%x $y\\n",
+        "<BOM>;c $y\\n",
+        "<BOM><BOM>;c $y\\n",
+    ] {
+        assert_eq!(
+            recorded_cause(tail, "3:2 3:1 3:2 3:2 3:2 3:2 - - -", 3),
+            Some("line-start-bom-before-comment"),
+            "{tail}"
+        );
+    }
+    assert_eq!(
+        recorded_cause("<BOM># x $y\\n", "3:3 3:1 3:3 3:3 3:3 3:3 - - -", 3),
+        Some("line-start-bom-before-comment")
+    );
+    let counts = line3_counts(2, 1, 0, 1);
+    for text in ["\u{FEFF}*x", "\u{FEFF};"] {
+        assert_eq!(
+            line3_cause(text, &counts),
+            Some("line-start-bom-before-comment"),
+            "{text:?}"
+        );
+    }
+    for text in [
+        "\u{FEFF}*",
+        "\u{FEFF}#",
+        "\u{FEFF}#_",
+        "\u{FEFF}#/",
+        "\u{FEFF}#.",
+        "\u{FEFF}#1",
+    ] {
+        assert_eq!(line3_cause(text, &counts), None, "{text:?}");
+    }
 }
 
 /// `indented-line-after-error` counts a line of the block whose first
@@ -2062,6 +2225,19 @@ fn test_cause_pop_without_push_needs_fewer_errors() {
         line3_cause("2024-01-02 * \"poptag\"", &line3_counts(2, 1, 1, 0)),
         Some("bom-free-line-as-on-main"),
         "a `poptag` inside the line"
+    );
+    // A BOM-led `<BOM>poptag` is one invalid token to beancount, no pop.
+    // Real counts (`recorded_row`): after `2024-01-02 open`, beancount 2 on
+    // line 4 (the open's `unexpected EOL` and the token), rledger 1 there
+    // and 1 on the open; main's old gap, as its BOM-free analog shows.
+    assert_eq!(
+        recorded_cause(
+            "2024-01-02 open\\n<BOM>poptag #t\\n",
+            "4:2 3:1,4:1 4:2 3:1,4:1 4:2 3:0,4:1 - - -",
+            4
+        ),
+        Some("like-main-without-bom"),
+        "a BOM-led `poptag`"
     );
 }
 
@@ -2189,24 +2365,37 @@ fn test_cause_glued_in_error_line_needs_a_non_bom_error_in_place() {
 
 /// `eof-error-on-last-line` needs each of its conditions: the line is the
 /// last or the one after it, beancount reports errors after the last line,
-/// rledger none there, and the two lines' counts agree. The counts are made
-/// up (main counts nothing), on one line (`2024-01-02 * "x"`, line 3, the
-/// last) or two (line 4 the last).
+/// rledger none there, and the two lines' counts agree, exactly. The counts
+/// are made up (main counts nothing, but where said), on one line
+/// (`2024-01-02 * "x"`, line 3, the last) or two (line 4 the last).
 #[test]
 fn test_cause_eof_error_on_last_line_needs_each_condition() {
     let one = "2024-01-02 * \"x\"";
     let two = "2024-01-02 * \"x\"\n2024-01-02 * \"y\"";
-    let with = |bc: &[(usize, usize)], rl: &[(usize, usize)]| {
+    let with_main = |bc: &[(usize, usize)], rl: &[(usize, usize)], main: &[(usize, usize)]| {
         let mut counts = line3_counts(0, 0, 0, 0);
         counts.bc = bc.iter().copied().collect();
         counts.rl = rl.iter().copied().collect();
-        counts.main = BTreeMap::new();
+        counts.main = main.iter().copied().collect();
         counts.rl_bom = BTreeMap::new();
         counts
     };
+    let with = |bc: &[(usize, usize)], rl: &[(usize, usize)]| with_main(bc, rl, &[]);
     assert_eq!(
         made_up_cause(one, 3, &with(&[(4, 1)], &[(3, 1)])),
         Some("eof-error-on-last-line")
+    );
+    assert_eq!(
+        made_up_cause(one, 3, &with(&[(3, 1), (4, 1)], &[(3, 2)])),
+        Some("eof-error-on-last-line"),
+        "beancount's errors on the last line count in the sum too"
+    );
+    // Main counts the line after the last 1, so the line is no BOM-free line
+    // counted as on main either.
+    assert_eq!(
+        made_up_cause(one, 4, &with_main(&[(4, 1)], &[], &[(4, 1)])),
+        None,
+        "rledger counts fewer on the last line than beancount's two lines"
     );
     assert_eq!(
         made_up_cause(two, 3, &with(&[(5, 1)], &[(3, 1), (4, 1)])),
@@ -2225,21 +2414,84 @@ fn test_cause_eof_error_on_last_line_needs_each_condition() {
     );
 }
 
-/// `eol-reported-on-next-line` takes a date alone on its line, after any
-/// BOMs it starts with, and only a date: ten characters. rledger counts
-/// `<BOM>2024-01-02` 1 (its `P0026`) and `2024-01-021` 1; the counts here
-/// are made up to reach the rule.
+/// `eol-reported-on-next-line` takes a date alone on its line, as
+/// beancount's lexer reads one, on the date's line and the next. Real counts
+/// (`recorded_row`): beancount reports its `unexpected EOL` on line 4,
+/// rledger on line 3, with a blank, a tab or a CRLF's `\r` after the date,
+/// for a slash date, and for `2024-01-021` (a `DATE` to beancount, January
+/// 21) before another directive, and with two blanks, or a blank and a
+/// `\r`, after the date. Not a date alone, on made-up counts (each counts 1
+/// on its own line on both sides, a BOM-led date as one invalid token to
+/// beancount and as its `P0026` here): a BOM-led date, a date that is no
+/// calendar date, a date with a word after it, and an indented date.
 #[test]
 fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
+    for tail in [
+        "2024-01-02 \\n",
+        "2024-01-02  \\n",
+        "2024-01-02 \\r\\n",
+        "2024-01-02\\t\\n",
+        "2024-01-02\\r\\n",
+        "2024/01/02\\n",
+    ] {
+        for l in [3, 4] {
+            assert_eq!(
+                recorded_cause(tail, "4:1 3:1 4:1 3:1 4:1 3:0 - - -", l),
+                Some("eol-reported-on-next-line"),
+                "{tail} line {l}"
+            );
+        }
+    }
+    for l in [3, 4] {
+        assert_eq!(
+            recorded_cause(
+                "2024-01-021\\n2024-01-03 open Assets:C\\n",
+                "4:1 3:1 4:1 3:1 4:1 3:0,4:0 - - -",
+                l
+            ),
+            Some("eol-reported-on-next-line"),
+            "`2024-01-021` line {l}"
+        );
+    }
+    for text in [
+        "\u{FEFF}2024-01-02",
+        "2024-13-45",
+        "2024-01-02 x",
+        "  2024-01-02",
+    ] {
+        assert_eq!(
+            line3_cause(text, &line3_counts(0, 1, 0, 1)),
+            None,
+            "{text:?} is no date alone"
+        );
+    }
+}
+
+/// A recovery cause is asked first only where beancount's count for the
+/// line alone is known and rledger counts the line alone the same: a line
+/// beancount crashed on alone (no entry) is not taken for one that matches.
+/// Made-up counts: beancount 1 on the date alone (line 3), rledger 1 and
+/// main 1 on the line after it, so the line is both `line-after-error-line`
+/// and `eol-reported-on-next-line`.
+#[test]
+fn test_cause_recovery_first_needs_a_matching_count_alone() {
+    let with_alone = |alone: Option<usize>| {
+        let mut counts = line_counts(4, 0, 1, 1, 0);
+        counts.bc.insert(3, 1);
+        counts.bc_alone = alone.map(|n| (4, n)).into_iter().collect();
+        made_up_cause("2024-01-02\nfoo", 4, &counts)
+    };
+    let alone = standalone_count("foo");
+    assert_eq!(with_alone(Some(alone)), Some("line-after-error-line"));
     assert_eq!(
-        line3_cause("\u{FEFF}2024-01-02", &line3_counts(0, 1, 0, 1)),
+        with_alone(Some(alone + 1)),
         Some("eol-reported-on-next-line"),
-        "a date after a BOM"
+        "beancount counts the line alone differently"
     );
     assert_eq!(
-        line3_cause("2024-01-021", &line3_counts(1, 0, 1, 0)),
-        None,
-        "a date with a digit after it"
+        with_alone(None),
+        Some("eol-reported-on-next-line"),
+        "beancount crashed on the line alone"
     );
 }
 
@@ -2274,6 +2526,375 @@ fn test_cause_invalid_account_after_invalid_token_needs_an_account() {
         None,
         "a word with no `:` is no account"
     );
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q \u{dc}x y:z", &counts()),
+        None,
+        "a `:` in a later word is not the account's"
+    );
+    // More `P0006`s than errors beyond beancount's is still the cause: each
+    // error more is matched by one.
+    let mut more = counts();
+    more.rl_account.insert(3, 2);
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q \u{dc}x:A", &more),
+        Some("invalid-account-after-invalid-token"),
+        "more `P0006`s than the difference"
+    );
+}
+
+/// `one-diagnostic-per-line` needs rledger's count to be beancount's less
+/// exactly the grammar errors beancount reports after the line's first
+/// error: one more or one fewer is not it. Made-up counts: beancount 3,
+/// rledger 2, main 3 on `2024-01-02 * "x" q`, which rledger counts 1.
+#[test]
+fn test_cause_one_diagnostic_per_line_needs_exactly_the_later_errors() {
+    let with_later = |later: usize| {
+        let mut counts = line3_counts(3, 2, 3, 0);
+        counts.later_grammar = BTreeMap::from([(3, later)]);
+        line3_cause("2024-01-02 * \"x\" q", &counts)
+    };
+    assert_eq!(with_later(1), Some("one-diagnostic-per-line"));
+    assert_eq!(
+        with_later(0),
+        None,
+        "fewer later errors than the difference"
+    );
+    assert_eq!(with_later(2), None, "more later errors than the difference");
+}
+
+/// `bom-glued-to-account-in-error-line` needs the `P0026`s to go by exactly
+/// the line's difference, not fewer or more. rledger counts
+/// `2024-01-02 open Assets:A $x $y` 2 (its two invalid tokens), and the
+/// same with `Assets:X`; the `P0026`s, beancount's count and the account
+/// role are made up to reach the rule.
+#[test]
+fn test_cause_glued_in_error_line_needs_exactly_the_difference() {
+    let text = "2024-01-02 open Assets:A $x $y";
+    // One `P0026` goes, against a difference of 2.
+    assert_eq!(
+        line3_cause(text, &with_account_role(line3_counts(0, 2, 0, 1), text)),
+        None,
+        "fewer `P0026`s go than the difference"
+    );
+    // Two go, against a difference of 1.
+    assert_eq!(
+        line3_cause(text, &with_account_role(line3_counts(1, 2, 1, 2), text)),
+        None,
+        "more `P0026`s go than the difference"
+    );
+}
+
+/// `inner-bom-under-line-error`'s rewrite makes each inner BOM a `$`, which
+/// starts no token: a letter could finish a keyword. Real counts
+/// (`recorded_row`): `$n0 t<BOM>n`, beancount 2 (two invalid tokens, the BOM
+/// inside the second), rledger 1 (its `P0026`); rledger counts `$n0 t$n` 2,
+/// but `$n0 txn` 1.
+#[test]
+fn test_cause_inner_bom_under_line_error_rewrites_to_no_token() {
+    assert_eq!(
+        recorded_cause("$n0 t<BOM>n\\n", "3:2 3:1 3:2 3:2 3:2 3:2 - 55 -", 3),
+        Some("inner-bom-under-line-error")
+    );
+}
+
+/// `lone-capital-glued-to-tokens` takes a lone capital glued to each
+/// character the rule lists, after every BOM the word starts with, and not
+/// one glued to a letter or a digit (a currency), a capital alone, or a
+/// lowercase letter. Real counts (`recorded_row`), beancount 1 and rledger
+/// 2: `A%y`, `2024-01-02 A| "x"`, `2024-01-02 * "x" A|` and
+/// `2024-01-02 A" "x"` (the CRLF `\r` is on table rows). For the others
+/// rledger counts as beancount does in every context tried, so their counts
+/// are made up (beancount 1, rledger 2, main 1).
+#[test]
+fn test_cause_lone_capital_glued_to_tokens_takes_each_listed_character() {
+    for tail in [
+        "A%y\\n",
+        "2024-01-02 A| \"x\"\\n",
+        "2024-01-02 * \"x\" A|\\n",
+        "2024-01-02 A\" \"x\"\\n",
+    ] {
+        assert_eq!(
+            recorded_cause(tail, "3:1 3:2 3:1 3:2 3:1 3:1 - - -", 3),
+            Some("lone-capital-glued-to-tokens"),
+            "{tail}"
+        );
+    }
+    let counts = line3_counts(1, 2, 1, 0);
+    for c in "#!&?%*~^,|@{}()\"$:;=\r".chars() {
+        let text = format!("2024-01-02 * \"x\" A{c}y");
+        assert_eq!(
+            line3_cause(&text, &counts),
+            Some("lone-capital-glued-to-tokens"),
+            "{text:?}"
+        );
+    }
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}\u{FEFF}A$", &counts),
+        Some("lone-capital-glued-to-tokens"),
+        "after two BOMs"
+    );
+    for text in [
+        "2024-01-02 * \"x\" AB",
+        "2024-01-02 * \"x\" A1",
+        "2024-01-02 * \"x\" A",
+        "2024-01-02 * \"x\" a$",
+    ] {
+        assert_eq!(line3_cause(text, &counts), None, "{text:?}");
+    }
+}
+
+/// `hash_bang_analog` makes `$` of each `#` before a `!` or `+` that does not
+/// start its line, as the script's analog does (`(?<=[^\n])#(?=[!+])`): one
+/// at the input's start or after a `\n` stays, one after a BOM does not,
+/// and no other character before a `!` or `+` is touched.
+#[test]
+fn test_hash_bang_analog_rewrites_only_past_a_lines_start() {
+    assert_eq!(
+        hash_bang_analog("#!a\nx #!b #+c #d !!g a+h\n#+e\n\u{FEFF}#!f"),
+        "#!a\nx $!b $+c #d !!g a+h\n#+e\n\u{FEFF}$!f"
+    );
+}
+
+/// `is_blank` takes a space or a tab, nothing else (not a `\r`, nor any
+/// other control character below the space).
+#[test]
+fn test_is_blank_takes_a_space_or_a_tab() {
+    let blanks: Vec<char> = ('\0'..='~').filter(|&c| is_blank(c)).collect();
+    assert_eq!(blanks, ['\t', ' ']);
+}
+
+/// `rledger_lines` puts an unclosed `pushtag` or `pushmeta` on line 0, as
+/// the parity harness does: beancount reports it at the end of the file.
+#[test]
+fn test_rledger_lines_puts_an_unclosed_push_on_line_zero() {
+    for src in ["pushtag #t\n", "pushmeta kk: \"v\"\n"] {
+        assert_eq!(rledger_lines(src).all, BTreeMap::from([(0, 1)]), "{src:?}");
+    }
+}
+
+/// `bom-glued-to-account&mid-line-hash-bang` needs a mid-line `#!` / `#+` on
+/// the line: with none, a hash-bang share from beancount's count for the
+/// analog alone does not make the cause. rledger counts
+/// `2024-01-02 open Assets:A <BOM>q` 1, and 1 with `Assets:X`; the other
+/// counts (rledger 2 with one `P0026`, a glued share of 1; beancount 0, and
+/// 1 for the hash-bang analog, a share of 1) and the account role are made
+/// up, so the shares add up to the difference.
+#[test]
+fn test_cause_glued_hash_bang_needs_a_hash_bang_on_the_line() {
+    let text = "2024-01-02 open Assets:A \u{FEFF}q";
+    let mut counts = with_account_role(line3_counts(0, 2, 0, 1), text);
+    counts.hash_bang_bc = BTreeMap::from([(3, 1)]);
+    assert_eq!(line3_cause(text, &counts), None);
+}
+
+/// `mid-line-hash-bang` takes a `#!` / `#+` past the line's first column even
+/// where the line also starts with one. Made-up counts (beancount 1,
+/// rledger 2, main 1).
+#[test]
+fn test_cause_mid_line_hash_bang_sees_one_after_a_line_start_one() {
+    assert_eq!(
+        line3_cause("#!x #!y", &line3_counts(1, 2, 1, 0)),
+        Some(HASH_BANG)
+    );
+}
+
+/// The early `like-main-without-bom`, on a line further from beancount than
+/// main, needs both analog counts exactly: beancount's analog count as
+/// beancount's here, main's as rledger's. Made-up counts on
+/// `2024-01-02 * "x" <BOM>q`: beancount 1, rledger 3, main 1.
+#[test]
+fn test_cause_early_like_main_without_bom_needs_both_analog_counts() {
+    let with_analog = |analog_bc: usize, analog_main: usize| {
+        let mut counts = line3_counts(1, 3, 1, 1);
+        counts.analog_bc = BTreeMap::from([(3, analog_bc)]);
+        counts.analog_main = BTreeMap::from([(3, analog_main)]);
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q", &counts)
+    };
+    assert_eq!(with_analog(1, 3), Some("like-main-without-bom"));
+    for (analog_bc, analog_main) in [(0, 3), (2, 3), (1, 2), (1, 4)] {
+        assert_eq!(
+            with_analog(analog_bc, analog_main),
+            None,
+            "analog counts beancount {analog_bc}, main {analog_main}"
+        );
+    }
+}
+
+/// `extra-construct-error` needs main to count the line as rledger does, or
+/// a construct share: main counting more is neither. Made-up counts on
+/// `2024-01-02 * "x" <BOM>q` (rledger 2, beancount 1).
+#[test]
+fn test_cause_extra_construct_error_needs_mains_count() {
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q", &line3_counts(1, 2, 2, 1)),
+        Some(CONSTRUCT)
+    );
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q", &line3_counts(1, 2, 3, 1)),
+        None,
+        "main counts more than rledger"
+    );
+}
+
+/// A made-up further-than-main line 3, `text`, for `holds`: beancount `bc`,
+/// rledger `rl`, nothing else set.
+fn made_up_worse(text: &str, bc: usize, rl: usize) -> Worse {
+    Worse {
+        line: 3,
+        cause: "made up",
+        text: text.to_string(),
+        bc,
+        rl,
+        analog_bc: 0,
+        analog_main: 0,
+        input: format!("{MADE_UP_HEAD}{text}\n"),
+        hash_bang_bc: 0,
+        bc_alone: None,
+        boms: 0,
+        roles: BomRoles::default(),
+        later_grammar: 0,
+    }
+}
+
+/// An accepted line for `holds`, with a made-up reason.
+const fn accepted_as(cause: &str, standalone: Option<usize>) -> Accepted<'_> {
+    Accepted {
+        cause,
+        standalone,
+        why: "made up",
+    }
+}
+
+/// `holds` turns away an accepted further-than-main line whose cause does
+/// not hold, for each kind of cause, and keeps one whose cause does. The
+/// lines and counts are made up, but where said: `$n0 t<BOM>n` is the real
+/// row of `test_cause_inner_bom_under_line_error_rewrites_to_no_token`.
+#[test]
+fn test_holds_checks_each_kind_of_cause() {
+    let holds_with = |cause: &str, standalone: Option<usize>, w: &Worse| {
+        holds(&accepted_as(cause, standalone), w)
+    };
+    // The BOM-free analog's counts.
+    let like_main = |analog_bc: usize, analog_main: usize| {
+        let mut w = made_up_worse("x", 1, 2);
+        (w.analog_bc, w.analog_main) = (analog_bc, analog_main);
+        holds_with("like-main-without-bom", None, &w)
+    };
+    assert!(like_main(1, 2));
+    assert!(!like_main(2, 2), "beancount's analog count is another");
+    assert!(!like_main(1, 1), "main's analog count is another");
+    assert!(!like_main(0, 2), "beancount's analog count is lower");
+    assert!(!like_main(1, 3), "main's analog count is higher");
+    // The inner BOMs' rewrite.
+    let inner = |bc: usize, inner: Vec<usize>| {
+        let mut w = made_up_worse("$n0 t\u{FEFF}n", bc, 1);
+        w.roles.inner = inner;
+        holds_with("inner-bom-under-line-error", None, &w)
+    };
+    assert!(inner(2, vec![55]));
+    assert!(!inner(3, vec![55]), "the rewrite counts 2, not 3");
+    assert!(!inner(2, Vec::new()), "no inner BOM");
+    // The accounts' rewrite: rledger counts the line 1 either way.
+    let text = "2024-01-02 open Assets:A \u{FEFF}q";
+    let account = |bc: usize, with_role: bool| {
+        let mut w = made_up_worse(text, bc, 0);
+        if with_role {
+            let at = MADE_UP_HEAD.len() + text.find("Assets:A").expect("an account");
+            w.roles.accounts.push(at..at + "Assets:A".len());
+        }
+        w
+    };
+    assert!(holds_with(
+        "bom-account-under-line-diagnostic",
+        None,
+        &account(1, true)
+    ));
+    assert!(!holds_with(
+        "bom-account-under-line-diagnostic",
+        None,
+        &account(2, true)
+    ));
+    assert!(!holds_with(
+        "bom-account-under-line-diagnostic",
+        None,
+        &account(1, false)
+    ));
+    // The later grammar errors.
+    let later = |later_grammar: usize| {
+        let mut w = made_up_worse("x", 3, 2);
+        w.later_grammar = later_grammar;
+        holds_with("one-diagnostic-per-line", None, &w)
+    };
+    assert!(later(1));
+    assert!(!later(0));
+    // The parts of a glued cause (`parts_hold`): a glued share of 1.
+    let mut glued = account(1, true);
+    (glued.rl, glued.boms) = (2, 1);
+    assert!(holds_with(GLUED, None, &glued));
+    glued.bc = 0;
+    assert!(
+        !holds_with(GLUED, None, &glued),
+        "the share is not the difference"
+    );
+    assert!(
+        !holds_with(HASH_BANG, None, &made_up_worse("x", 1, 2)),
+        "no mid-line `#!` / `#+`"
+    );
+    let mut construct = made_up_worse("x", 1, 2);
+    (construct.analog_bc, construct.analog_main) = (1, 2);
+    assert!(holds_with(CONSTRUCT, None, &construct));
+    // A recovery cause: rledger counts `foo` alone 1.
+    let alone = standalone_count("foo");
+    assert_eq!(alone, 1);
+    let recovery = |standalone: Option<usize>, table: Option<usize>| {
+        let mut w = made_up_worse("foo", 1, 2);
+        w.bc_alone = table;
+        holds_with("line-after-error-line", standalone, &w)
+    };
+    assert!(recovery(Some(1), None));
+    assert!(recovery(Some(1), Some(1)));
+    assert!(!recovery(Some(2), None), "rledger counts the line alone 1");
+    assert!(
+        !recovery(Some(0), None),
+        "rledger counts the line alone 1, not 0"
+    );
+    assert!(!recovery(None, None), "no standalone count given");
+    assert!(
+        !recovery(Some(1), Some(2)),
+        "the table's standalone count is 2"
+    );
+    // `invalid-account-after-invalid-token`, with `foo` alone counted 1.
+    let off = |standalone: usize, bc: usize, rl: usize| {
+        holds_with(
+            "invalid-account-after-invalid-token",
+            Some(standalone),
+            &made_up_worse("foo", bc, rl),
+        )
+    };
+    assert!(off(0, 1, 2), "off by 1 alone and here");
+    assert!(!off(0, 1, 3), "off by 2 here, 1 alone");
+    assert!(!off(0, 2, 1), "off the other way here");
+    assert!(off(2, 0, 1), "counted the same alone, beancount less here");
+    assert!(!off(2, 3, 1), "beancount more here than alone");
+    assert!(off(3, 3, 2), "off by 2 alone, 1 here, the same way");
+    assert!(!off(2, 1, 2), "off by 1 here, -1 alone");
+    assert!(!off(2, 0, 3), "rledger counts more here than alone");
+    assert!(!off(2, 0, 0), "rledger counts less here than alone");
+    // A composite cause with a part `parts_hold` does not know, after a
+    // glued part that holds: turned away, not asked of `parts_hold`.
+    let mut glued = account(1, true);
+    (glued.rl, glued.boms) = (2, 1);
+    assert!(!holds_with(
+        "bom-glued-to-account&eol-reported-on-next-line",
+        None,
+        &glued
+    ));
+    // A cause no check is kept for.
+    assert!(!holds_with(
+        "eol-reported-on-next-line",
+        Some(1),
+        &made_up_worse("foo", 1, 2)
+    ));
 }
 
 /// `reason_counts` reads the counts from the start of a reason, as the

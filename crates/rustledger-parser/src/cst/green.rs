@@ -97,7 +97,11 @@ pub(super) fn convert_transaction_header(
     let mut flag = '*';
     let mut seen_flag = false;
     let mut seen_str_tag_link = false;
-    let mut strings: Vec<String> = Vec::new();
+    // The header token kinds, for the shared payee/narration rule
+    // (`txn_header::header_strings`, which reads kinds only), and the text of
+    // each header string.
+    let mut header_kinds: Vec<K> = Vec::new();
+    let mut strings: Vec<&str> = Vec::new();
     let mut tags = rustledger_core::TagSet::new();
     let mut links = rustledger_core::LinkSet::new();
     // Leading trivia before the header stays in the header region (#2628).
@@ -118,6 +122,7 @@ pub(super) fn convert_transaction_header(
         let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
         let text = t.text();
         if header.in_header(kind) {
+            header_kinds.push(kind);
             match kind {
                 // Leading trivia and the header's terminating newline.
                 K::NEWLINE => {}
@@ -130,9 +135,7 @@ pub(super) fn convert_transaction_header(
                 }
                 K::STRING => {
                     seen_str_tag_link = true;
-                    if let Some(s) = decode_string_token(text) {
-                        strings.push(s);
-                    }
+                    strings.push(text);
                 }
                 K::TAG => {
                     seen_str_tag_link = true;
@@ -170,15 +173,16 @@ pub(super) fn convert_transaction_header(
     }
     let date = date?;
 
-    // 0 -> empty narration; 1 -> narration only; 2 -> payee + narration;
-    // 3+ -> last is narration, payee dropped (matches red).
-    let mut it = strings.into_iter();
-    let (payee_str, narration_str) = match (it.next(), it.next(), it.next()) {
-        (None, _, _) => (None, String::new()),
-        (Some(n), None, _) => (None, n),
-        (Some(p), Some(n), None) => (Some(p), n),
-        (Some(_), Some(_), Some(c)) => (None, it.last().unwrap_or(c)),
+    // The shared slot rule (#2932), as red `convert_transaction` uses it.
+    let slots = super::txn_header::header_strings(header_kinds);
+    let nth = |i: usize| {
+        strings
+            .get(i)
+            .and_then(|s| decode_string_token(s))
+            .unwrap_or_default()
     };
+    let payee_str = slots.payee().map(nth);
+    let narration_str = slots.directive_narration().map(nth).unwrap_or_default();
 
     let txn = rustledger_core::directive::Transaction {
         date,
@@ -1562,6 +1566,69 @@ mod tests {
             assert_eq!(g.tags, r.tags, "tags {src:?}");
             assert_eq!(g.links, r.links, "links {src:?}");
             assert_eq!(g_span, red_sp.span, "span {src:?}");
+        }
+    }
+
+    /// #2932: an invalid token among the header strings moves no string to a
+    /// different field, on the green header walk itself (not a red fallback),
+    /// and green agrees with `parse_red_only`.
+    #[test]
+    fn test_convert_transaction_header_invalid_token_moves_no_string() {
+        let cases: [(&str, Option<&str>, &str); 13] = [
+            ("* \u{11}\"x\"", None, ""),
+            ("* \"p\" \u{11}\"y\"", Some("p"), ""),
+            ("* \"p\" \u{11}", Some("p"), ""),
+            ("* \u{11} \"p\" \"n\"", Some("p"), "n"),
+            ("* \u{11} \"n\"", None, "n"),
+            ("txn \"p\" \u{11}", Some("p"), ""),
+            ("* \"p\" \u{11} #t ^l", Some("p"), ""),
+            ("* \"n\" #t \u{11}", None, "n"),
+            ("* \u{11} \"n\" \u{11}", None, "n"),
+            ("* \"p\" 123", None, "p"),
+            ("* 123 \"n\" \u{11}", None, "n"),
+            ("* 2024-01-03 \"n\" \u{11}", None, "n"),
+            ("txn USD \"n\" Assets:A", None, "n"),
+        ];
+        for (header, payee, narration) in cases {
+            let src = format!("2020-01-01 {header}\n  A 1 USD\n  B\n");
+            let root = parse_structured(&src);
+            let green = root.green();
+            let mut offset = 0usize;
+            let mut txn_node = None;
+            for child in green.children() {
+                let len = match &child {
+                    NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                    NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+                };
+                if let NodeOrToken::Node(n) = child
+                    && crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
+                {
+                    txn_node = Some((n, offset));
+                    break;
+                }
+                offset += len;
+            }
+            let (txn_green, base) = txn_node.expect("transaction node");
+            let (g, _) = convert_transaction_header(txn_green, base).expect("green header");
+            assert_eq!(
+                g.payee.as_ref().map(InternedStr::as_str),
+                payee,
+                "green payee {header:?}"
+            );
+            assert_eq!(
+                g.narration.as_str(),
+                narration,
+                "green narration {header:?}"
+            );
+
+            let red = crate::cst::parse_red_only(&src);
+            let Directive::Transaction(r) = &red.directives[0].value else {
+                panic!("expected transaction for {header:?}");
+            };
+            assert_eq!(g.payee, r.payee, "payee {header:?}");
+            assert_eq!(g.narration, r.narration, "narration {header:?}");
+            assert_eq!(g.tags, r.tags, "tags {header:?}");
+            assert_eq!(g.links, r.links, "links {header:?}");
         }
     }
 

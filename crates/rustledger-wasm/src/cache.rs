@@ -463,14 +463,18 @@ use crate::types::{Error, LedgerOptions};
 /// converter accepts. The loader also ignores a `documents` option in an
 /// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
 /// no location and the old codes, and a `Ledger` with such an option as
-/// valid. (v98 is held by #2944.)
-/// v100: loader v72, PARSER OUTPUT changed (#2931, for #2928). A BOM in the
+/// valid. (v98 was never released.)
+/// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// lone header string moves it to no other field, so `* "p" <bad>` keeps
+/// payee `p` where `p` was the narration; an older blob would keep serving
+/// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
+/// v104: loader v74, PARSER OUTPUT changed (#2931, for #2928). A BOM in the
 /// middle of a line starts an invalid token that runs to the next blank, as
 /// in beancount, so a quote after it opens no string; an older blob would
-/// keep serving such a file with its old errors and values. (v93 and v95
-/// were never released: #2931 held them before #2920 took v94 and #2947 took
-/// v97; v101 is held by #2952 and v102 by #2944.)
-pub const CACHE_VERSION: u32 = 100;
+/// keep serving such a file with its old errors and values. (v93, v95 and
+/// v100 were held by #2931 and v101 by #2952, and none was released; v103 is
+/// held by #2952.)
+pub const CACHE_VERSION: u32 = 104;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -502,7 +506,7 @@ pub const CACHE_VERSION: u32 = 100;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 72;
+const LOADER_CACHE_VERSION_PIN: u32 = 74;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -388,6 +388,66 @@ impl Ledger {
     }
 }
 
+/// The option diagnostics (E7001 to E7011) [`Options::set_scoped_at`]
+/// recorded in `warnings`, as [`LedgerError`]s a surface can list beside its
+/// other errors.
+///
+/// The one mapping every reporting surface shares: `rledger check` (text and
+/// JSON), the LSP, WASM (through its `From<LedgerError>`) and the FFI
+/// (#2929). Each keeps its own wire type and converts from this, so none of
+/// them decides anything about an option diagnostic on its own:
+///
+/// - severity is [`OptionWarning::is_error`] and phase
+///   [`OptionWarning::phase`];
+/// - the code is the warning's own, and the message is its text, the text
+///   `rledger check` prints;
+/// - the location is [`OptionWarning::site`]: the option's file and line,
+///   column 1, as beancount locates option errors (#2925). A warning with no
+///   site (one set through [`Options::set`]) has no location.
+///
+/// History, each a bug one surface had alone:
+///
+/// - E7009 went out as an error under a comment claiming parity with `check`
+///   and the LSP, so a ledger the CLI called clean arrived carrying errors
+///   (#2291). `is_error` moved onto the warning in #2292.
+/// - The code survived only as an `[E7009] ` prefix on the message, so a
+///   consumer branching on it had to parse it back out (#2297).
+/// - `phase` was a `"parse"` literal on each surface; it moved onto `phase()`
+///   in #2298.
+/// - The mapping was private to one WASM entry point, so the others reported
+///   no option diagnostics at all (#2299).
+/// - Each surface placed them itself, and all of them at the top of the main
+///   file, an included file's too (#2925).
+///
+/// [`OptionWarning`]: crate::OptionWarning
+/// [`OptionWarning::is_error`]: crate::OptionWarning::is_error
+/// [`OptionWarning::phase`]: crate::OptionWarning::phase
+/// [`OptionWarning::site`]: crate::OptionWarning::site
+/// [`Options::set`]: crate::Options::set
+/// [`Options::set_scoped_at`]: crate::Options::set_scoped_at
+#[must_use]
+pub fn option_warnings_to_errors(warnings: &[crate::OptionWarning]) -> Vec<LedgerError> {
+    warnings
+        .iter()
+        .map(|w| {
+            let err = if w.is_error() {
+                LedgerError::error(w.code, w.message.clone())
+            } else {
+                LedgerError::warning(w.code, w.message.clone())
+            }
+            .with_phase(w.phase());
+            match &w.site {
+                Some(site) => err.with_location(ErrorLocation {
+                    file: std::path::PathBuf::from(&site.file),
+                    line: site.line,
+                    column: 1,
+                }),
+                None => err,
+            }
+        })
+        .collect()
+}
+
 /// Unified error type for ledger processing.
 ///
 /// This encompasses all error types that can occur during loading,
@@ -2052,6 +2112,9 @@ pub fn document_root_warnings(
             ),
             option: "documents".to_string(),
             value: value.clone(),
+            // Located by `Options::locate`, which knows where each value was
+            // written; this function sees only the values.
+            site: None,
         })
         .collect()
 }

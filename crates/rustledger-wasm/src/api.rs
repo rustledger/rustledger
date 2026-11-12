@@ -12,8 +12,8 @@ use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
 use crate::helpers::{
-    extract_options, has_fatal, load_and_book, parse_error_to_wasm, run_validation, to_js,
-    validate_option_tuples,
+    extract_options, has_fatal, load_and_book, option_warnings_to_errors, parse_error_to_wasm,
+    run_validation, to_js, validate_option_tuples,
 };
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
@@ -98,7 +98,7 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     // raise E7001/E7002 and an invalid option was invisible (#2299). Validating
     // the tuples is option-only work — no IO, no booking — so `parse` stays as
     // cheap as its name promises.
-    errors.extend(validate_option_tuples(&result.options));
+    errors.extend(validate_option_tuples(&result.options, &lookup));
 
     // Extract options from parsed result
     let options = extract_options(&result.options);
@@ -647,11 +647,21 @@ fn validate_with_filesystem(
         }
     };
 
+    // The option diagnostics, each at its option's file and line, as
+    // `rledger check` reports them (#2925). They were missing here, so an
+    // invalid option in any file of the tree validated clean while `check`
+    // exits 1 on it. Read before `process` consumes the options, so a
+    // processing failure still reports them, as `check` does.
+    let option_errors = option_warnings_to_errors(&load_result.options.warnings);
+
     // Validate whatever loaded: no load error stops validation, as none stops
     // it in `rledger check` or in bean-check (#2949). This used to stop before
     // validating on any load error but a duplicate include, an include cycle
     // or an empty glob, so one syntax error, or an include of a missing file,
-    // hid every other finding.
+    // hid every other finding. `check` reports and validates past every load
+    // error (a missing, unreadable or directory include, a duplicate include,
+    // an include cycle, an empty glob, a confined path); only a failure to
+    // load the entry point itself stops it, as the `Err` arm above stops here.
     //
     // The parse errors are rendered here one by one with their code and line,
     // rather than folded by `process` into one line-less `parse errors in
@@ -672,6 +682,7 @@ fn validate_with_filesystem(
         Ok(ledger) => ledger,
         Err(e) => {
             errors.push(Error::new(format!("Processing error: {e}")));
+            errors.extend(option_errors);
             return ValidationResult {
                 valid: false,
                 errors,
@@ -680,6 +691,7 @@ fn validate_with_filesystem(
     };
 
     errors.extend(crate::helpers::reported_ledger_errors(ledger.errors));
+    errors.extend(option_errors);
 
     ValidationResult {
         // Warnings do not invalidate a ledger; only actual errors do.
@@ -986,6 +998,55 @@ mod load_error_tests {
     use super::*;
     use rustledger_loader::VirtualFileSystem;
     use std::collections::HashMap;
+
+    /// Drift guard (#2925): `validateMultiFile` reports the option
+    /// diagnostics, at the file and line the loader gives them, which is what
+    /// `rledger check` prints; an invalid option in an included file makes
+    /// the ledger invalid, as `check` exits 1 on it.
+    #[test]
+    fn validate_reports_option_errors_located_like_check() {
+        use crate::parsed_ledger::option_warning_severity_tests::{
+            included_option_files, loader_located,
+        };
+        let result = validate_with_filesystem(
+            Box::new(VirtualFileSystem::from_files(included_option_files())),
+            "main.beancount",
+        );
+        let located: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.code.as_deref().is_some_and(|c| c.starts_with("E70")))
+            .map(|e| (e.code.clone(), e.file.clone(), e.line))
+            .collect();
+        assert_eq!(located.len(), 3, "{:?}", result.errors);
+        assert_eq!(located, loader_located(included_option_files()));
+        assert!(!result.valid, "E7008 in an include is an error");
+    }
+
+    /// A missing include is reported, the rest of the ledger is validated
+    /// (#2949), and the option diagnostics come with it, as `rledger check`
+    /// reports all of them.
+    #[test]
+    fn validate_reports_option_errors_beside_a_missing_include() {
+        let files = HashMap::from([(
+            "main.beancount".to_string(),
+            "option \"nosuch\" \"x\"\ninclude \"missing.beancount\"\n".to_string(),
+        )]);
+        let result = validate_with_filesystem(
+            Box::new(VirtualFileSystem::from_files(files)),
+            "main.beancount",
+        );
+        let e7001 = result
+            .errors
+            .iter()
+            .find(|e| e.code.as_deref() == Some("E7001"))
+            .unwrap_or_else(|| panic!("E7001 must be reported: {:?}", result.errors));
+        assert_eq!(
+            (e7001.file.as_deref(), e7001.line, e7001.column),
+            (Some("main.beancount"), Some(1), Some(1))
+        );
+        assert!(!result.valid);
+    }
 
     /// A diamond — `shared` reached directly and again through `mid` — that
     /// ALSO fails a balance assertion.

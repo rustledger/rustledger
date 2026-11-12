@@ -69,8 +69,11 @@ fn assert_load_surfaces(source: &str, want: &[(&str, u32, u32, u32, u32)]) {
     );
 
     // `validateMultiFile` reports a validation finding through the loader's
-    // `LedgerError`, whose location is a single point, so its end is null
-    // (`From<LedgerError> for Error`); its parse errors carry their end.
+    // `LedgerError`, whose end is null here: `From<LedgerError> for Error`
+    // copies only the point `ErrorLocation` and does not locate the end from
+    // `source_span` and `file_id`, though the source map could (issue
+    // #2964). Its parse errors carry their end. When #2964 is fixed, expect
+    // the same ends as `validateSource` here.
     let multi_file_want: Vec<Location> = want
         .iter()
         .cloned()

@@ -37,7 +37,9 @@ use crate::utils::LineLookup;
 /// though the file is in its own field too: a pre-existing divergence of
 /// every multi-file surface (`validateMultiFile`, `Ledger`,
 /// `queryMultiFile`), tracked in issue #2961. Drop the prefix there, with
-/// the matching adjustment in `tests/wasm_query_option_errors.rs`.
+/// the matching adjustments in `tests/wasm_query_option_errors.rs` and in
+/// the `parse_error_mapping_parity` test of `src/helpers.rs`, which both
+/// strip it.
 pub fn load_errors_to_errors(
     load_errors: &[LoadError],
     source_map: &rustledger_loader::SourceMap,

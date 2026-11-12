@@ -68,8 +68,16 @@ impl CheckParityCase {
     /// case gives: its `P` codes are parse errors; its option diagnostics are
     /// counted in neither (#2929); every other is a validate-phase one.
     pub fn counts(&self) -> (u32, u32) {
-        let parse = self.diagnostics.iter().filter(|d| d.code.starts_with('P')).count();
-        let options = self.diagnostics.iter().filter(|d| d.code.starts_with("E70")).count();
+        let parse = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.starts_with('P'))
+            .count();
+        let options = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.starts_with("E70"))
+            .count();
         let parse = u32::try_from(parse).expect("small");
         let rest = u32::try_from(self.diagnostics.len() - options).expect("small") - parse;
         (parse, rest)

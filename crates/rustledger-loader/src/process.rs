@@ -1862,12 +1862,16 @@ pub fn plugin_error_to_ledger_error(
 ///
 /// WASM does not call this either: `parse_error_fields` in
 /// `rustledger-wasm/src/helpers.rs` maps the same message, code, phase and
-/// hint once for every WASM surface, because WASM reports an end position,
-/// which [`LedgerError`] lacks, and its single-source surfaces build no
-/// [`LoadError`] or [`SourceMap`]. That copy is deliberate and points back
-/// here; its `parse_error_mapping_parity` test pins the two to agree on
-/// message, code, phase, hint, file, line and column. Revisit if
-/// [`LedgerError`] gains an end position.
+/// hint once for every WASM surface, because its single-source surfaces
+/// (`parse`, `format`, `validateSource`) build no [`LoadError`] or
+/// [`SourceMap`] to call this with. (The [`LedgerError`] this returns does
+/// carry the end, in `source_span` and `file_id`; WASM's multi-file surfaces
+/// report null ends for validation and other non-parse findings only because
+/// their `From<LedgerError>` conversion does not locate it, issue #2964.) That copy
+/// is deliberate and points back here; its `parse_error_mapping_parity` test
+/// pins the two to agree on message, code, phase, hint, file, line and
+/// column. Revisit if WASM's single-source surfaces come to build a
+/// [`LoadError`] and [`SourceMap`], at which point WASM should call this.
 #[must_use]
 pub fn parse_errors_to_ledger_errors(
     failure: &LoadError,

@@ -35,13 +35,16 @@ pub fn parse_error_to_wasm(
 ///
 /// A deliberate copy of the loader's
 /// [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the FFI),
-/// not a call to it: that gives a `LedgerError`, which has no end position,
-/// and wants a `LoadError` and its `SourceMap`, which the single-source
-/// surfaces (`parse`, `format`, `validateSource`) never build. That function
-/// points back here, and `parse_error_mapping_parity` below pins the two to
-/// agree on message, code, phase, hint, file, line and column. Revisit if
-/// `LedgerError` gains an end position, at which point WASM should map from
-/// it.
+/// not a call to it: that wants a `LoadError` and its `SourceMap`, which the
+/// single-source surfaces (`parse`, `format`, `validateSource`) never build.
+/// (A `LedgerError` does carry its end, as `source_span` and `file_id`; only
+/// its `ErrorLocation` is a point. The multi-file surfaces still report null
+/// ends for validation and other non-parse findings, because
+/// `From<LedgerError> for Error` does not compute them, issue #2964.) That function points back here, and
+/// `parse_error_mapping_parity` below pins the two to agree on message, code,
+/// phase, hint, file, line and column. Revisit if the single-source surfaces
+/// come to build a `LoadError` and `SourceMap`, at which point WASM should map
+/// through the loader's function and locate the end from `source_span`.
 pub fn parse_error_fields(e: &rustledger_parser::ParseError) -> Error {
     Error::new(e.message())
         .with_code(format!("P{:04}", e.kind_code()))

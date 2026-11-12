@@ -1349,6 +1349,14 @@ impl<'src> Iterator for TokenIter<'src> {
                     #[cfg(test)]
                     test_counters::ERROR_SCANNED_BYTES
                         .with(|c| c.set(c.get() + (span.end - span.start)));
+                    // `span.start == last_newline_end` is the test that
+                    // matters: on the AST path, which drops whitespace,
+                    // `at_line_start` still holds for a BOM after the
+                    // indentation (`  <BOM>"y"`), which is mid-line. The
+                    // offset test alone would do today, as `last_newline_end`
+                    // moves only where `at_line_start` is set; the flag keeps
+                    // `new_mid_line`'s promise (no line-start rule for its
+                    // first token) without relying on its offset being past 0.
                     let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
                         && self.at_line_start
                         && span.start == self.last_newline_end;
@@ -2236,6 +2244,32 @@ mod tests {
             tokenize_lossless(&source)
                 .iter()
                 .any(|(t, _)| matches!(t, Token::Date(_))),
+            "{source:?}"
+        );
+    }
+
+    /// A BOM after a line's indentation is in the middle of the line, so it
+    /// runs to the next blank like any other mid-line BOM. On the AST path
+    /// (`tokenize`, which drops whitespace) `at_line_start` still holds when
+    /// the BOM's error arrives, so only `span.start == last_newline_end`
+    /// tells it from a BOM in column 0: without it, `<BOM>` keeps its own
+    /// extent, is layout, and the `"y"` after it lexes as an indented string.
+    /// (No `Indent` comes before an error token; that is unchanged here.)
+    #[test]
+    fn test_tokenize_indented_bom_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        let source = format!("x\n  {bom}\"y\" z\n");
+        let run = format!("{bom}\"y\"");
+        let tokens: Vec<_> = tokenize(&source).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Error("x"),
+                Token::Newline,
+                Token::Error(run.as_str()),
+                Token::Error("z"),
+                Token::Newline,
+            ],
             "{source:?}"
         );
     }

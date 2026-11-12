@@ -683,3 +683,63 @@ fn test_parse_heading_rest_hash_after_brace_is_not_a_comment() {
     let result = parse_both(&src);
     assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
 }
+
+/// KNOWN GAP, pinned on purpose (issue #2954): a BOM right before a
+/// posting's price or cost is the line's one `P0026`, as in bean-check, but
+/// recovery keeps the posting without its price or cost. The transaction
+/// then no longer balances, so `rledger check` adds two `E3001` where
+/// bean-check reports one error. `main` already drops the cost after any
+/// other invalid character (`\x11{2 USD}`), so this is the same recovery gap,
+/// newly reached by a mid-line BOM since its run takes the `@` or `{`.
+/// Fixing #2954 must update this test on purpose.
+#[test]
+fn test_parse_bom_before_price_or_cost_drops_it_issue_2954() {
+    for (tail, invalid) in [
+        (format!("{BOM}@ 2 USD"), BOM),
+        (format!("{BOM}@@ 2 USD"), BOM),
+        (format!("{BOM}{{2 USD}}"), BOM),
+        ("\x11{2 USD}".to_string(), "\x11"),
+    ] {
+        let src =
+            format!("{HEAD}\n2024-01-02 * \"x\"\n  Assets:A  1 HOOL {tail}\n  Assets:B  -2 USD\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        if invalid == BOM {
+            assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+        }
+        assert_eq!(result.directives.len(), 3, "{src:?}");
+        let Directive::Transaction(t) = &result.directives[2].value else {
+            panic!("{src:?}: {:?}", result.directives[2].value);
+        };
+        assert_eq!(t.postings.len(), 2, "{src:?}");
+        let leg = &t.postings[0];
+        assert_eq!(leg.account.as_str(), "Assets:A", "{src:?}");
+        assert_eq!(
+            leg.units.as_ref().map(ToString::to_string).as_deref(),
+            Some("1 HOOL"),
+            "{src:?}"
+        );
+        // The gap itself: the price and the cost are gone.
+        assert!(leg.price.is_none(), "{src:?}: {:?}", leg.price);
+        assert!(leg.cost.is_none(), "{src:?}: {:?}", leg.cost);
+    }
+}
+
+/// A token of BOMs alone that ends the file is still an invalid token: no
+/// account follows it, so the directive holds an invalid token, and its
+/// `BomInDirectiveBody` is the line's one error, with the `open` kept. bean-
+/// check 3.2.3 reports one error for this file, which has no final newline.
+/// Pins the end-of-walk rule of `holds_an_invalid_token`: treating the held
+/// BOMs as no token drops the `open` and adds a second error.
+#[test]
+fn test_parse_bom_alone_at_eof_after_directive_is_one_error() {
+    let src = format!("{HEAD}2024-01-03 open Assets:C USD \"BAD\" {BOM}");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+    assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+    assert_eq!(result.directives.len(), 3, "{src:?}");
+    let Directive::Open(open) = &result.directives[2].value else {
+        panic!("{src:?}: {:?}", result.directives[2].value);
+    };
+    assert_eq!(open.account.as_str(), "Assets:C", "{src:?}");
+}

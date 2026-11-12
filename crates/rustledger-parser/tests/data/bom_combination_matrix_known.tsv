@@ -4948,7 +4948,7 @@ x 1.5.<BOM>a:B\n	3:1	inner-bom-under-line-error
 plugin "p"\n  A<BOM>b ;c \tfoo A\n<BOM><BOM>#t T#!\t<BOM>  <BOM>a \tkk:\n	4:2,5:1	mid-line-hash-bang
 Assets:A  x<BOM>y \t%\t<BOM>12$  @@\n	3:2	inner-bom-under-line-error
 <BOM>2024-01-02 balance Assets:A 1 USD\n  ; c  , !  <BOM>a  1\npoptag #t\n	3:1,4:1	indented-line-after-error+pop-without-push
-plugin "p"\n  <BOM>kk:  <BOM>#t <BOM>#t \t<BOM>*  ~\n2024-01-02 ! #t ^l\n<BOM>  Assets:A  1 USD  A<BOM>b\t<BOM>* $x \tx<BOM>y  #+x\n	4:4,6:5	listed-exception+mid-line-hash-bang
+plugin "p"\n  <BOM>kk:  <BOM>#t <BOM>#t \t<BOM>*  ~\n2024-01-02 ! #t ^l\n<BOM>  Assets:A  1 USD  A<BOM>b\t<BOM>* $x \tx<BOM>y  #+x\n	4:4,6:5	like-main-without-bom+mid-line-hash-bang
 2024-01-02 price USD 1 EUR\n    pk: 2  | \t1\t<BOM>"s"\tA<BOM>b Assets:A\n  Assets:A  1 USD\n<BOM><BOM>12$ x<BOM>y  | \t{1 USD} foo	4:3,5:1,6:3	indented-line-after-error
 <BOM>12$ <BOM>Ü:A <BOM>#t \t<BOM>a  Assets:A\n<BOM>pushmeta kk: 1 {1 USD} T#!  A \t#+x\n  kk: "v"\n\t2024-01-02\t-2.5  "a<BOM>b"  <BOM>a \t;c\n	3:3,4:1,5:1,6:2	indented-line-after-error+mid-line-hash-bang
 <BOM>2024-01-02 balance Assets:A 1 USD  A<BOM>b\t| \tA , A<BOM>b\n<BOM>plugin "p"\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  <BOM>#t \t2024-01-02 \tAssets:A #t\n<BOM>  ; c\n<BOM>2024-01-02 pad Assets:A Assets:B (1 + 2)\t<BOM>"s"\tA<BOM>b open -2.5\n  ; c \t;c <BOM>12$ \t<BOM>a <BOM>a\n  Assets:A  1 HOOL {2 USD} @ 3 USD (1 + 2)  <BOM>a  ;c <BOM>12$ USD\n	3:3,4:1,5:2,6:1,7:3,9:2	indented-line-after-error
@@ -5233,7 +5233,7 @@ option "title" "T"\n    pk: 2\t<BOM>*\t1  #!d A\tx<BOM>y\n	4:2	mid-line-hash-ban
 <BOM>  ;c <BOM> x<BOM>y  <BOM>#t\topen\nplugin "p"  <BOM>"s" <BOM>Ü:A <BOM>a  -2.5\n<BOM>  kk: "v"\n	3:1,4:3,5:1	bom-glued-to-account
 <BOM>2024-01-02 close Assets:C\n  Assets:A  1 HOOL {2 USD} @ 3 USD | ^l USD 2024-01-02\n<BOM>a\tT#!\t@@\topen\n<BOM>2024-01-02 event "e" "v"\n    pk: 2 \tx<BOM>y\t<BOM>a  <BOM> A<BOM>b <BOM>Assets:A\n	3:1,4:1,5:1,6:1,7:4	indented-line-after-error+like-main-without-bom
 poptag #t\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n<BOM>    pk: 2\n<BOM>option "title" "T"\n    pk: 2\n<BOM>  #t ^l ^l <BOM>Assets:A  x<BOM>y 2024-01-02\n	3:1,4:1,5:1,6:1,7:1,8:2	indented-line-after-error
-!  {1 USD}  "s" \tT#!\n  <BOM><BOM>* \t^l \t<BOM>#t <BOM>12$  <BOM>	4:4	listed-exception
+!  {1 USD}  "s" \tT#!\n  <BOM><BOM>* \t^l \t<BOM>#t <BOM>12$  <BOM>	4:4	like-main-without-bom
 \t<BOM>"s"\t1 2024-01-02\t<BOM>Ü:A \t<BOM>12$\n<BOM>popmeta kk:\n  #t ^l A  <BOM>* \t$x <BOM>#t\n  ; c  <BOM>Ü:A  <BOM>a\t;c\t~ ^l\n2024-01-02 custom "b" 1\n	3:2,4:1,5:4	indented-line-after-error
 option "title" "T"\n<BOM>  Assets:A  1 USD\t<BOM>Ü:A "s" USD  <BOM>#t \tT#!\n2024-01-02 event "e" "v"	4:2	mid-line-hash-bang
 <BOM>2024-01-02 note Assets:A "n" @@ \t"a<BOM>b" \tA<BOM>b T#! <BOM>*\n<BOM>  Assets:A  1 USD\n2024-01-02 price USD 1 EUR\n<BOM>  #t ^l\t<BOM>*\t<BOM>Assets:A \t"s" Ü:A\t"a<BOM>b"\n  Assets:A  1 USD\n2024-01-02 close Assets:C\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n	3:2,4:1,6:2,7:1,9:1	indented-line-after-error+mid-line-hash-bang
@@ -5502,7 +5502,7 @@ plugin "p"\n    pk: 2 <BOM>Assets:A \tA<BOM>b \t<BOM>Ü:A 1 ,\n  #t ^l\n<BOM>Ass
 <BOM>#t\t<BOM> \tx<BOM>y <BOM>"s" \t1\nUSD Ü:A \t!  <BOM>Ü:A  %\npopmeta kk:  "s"  #!d <BOM>"s" <BOM>12$  <BOM>a\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  kk: "v"  @@\tfoo | $x\n	3:4,4:2,5:1,6:1,7:3	bom-glued-to-account&extra-construct-error+indented-line-after-error+mid-line-hash-bang
 <BOM>plugin "p" \t;c  USD A<BOM>b \tA<BOM>b\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD A<BOM>b\t^l\t1 \tÜ:A\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \tfoo USD \tUSD  | ,\n2024-01-02 * kk: foo <BOM>#t <BOM>12$\n<BOM>  ; c $x <BOM>12$ <BOM>#t  USD\n2024-01-02 event "e" "v"\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n	3:1,4:2,5:2,6:4,7:1,9:1	indented-line-after-error
 \t@@ A x<BOM>y *\r\n2024-01-02 balance Assets:A 1 USD !\t<BOM>* <BOM>a\t<BOM>#t\t!\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD  @ <BOM>Ü:A  USD \t-2.5\t<BOM>12$\r\n<BOM>  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\r\n2024-01-02 close Assets:C <BOM>*\t%  <BOM>"s" <BOM>Assets:A\r\n	3:1,4:4,5:2,6:1,7:3	bom-glued-to-account+indented-line-after-error+inner-bom-under-line-error
-plugin "p"\n  <BOM>!\t<BOM>#t  ,  <BOM>"s"\n	4:3	listed-exception
+plugin "p"\n  <BOM>!\t<BOM>#t  ,  <BOM>"s"\n	4:3	like-main-without-bom
 * Heading\tAssets:A x<BOM>y  A<BOM>b \t{1 USD} T#!\r\nplugin "p"\t<BOM>"s" \t<BOM>Assets:A  1\t<BOM>#t  USD\r\n<BOM>    pk: 2 %\tA x<BOM>y \t,\t<BOM>#t\r\n	4:3,5:3	bom-glued-to-account
 2024-01-02 document Assets:A "d.pdf"  kk:  #t\t<BOM>12$ \tÜ:A\n  Assets:A  1 HOOL {2 USD} @ 3 USD\tkk: \t^l  A<BOM>b  !\n2024-01-02 close Assets:C\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n	3:2,4:2,6:1	indented-line-after-error
 <BOM>poptag #t\n  kk: "v"\n  Assets:A  1 HOOL {2 USD} @ 3 USD	3:1,4:1,5:1	indented-line-after-error
@@ -5737,7 +5737,7 @@ USD\t$x  <BOM>a\t<BOM>Ü:A \tAssets:A\n<BOM>Ü:A -2.5 \tUSD "s"	3:3,4:1	line-aft
 pushmeta kk: 1 <BOM>Ü:A\t$x\t<BOM>a \t!\r\n  kk: "v"\r\n<BOM>2024-01-02 document Assets:A "d.pdf"\r\noption "title" "T" <BOM>12$ T#!\t!  A |\r\n  ; c \t<BOM>* T#!\t1\t<BOM>12$\r\n<BOM>  ; c\r\n	3:3,5:1,6:1,8:1	like-main-without-bom
 <BOM><BOM>*\tT#! -2.5 T#!\n	3:1	mid-line-hash-bang
 2024-01-02 * "p" "n"\n  ; c \tkk: \tAssets:A foo \t<BOM>#t\n  kk: "v"\tA <BOM>*  *\tA<BOM>b\nÜ:A  x<BOM>y <BOM>Assets:A  <BOM>"s"\t<BOM>12$\n<BOM>* Heading <BOM>* #!d\topen\t{1 USD}\n    pk: 2\n	5:3,6:4,7:3,8:1	indented-line-after-heading+line-after-error-line+mid-line-hash-bang
-\t2024-01-02 A<BOM>b <BOM>12$  <BOM>* <BOM>*\noption "title" "T"\n  ; c\n2024-01-02 * <BOM>Assets:A  @ <BOM>\t;c |\n	3:4,5:1,6:2	listed-exception
+\t2024-01-02 A<BOM>b <BOM>12$  <BOM>* <BOM>*\noption "title" "T"\n  ; c\n2024-01-02 * <BOM>Assets:A  @ <BOM>\t;c |\n	3:4,5:1,6:2	like-main-without-bom
 \t, $x !\tA<BOM>b T#!\n<BOM>(1 + 2)  <BOM>#t \tkk:\t-2.5	3:3,4:2	mid-line-hash-bang
 %  <BOM>Assets:A <BOM>Ü:A "s"\t<BOM>a\n* Heading\n  ; c kk:\topen  *  USD\n<BOM>  ; c  A<BOM>b\t<BOM>a\topen\t"s"\tx<BOM>y\n^l\t#t A<BOM>b\tA<BOM>b <BOM>#t\n	6:1,7:4	bom-free-line-as-on-main+line-after-error-line
 2024-01-02 document Assets:A "d.pdf"\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  Assets:A  1 HOOL {2 USD} @ 3 USD Assets:A <BOM>* x<BOM>y\t^l\n<BOM>^l\t#!d  <BOM>#t 2024-01-02\tx<BOM>y\n	4:1,5:2,6:1	mid-line-hash-bang
@@ -5842,7 +5842,7 @@ pushtag #t \t<BOM>"s" \t(1 + 2) \tA \t<BOM>12$\n<BOM>  #t ^l <BOM>12$\t<BOM>#t \
 option "title" "T" USD\t#t\t~ |\n<BOM>    pk: 2\n  #t ^l\n<BOM><BOM>#t ! A<BOM>b  *	3:1,4:1,5:1,6:2	indented-line-after-error
 x<BOM>y\t;c $x #t\nplugin "p" \t~ A<BOM>b \tkk:\t,\t<BOM>*\n  kk: "v"\n  Assets:A  1 HOOL {2 USD} @ 3 USD ;c $x \t^l  A\n	3:1,4:3,6:1	indented-line-after-error
 popmeta kk: <BOM>a \t"a<BOM>b" ^l  ! "s"\n  #t ^l\n<BOM>  USD T#!  A  ^l <BOM>12$\n  * <BOM>#t\t1 <BOM>\n	3:1,4:1,5:1,6:3	indented-line-after-error+mid-line-hash-bang
-  2024-01-02 \tA<BOM>b  <BOM>12$ %\n	3:2	listed-exception
+  2024-01-02 \tA<BOM>b  <BOM>12$ %\n	3:2	like-main-without-bom
 <BOM>2024-01-02 custom "b" 1\n<BOM>  #t ^l  #!d \t<BOM>\tA Ü:A  ~\n2024-01-02 commodity EUR\n	3:1,4:2	mid-line-hash-bang
 <BOM>;c A<BOM>b Assets:A  x<BOM>y \tx<BOM>y\n<BOM>plugin "p"\n2024-01-02 ! #t ^l \t, <BOM>Assets:A\t~ \t<BOM>12$\n<BOM>  kk: "v"\t"s" <BOM>12$  <BOM>"s" \t#t  <BOM>\n	3:1,4:1,5:3,6:4	bom-glued-to-account+line-start-bom-before-comment
 option "title" "T"\r\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \t<BOM>12$ -2.5 \tA <BOM>a $x\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD\r\n<BOM>pushmeta kk: 1\r\n	4:4,5:1,6:1	indented-line-after-error
@@ -6036,7 +6036,7 @@ option "title" "T"\n<BOM>2024-01-02 balance Assets:A 1 USD\n  Assets:A  1 HOOL {
 <BOM>  <BOM>* ,  Assets:A \tUSD\r\n<BOM>12$  #+x\t<BOM> open\r\n	3:2,4:1	like-main-without-bom
 2024-01-02 balance Assets:A 1 USD A<BOM>b \t<BOM>#t \t<BOM>Ü:A  T#!\n2024-01-02 note Assets:A "n"\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  ~\t~\t<BOM>Ü:A\t<BOM>12$ \t;c\n2024-01-02 document Assets:A "d.pdf"\n  Assets:A  1 HOOL {2 USD} @ 3 USD \tfoo\t<BOM>Ü:A <BOM>Ü:A A x<BOM>y\n  ; c\n	3:3,5:2,7:2	inner-bom-under-line-error
 2024-01-02 * "p" "n"\n<BOM>$x ;c\tÜ:A \t<BOM>a\n\t<BOM>a \t<BOM>a \t<BOM>12$ <BOM>Ü:A \t<BOM>a\n	4:2,5:4	invalid-account-after-invalid-token
-* Heading <BOM> <BOM>Ü:A \topen  Ü:A \t,\n  ; c \t$x x<BOM>y\topen \t<BOM>12$\n\t@@ \t<BOM>Assets:A T#! \t<BOM>#t\n	5:1	listed-exception+mid-line-hash-bang
+* Heading <BOM> <BOM>Ü:A \topen  Ü:A \t,\n  ; c \t$x x<BOM>y\topen \t<BOM>12$\n\t@@ \t<BOM>Assets:A T#! \t<BOM>#t\n	5:1	like-main-without-bom+mid-line-hash-bang
 2024-01-02 price USD 1 EUR\t<BOM>Ü:A , open \t! <BOM>\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD "a<BOM>b" "a<BOM>b" -2.5 \t-2.5  <BOM>a\n	3:2,4:1,5:2	indented-line-after-error
 2024-01-02 query "q" "select 1"\n  ; c\n<BOM>2024-01-02 pad Assets:A Assets:B \t#!d #t \tx<BOM>y  !\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  #t ^l \t#t\t#+x  x<BOM>y \t{1 USD} \t<BOM>a\n	5:1,6:1,7:1	indented-line-after-error+mid-line-hash-bang
 2024-01-02 close Assets:C Assets:A\t<BOM>12$  {1 USD} @\noption "title" "T" \t<BOM>12$\t<BOM>Ü:A\t<BOM>12$ \tx<BOM>y %\n  Assets:A  1 HOOL {2 USD} @ 3 USD  @ <BOM>Ü:A \t! $x\n  ; c\n	3:2,4:4,5:2	bom-glued-to-account+bom-glued-to-account-in-error-line
@@ -6182,12 +6182,12 @@ $x <BOM>a-b:C "x"$x~<BOM>1:A\n	3:1	inner-bom-under-line-error
 2024-01-02 *\n  <BOM>Assets:A\t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A:B T#!\n	4:2	bom-glued-to-account
 <BOM>Assets:A,Ü:A T#!\n	3:1	mid-line-hash-bang
-<BOM><BOM>:A^l<BOM>"s"\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A^l<BOM>"s"\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>1:A{\n	4:1	bom-glued-to-account-in-error-line+eof-error-on-last-line
 2024-01-02 *\n  kk: <BOM><BOM>assets:A\t<BOM>%\n	4:2	bom-glued-to-account
 $x Heading<BOM>a-b:C~<BOM>1:A\t!\n	3:2	bom-glued-to-account
 $x <BOM>assets:A'b T#!^l\n	3:2	mid-line-hash-bang
-<BOM><BOM><BOM>:A^l<BOM>\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A^l<BOM>\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>\t~<BOM>1:A\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B~<BOM>1:A\t{\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A  1<BOM>2<BOM>x\n	3:2	bom-glued-to-account
@@ -6197,7 +6197,7 @@ $x <BOM>assets:A'b T#!^l\n	3:2	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>Ü:A\t;c\t<BOM>1.5 <BOM>x\n	3:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A .b<BOM>%\t\t-2.5\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 Heading<BOM>a-b:C~<BOM>1:A\n	3:2	bom-glued-to-account
-<BOM><BOM><BOM>:A ,Ü:A .b\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A ,Ü:A .b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM>a-b:CT#!T#!\n	3:1	like-main-without-bom
 2024-01-02 *\n  <BOM>1:A:B\t-2.5\n	4:1	bom-glued-to-account
 <BOM><BOM><BOM>assets:A\t<BOM>a-b:C T#!\t'b\n	3:1	mid-line-hash-bang
@@ -6219,7 +6219,7 @@ $x <BOM>assets:A'b T#!^l\n	3:2	mid-line-hash-bang
 <BOM><BOM><BOM>1:A:B<BOM>"s"\t'b T#!\n	3:2	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>:A.b\t^l\n	3:2	bom-glued-to-account
 $x <BOM>1:A\t-2.5T#!#t\n	3:1	mid-line-hash-bang
-<BOM><BOM><BOM>:A<BOM>%\t<BOM>"s"\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A<BOM>%\t<BOM>"s"\n	3:1	bom-account-under-line-diagnostic
 <BOM>* Heading<BOM>Ü:A,Ü:A\tT#!\n	3:1	like-main-without-bom
 2024-01-02 *\n  kk: <BOM>:A@^l$x\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A<BOM>"s"<BOM>%\t-2.5\n	3:2	bom-glued-to-account
@@ -6265,7 +6265,7 @@ $x Heading<BOM>a-b:C <BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>Assets:A $x;c\t<BOM>1.5\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>:A~<BOM>1:A\t$x\t.b\n	3:4	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A^l\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A  1<BOM>2\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A  1<BOM>2\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM>Assets:A,Ü:A{\t^l\n	3:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A;c\t<BOM>1.5 <BOM> ^l\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>.b\n	4:2	bom-glued-to-account
@@ -6279,11 +6279,11 @@ $x <BOM>Ü:A~<BOM>1:A'b~<BOM>1:A\n	3:1	inner-bom-under-line-error
 2024-01-02 *\n  <BOM>1:A\t.b!\n	4:2	bom-glued-to-account
 <BOM><BOM>assets:A { T#!<BOM>%\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>Assets:A@ ~<BOM>1:A<BOM>x\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A{\t<BOM>"s"\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A{\t<BOM>"s"\n	3:1	bom-account-under-line-diagnostic
 $x Heading<BOM>a-b:C@<BOM>a-b:C\n	3:2	bom-glued-to-account
 <BOM>* <BOM>:A T#! {<BOM>a-b:C\n	3:1	mid-line-hash-bang
-<BOM>:A\t<BOM>"s",Ü:A<BOM>x\n	3:1	line-start-bom-before-comment
-<BOM>:A$x!\n	3:1	line-start-bom-before-comment
+<BOM>:A\t<BOM>"s",Ü:A<BOM>x\n	3:1	bom-account-under-line-diagnostic
+<BOM>:A$x!\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>assets:A<BOM>x\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>Assets:A\t'b;c\t<BOM>1.5\n	4:3	bom-glued-to-account
 <BOM>* <BOM>assets:AT#!\t<BOM>x\t-2.5\n	3:1	mid-line-hash-bang
@@ -6294,7 +6294,7 @@ $x Heading<BOM>a-b:C@<BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A @\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A 'bT#!\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>a-b:C <BOM>"s" ~<BOM>1:A   1<BOM>2\n	3:4	bom-glued-to-account
-<BOM><BOM><BOM>:A {\t$x !\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A {\t$x !\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM>a-b:C<BOM>a-b:C\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>:A <BOM>a-b:C <BOM>x\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A:B<BOM>a-b:C\n	4:1	bom-glued-to-account
@@ -6307,7 +6307,7 @@ $x Heading<BOM>a-b:C@<BOM>a-b:C\n	3:2	bom-glued-to-account
 <BOM>* <BOM>1:A:B\t!\tT#!@\n	3:1	mid-line-hash-bang
 <BOM>* Heading<BOM><BOM>kk:<BOM>\tT#! \t-2.5\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  <BOM>assets:A~<BOM>1:A<BOM>"s"\n	4:2	bom-glued-to-account
-<BOM>:A\t^l\t<BOM>a-b:C\t'b\n	3:1	line-start-bom-before-comment
+<BOM>:A\t^l\t<BOM>a-b:C\t'b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM><BOM>assets:A;c\t<BOM>1.5<BOM>%\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>Ü:A\t-2.5\t{\n	4:1	bom-glued-to-account-in-error-line+eof-error-on-last-line
 2024-01-02 custom "b" 1 <BOM>:A.b\n	3:2	bom-glued-to-account
@@ -6344,7 +6344,7 @@ $x <BOM><BOM>assets:A T#!\t<BOM>x\t\t-2.5\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  <BOM>:A $x.b\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>@^l\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>assets:A <BOM>'b <BOM>"s"\n	4:3	bom-glued-to-account
-<BOM><BOM><BOM>:A .b $x ~<BOM>1:A\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A .b $x ~<BOM>1:A\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>assets:A\t<BOM>x @\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A$x\t~<BOM>1:A\n	4:3	bom-glued-to-account
 <BOM><BOM>Heading<BOM>a-b:C T#!\t<BOM>x<BOM>\n	3:1	mid-line-hash-bang
@@ -6352,7 +6352,7 @@ $x <BOM><BOM>assets:A T#!\t<BOM>x\t\t-2.5\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>Ü:A .b,Ü:A <BOM>\n	4:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>a-b:C <BOM>"s"\t-2.5'b\n	4:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A\t<BOM>"x"\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A\t<BOM>%\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A\t<BOM>%\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  Heading<BOM>a-b:C\t!\t<BOM>a-b:C;c\t<BOM>1.5\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>assets:A~<BOM>1:A\t;c\t<BOM>1.5\n	3:2	bom-glued-to-account
 <BOM>* <BOM>Ü:A T#!\n	3:1	mid-line-hash-bang
@@ -6368,11 +6368,11 @@ $x <BOM><BOM>assets:A T#!\t<BOM>x\t\t-2.5\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>Assets:A\t<BOM>a-b:C 'b\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>a-b:C^l\t<BOM>a-b:C <BOM>x\n	3:4	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>assets:A~<BOM>1:A.b\n	3:3	bom-glued-to-account
-<BOM><BOM>:A\t<BOM> \t-2.5\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t<BOM> \t-2.5\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM>Assets:A <BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>a-b:C\t<BOM>x\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>Assets:A~<BOM>1:A\t!\n	4:2	bom-glued-to-account
-<BOM>:A"x"\t#t\t<BOM>\n	3:1	line-start-bom-before-comment
+<BOM>:A"x"\t#t\t<BOM>\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>\t<BOM>"s"<BOM> \t-2.5\n	4:2	bom-glued-to-account
 <BOM>* Heading<BOM>1:A:B T#! \t-2.5\n	3:1	like-main-without-bom
 2024-01-02 *\n  kk: <BOM>Assets:A\t~<BOM>1:A@\t\t-2.5\n	4:2	bom-glued-to-account
@@ -6398,12 +6398,12 @@ $x <BOM>:A<BOM>"s"T#!\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>a-b:C\t$x\t,Ü:A\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>Ü:A\t;c\t<BOM>1.5 #t\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>Assets:A#t<BOM>%~<BOM>1:A\n	3:3	bom-glued-to-account
-<BOM><BOM>:A\t<BOM>%\t^l {\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t<BOM>%\t^l {\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>:A  1<BOM>2\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>a-b:C^l\n	4:2	bom-glued-to-account
 <BOM>assets:A T#!#t'b\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>assets:A {^l\n	4:2	bom-glued-to-account
-<BOM><BOM>:A'b\t-2.5\t.b\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A'b\t-2.5\t.b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>1:A\t<BOM>\t-2.5\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A:B T#!\t^l;c\t<BOM>1.5\n	4:2	bom-glued-to-account
 $x Heading<BOM>a-b:C<BOM>%\t<BOM>a-b:C\n	3:2	bom-glued-to-account
@@ -6427,7 +6427,7 @@ $x Heading<BOM>a-b:C<BOM>x <BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A {<BOM>%\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B#t\n	3:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>\t'b\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A { <BOM>%\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A { <BOM>%\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM>Ü:A$x"x"\t;c\t<BOM>1.5\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>assets:A<BOM>a-b:C\n	4:1	bom-glued-to-account
 <BOM>-:A T#!\t,Ü:A\n	3:1	mid-line-hash-bang
@@ -6446,7 +6446,7 @@ Heading<BOM>a-b:C@<BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>kk:<BOM>\t<BOM>%,Ü:A\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>:A\t<BOM>%\t{\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A\t<BOM>%\t<BOM>a-b:C$x\n	3:4	bom-glued-to-account
-<BOM><BOM>:A <BOM>"s",Ü:A\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A <BOM>"s",Ü:A\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM>1:A:B\t,Ü:A^l\t!\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>:A<BOM>"s"\n	3:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>\t^l\n	3:2	bom-glued-to-account
@@ -6465,7 +6465,7 @@ Heading<BOM>a-b:C@<BOM>a-b:C\n	3:2	bom-glued-to-account
 $x <BOM>:A<BOM>%\tT#!\n	3:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>:A\t"x"\n	3:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>-:A.b\t'b,Ü:A\n	4:3	bom-glued-to-account
-<BOM><BOM>:A@$x\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A@$x\n	3:1	bom-account-under-line-diagnostic
 <BOM><BOM><BOM>Assets:A T#! @ \t-2.5\n	3:1	mid-line-hash-bang
 $x Heading<BOM>a-b:C~<BOM>1:A\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A $x  1<BOM>2\n	3:3	bom-glued-to-account
@@ -6475,7 +6475,7 @@ $x Heading<BOM>a-b:C~<BOM>1:A\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>a-b:C <BOM>x\t'b\n	3:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>Assets:A "x"\t<BOM>{\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A'b!~<BOM>1:A\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A   1<BOM>2 ;c\t<BOM>1.5\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A   1<BOM>2 ;c\t<BOM>1.5\n	3:1	bom-account-under-line-diagnostic
 <BOM>* Heading<BOM>Assets:A<BOM>a-b:C\tT#! <BOM>\n	3:1	like-main-without-bom
 <BOM><BOM><BOM>Assets:A{T#!!\n	3:1	mid-line-hash-bang
 <BOM><BOM><BOM>Ü:A^l\t  1<BOM>2\tT#!\n	3:2	mid-line-hash-bang
@@ -6500,7 +6500,7 @@ $x <BOM>-:A,Ü:A\t@ T#!\n	3:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>Assets:A#t .b<BOM>\n	3:3	bom-glued-to-account
 2024-01-02 *\n  Heading<BOM>a-b:C~<BOM>1:A<BOM>a-b:C\t{\n	4:3	extra-construct-error
 2024-01-02 custom "b" 1 <BOM>a-b:C\t;c\t<BOM>1.5\tT#!\n	3:1	bom-glued-to-account
-<BOM><BOM>:A$x<BOM>a-b:C'b\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A$x<BOM>a-b:C'b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM> 'b <BOM>.b\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>Ü:A <BOM>\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A:B <BOM>"s"\n	4:2	bom-glued-to-account
@@ -6531,9 +6531,9 @@ $x <BOM>1:A:B<BOM>"s" T#!{\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>Ü:A\tT#!<BOM>"s"\t-2.5\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A:B\t<BOM>x\n	4:2	bom-glued-to-account
 $x <BOM>Ü:A T#!\n	3:1	mid-line-hash-bang
-<BOM>:A~<BOM>1:A  1<BOM>2\n	3:1	line-start-bom-before-comment
+<BOM>:A~<BOM>1:A  1<BOM>2\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>1:A$x<BOM>\n	4:2	bom-glued-to-account
-<BOM>:A  1<BOM>2.b\n	3:1	line-start-bom-before-comment
+<BOM>:A  1<BOM>2.b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM>Ü:A^l\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>kk:<BOM>\t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A #t$x !\n	3:3	bom-glued-to-account
@@ -6542,7 +6542,7 @@ $x <BOM>Ü:A T#!\n	3:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>Ü:A\t"x".b\n	3:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A\t#t<BOM>\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>a-b:C\t<BOM>%\n	4:2	bom-glued-to-account
-<BOM><BOM><BOM>:A <BOM>%\t<BOM>%\n	3:1	line-start-bom-before-comment
+<BOM><BOM><BOM>:A <BOM>%\t<BOM>%\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>\t'b \t-2.5<BOM>a-b:C\n	3:3	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>assets:A $x ,Ü:A   1<BOM>2\n	4:3	bom-glued-to-account
 <BOM>* <BOM>1:A\tT#!\t,Ü:A\t!\n	3:1	mid-line-hash-bang
@@ -6581,10 +6581,10 @@ $x <BOM>assets:A<BOM>T#!\t$x\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>T#!\t,Ü:A\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>-:A\t<BOM>"s"\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>:A<BOM>\t.b@\n	4:2	bom-glued-to-account
-<BOM>:A\t  1<BOM>2 'b\n	3:1	line-start-bom-before-comment
+<BOM>:A\t  1<BOM>2 'b\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>1:A <BOM>x\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>Assets:A\t<BOM>%<BOM>a-b:C<BOM>%\n	4:2	bom-glued-to-account
-<BOM><BOM>:A\t#t<BOM>x <BOM>%\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t#t<BOM>x <BOM>%\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM>assets:A<BOM>a-b:C~<BOM>1:A<BOM>\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>Assets:A <BOM>a-b:C\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM><BOM>assets:A\t<BOM>a-b:C\n	4:2	bom-glued-to-account
@@ -6608,7 +6608,7 @@ $x <BOM>assets:A<BOM>T#!\t$x\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  <BOM>1:A:B  1<BOM>2\t  1<BOM>2<BOM>%\n	4:3	bom-glued-to-account-in-error-line
 <BOM>* <BOM><BOM>assets:A#t  1<BOM>2 T#!\n	3:2	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>;c\t<BOM>1.5\t<BOM>%\n	4:1	bom-glued-to-account
-<BOM>:A ^l\t-2.5$x\n	3:1	line-start-bom-before-comment
+<BOM>:A ^l\t-2.5$x\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  <BOM>1:A{<BOM>% {\n	4:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>assets:A\tT#!<BOM>%\n	4:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>-:A\t'b\t$x\n	4:3	bom-glued-to-account
@@ -6617,14 +6617,14 @@ $x <BOM>assets:A<BOM>T#!\t$x\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>\t<BOM>\t.b\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B $x\n	3:2	bom-glued-to-account
 <BOM>* <BOM>a-b:C T#!<BOM>x\t.b\n	3:1	mid-line-hash-bang
-<BOM>:A 'b;c\t<BOM>1.5\t-2.5\n	3:1	line-start-bom-before-comment
+<BOM>:A 'b;c\t<BOM>1.5\t-2.5\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 *\n  kk: <BOM><BOM>assets:A\t<BOM>x   1<BOM>2\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>-:A  1<BOM>2\t<BOM>\n	3:3	bom-glued-to-account
-<BOM><BOM>:A\t<BOM>"s"\t  1<BOM>2 ~<BOM>1:A\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t<BOM>"s"\t  1<BOM>2 ~<BOM>1:A\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM>assets:A'b\n	3:2	bom-glued-to-account
 <BOM>* <BOM>Ü:A ,Ü:A\tT#!\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>Assets:A<BOM>\n	4:1	bom-glued-to-account
-<BOM><BOM>:A\t<BOM>%\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t<BOM>%\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>assets:AT#!^l<BOM>"s"\n	3:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>Ü:A\t<BOM>a-b:C\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>Ü:A<BOM>a-b:C\n	4:1	bom-glued-to-account
@@ -6660,7 +6660,7 @@ $x <BOM><BOM>assets:A@ <BOM>a-b:C\tT#!\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>:A\t<BOM>a-b:C  1<BOM>2\n	4:3	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>assets:A$x;c\t<BOM>1.5\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>assets:A\t-2.5\n	4:1	bom-glued-to-account
-<BOM>:A'b ;c\t<BOM>1.5\n	3:1	line-start-bom-before-comment
+<BOM>:A'b ;c\t<BOM>1.5\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A<BOM>#t T#!\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>a-b:C \t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>a-b:C <BOM>x\t~<BOM>1:A!\n	4:3	bom-glued-to-account
@@ -6683,7 +6683,7 @@ $x <BOM><BOM>assets:A@ <BOM>a-b:C\tT#!\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  <BOM>1:A:B;c\t<BOM>1.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>Ü:A\t,Ü:A\t<BOM>a-b:C~<BOM>1:A\n	4:3	bom-glued-to-account
 <BOM><BOM><BOM>Ü:AT#!\t<BOM>x\n	3:1	mid-line-hash-bang
-<BOM><BOM>:A\t<BOM>"s"\t#t\n	3:1	line-start-bom-before-comment
+<BOM><BOM>:A\t<BOM>"s"\t#t\n	3:1	bom-account-under-line-diagnostic
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>^l<BOM>"s"\t@\n	3:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A ;c\t<BOM>1.5<BOM>x\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>assets:A <BOM>"s"  1<BOM>2\t;c\t<BOM>1.5\n	4:3	bom-glued-to-account

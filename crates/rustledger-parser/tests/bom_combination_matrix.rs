@@ -280,9 +280,31 @@ fn exceptions() -> BTreeMap<(&'static str, usize), &'static str> {
             let f: Vec<&str> = l.split('\t').collect();
             assert_eq!(f.len(), 3, "malformed exception line: {l:?}");
             assert!(!f[2].trim().is_empty(), "no reason: {l:?}");
+            // Every reason names its counts; `reason_counts` panics if not.
+            reason_counts(f[2]);
             ((f[0], f[1].parse().expect("a line number")), f[2])
         })
         .collect()
+}
+
+/// The counts an exception's reason was written for, as (rledger,
+/// beancount, main), read from its `rledger counts X where beancount counts
+/// Y (main Z)`.
+fn reason_counts(reason: &str) -> (usize, usize, usize) {
+    let number = |after: &str, upto: &str| -> usize {
+        let rest = reason
+            .split_once(after)
+            .unwrap_or_else(|| panic!("no `{after}` in the reason: {reason:?}"))
+            .1;
+        rest[..rest.find(upto).unwrap_or(rest.len())]
+            .parse()
+            .unwrap_or_else(|_| panic!("no count after `{after}` in the reason: {reason:?}"))
+    };
+    (
+        number("rledger counts ", " "),
+        number("beancount counts ", " "),
+        number("(main ", ")"),
+    )
 }
 
 /// Whether line `l`'s difference is an end-of-file error put on another
@@ -360,6 +382,11 @@ impl BomRoles {
     /// Whether a BOM-led account starts in `span`.
     fn account_in(&self, span: &std::ops::Range<usize>) -> bool {
         self.accounts.iter().any(|a| span.contains(&a.start))
+    }
+
+    /// Whether a BOM-led account starts exactly at byte `at`.
+    fn account_at(&self, at: usize) -> bool {
+        self.accounts.iter().any(|a| a.start == at)
     }
 }
 
@@ -728,13 +755,20 @@ fn cause(
             // without a BOM on the line; the heading rest reads it as beancount
             // does since #2928.
             "brace-hash-before-tag"
-        } else if r < b && text.starts_with(BOM) && skipped_line_start(strip_boms(text)) {
+        } else if r < b
+            && text.starts_with(BOM)
+            && skipped_line_start(strip_boms(text))
+            && !facts.roles.account_at(facts.span.start)
+        {
             // A BOM that starts its line keeps its own extent (#2928's
             // deliberate line-start rule, for concatenated files), so a line
             // start beancount skips after it (`;`, `%`, `!`, `*`, `:`, `&`,
             // `?`, a `#` not before a tag character) hides the rest of the
             // line here, where beancount's invalid token runs through it and
-            // lexes on.
+            // lexes on. Not where beancount's lexer reads the line's start
+            // as an `ACCOUNT` (`<BOM>:A$x!`, which admits the BOM): no
+            // invalid token runs there, and the line is left to the account
+            // causes below.
             "line-start-bom-before-comment"
         } else if r < b && boms > 0 && facts.inner_boms_are_the_difference() {
             // A run with a BOM inside it, on a line whose BOM diagnostic already
@@ -777,9 +811,15 @@ fn cause(
             // A line with no BOM, counted exactly as main counts it: a
             // difference from beancount that has nothing to do with #2928.
             "bom-free-line-as-on-main"
-        } else if exceptions().contains_key(&(tail, l)) {
+        } else if exceptions()
+            .get(&(tail, l))
+            .is_some_and(|reason| reason_counts(reason) == (r, b, m))
+        {
             // Listed by hand, with its reason, in
-            // data/bom_combination_matrix_exceptions.tsv.
+            // data/bom_combination_matrix_exceptions.tsv. The reason names
+            // the counts it was written for, so a later change in any of
+            // them leaves the line unexplained rather than kept by a stale
+            // reason.
             "listed-exception"
         } else if r > b && (r == m || parts_hold(&[CONSTRUCT], &facts)) {
             // rledger reports one more construct-level error (a custom value, a
@@ -788,6 +828,15 @@ fn cause(
             // or, where a BOM changed main's count, on main for the BOM-free
             // analog (`price USD 1 <BOM>x {1 USD}#t`).
             CONSTRUCT
+        } else if get(&counts.analog_bc, l) == b && get(&counts.analog_main, l) == r {
+            // The mechanism of `like-main-without-bom`, on a line no further
+            // from beancount than main: with each BOM replaced by an ordinary
+            // character, beancount counts the line as it does here and main
+            // counts it as rledger does here, so the difference is an older
+            // recovery gap the BOM only carries (such as the grammar error of
+            // an indented line whose first token is invalid). Asked last, so it
+            // takes no line from a cause above. Checked from the table.
+            "like-main-without-bom"
         } else {
             return None;
         },
@@ -954,8 +1003,19 @@ fn check_row(line: &str) -> RowResult {
                 .get(&l)
                 .copied()
                 .unwrap_or(0);
+            let listed = exceptions()
+                .get(&(tail.as_str(), l))
+                .map(|reason| {
+                    let (lr, lb, lm) = reason_counts(reason);
+                    format!(
+                        ", a listed exception written for rledger {lr} / beancount {lb} / \
+                         main {lm}, not these counts"
+                    )
+                })
+                .unwrap_or_default();
             unexplained.push(format!(
-                "{l} ({:?}: later grammar {}, rledger with inner BOMs made `$` {rewritten})",
+                "{l} ({:?}: later grammar {}, rledger with inner BOMs made `$` \
+                 {rewritten}{listed})",
                 f.text, f.later_grammar
             ));
         }

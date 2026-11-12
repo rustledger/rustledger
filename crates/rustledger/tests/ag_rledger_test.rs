@@ -2829,10 +2829,12 @@ fn test_lint_control_chars_warns_on_load_errors() {
         .unwrap_or_else(|| panic!("no warnings: {envelope}"));
     assert_eq!(warnings.len(), 1, "{envelope}");
     assert_eq!(warnings[0]["code"], "LOAD_ERRORS", "{envelope}");
+    // The invalid token after the lone string keeps that string in the
+    // payee's place (#2932), so the character is reported in the payee.
     assert!(
         envelope["result"]["stdout"]
             .as_str()
-            .is_some_and(|s| s.contains("control character in narration")),
+            .is_some_and(|s| s.contains("control character in payee")),
         "{envelope}"
     );
 }

@@ -307,8 +307,10 @@ mod tests {
             ),
             OutputFormat::Text,
         );
+        // The invalid token after the lone string keeps that string in the
+        // payee's place (#2932), so the character is reported in the payee.
         assert!(
-            out.contains(":2: control character in narration: \"bell\\u{7}\""),
+            out.contains(":2: control character in payee: \"bell\\u{7}\""),
             "the control character is still found:\n{out}"
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");

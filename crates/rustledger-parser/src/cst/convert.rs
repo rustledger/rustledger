@@ -1366,22 +1366,22 @@ fn convert_transaction(
     // (#2905); the transaction is kept, as for every header defect.
     let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
 
-    // Header strings, consumed straight off the iterator (no intermediate Vec,
-    // no count-then-unwrap): 0 -> empty narration; 1 -> narration only;
-    // 2 -> payee + narration; 3+ -> surface only the last as narration (the
-    // middles are unreachable through this typed shape).
-    let mut it = node.strings().filter_map(|s| s.text_decoded());
-    let (payee_str, narration_str) = match (it.next(), it.next(), it.next()) {
-        (None, _, _) => (None, String::new()),
-        (Some(n), None, _) => (None, n),
-        (Some(p), Some(n), None) => (Some(p), n),
-        // 3+: `c` is the 3rd string; if more follow, `it.last()` is the actual
-        // last (else it falls back to `c`). No clone in the common 0/1/2 cases.
-        (Some(_), Some(_), Some(c)) => (None, it.last().unwrap_or(c)),
+    // Payee and narration: the shared slot rule `txn_header::header_strings`
+    // (#2932), which reads the header's strings together with any invalid
+    // token among them (the one token that can have swallowed a string), so
+    // that a string never moves to a different field under error recovery;
+    // every other token leaves the count rule standing. Green
+    // `convert_transaction_header` and the typed `payee()` / `narration()`
+    // accessors use the same rule.
+    let slots = node.string_slots();
+    let nth = |i: usize| {
+        node.strings()
+            .nth(i)
+            .and_then(|s| s.text_decoded())
+            .unwrap_or_default()
     };
-
-    let payee = payee_str.map(InternedStr::from);
-    let narration = InternedStr::from(narration_str);
+    let payee = slots.payee().map(|i| InternedStr::from(nth(i)));
+    let narration = InternedStr::from(slots.directive_narration().map(nth).unwrap_or_default());
 
     // Tags / links from the TRANSACTION node: the typed AST
     // accessor `tags()`/`links()` is scoped to the header region.

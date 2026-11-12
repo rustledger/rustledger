@@ -892,7 +892,7 @@ impl Transaction {
     ///
     /// The 2-string convention (`"payee" "narration"`) is the
     /// canonical form; [`Self::payee`] and [`Self::narration`]
-    /// follow it strictly. For 3+ strings (malformed but
+    /// follow it, with the slot rule of #2932. For 3+ strings (malformed but
     /// losslessly parsed), use this method to surface every
     /// header string.
     pub fn strings(&self) -> impl Iterator<Item = StringLit> + '_ {
@@ -901,42 +901,31 @@ impl Transaction {
             .filter_map(StringLit::cast)
     }
 
-    /// The payee string, if a separate payee + narration pair is
-    /// present. Returns `Some(first)` ONLY when exactly two
-    /// header `STRING` tokens appear (the canonical
-    /// `"payee" "narration"` shape). With 0, 1, or 3+ strings
-    /// the convention is ambiguous and this returns `None` —
-    /// use [`Self::strings`] for lossless access.
-    pub fn payee(&self) -> Option<StringLit> {
-        // Take up to 3 to disambiguate 2 from 3+ without
-        // allocating the whole sequence.
-        let mut iter = self.strings();
-        let first = iter.next()?;
-        let second = iter.next()?;
-        if iter.next().is_some() {
-            None
-        } else {
-            // Exactly 2 strings; first is payee.
-            let _ = second;
-            Some(first)
-        }
+    /// Which header strings are the payee and the narration, by the shared
+    /// slot rule [`super::txn_header::header_strings`] (#2932), the one the
+    /// directive converters use too.
+    pub(super) fn string_slots(&self) -> super::txn_header::HeaderStrings {
+        super::txn_header::header_strings(self.header_tokens().map(|t| t.kind()))
     }
 
-    /// The narration string. Returns `Some(only)` for a single
-    /// header string and `Some(last)` for the 2-string
-    /// `"payee" "narration"` form. Returns `None` for 0 or 3+
-    /// strings — use [`Self::strings`] for lossless access on
-    /// malformed headers.
+    /// The payee string, if the header has one.
+    ///
+    /// `Some(first)` for the canonical `"payee" "narration"` pair, and
+    /// `Some(only)` for a lone string right after the flag followed by an
+    /// invalid token (`* "p" <bad>`), which kept it in the payee's place
+    /// (#2932). `None` for no string, a lone narration, or 3+ strings, which
+    /// are ambiguous: use [`Self::strings`] for lossless access.
+    pub fn payee(&self) -> Option<StringLit> {
+        self.strings().nth(self.string_slots().payee()?)
+    }
+
+    /// The narration string. `Some(only)` for a single header string in
+    /// the narration's place and `Some(last)` for the `"payee" "narration"`
+    /// pair. `None` for no string, a lone payee (see [`Self::payee`]), or 3+
+    /// strings: use [`Self::strings`] for lossless access on malformed
+    /// headers.
     pub fn narration(&self) -> Option<StringLit> {
-        let mut iter = self.strings();
-        let first = iter.next()?;
-        let second = iter.next();
-        let third = iter.next();
-        match (second, third) {
-            (None, _) => Some(first),
-            (Some(s2), None) => Some(s2),
-            _ => None,
-        }
+        self.strings().nth(self.string_slots().narration()?)
     }
 
     /// All `#TAG` tokens attached to the transaction header.

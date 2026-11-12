@@ -1,5 +1,5 @@
 // Ledgers on which every diagnostic surface must report the same findings
-// (#2937): `rledger check`, WASM (`validateSource`, `ParsedLedger`,
+// (#2937, #2949): `rledger check`, WASM (`validateSource`, `ParsedLedger`,
 // `Ledger.fromFiles`), the FFI component (`validate`, `load`) and the LSP.
 //
 // Shared, through `include!`, by the drift-guard test of each surface:
@@ -24,6 +24,11 @@
 //   balance (`-2100 USD`). WASM skipped validation after the booking error.
 //   (bean-check places the booking error on the transaction's line, 14;
 //   every rledger surface places it on the posting's, 15, #2330.)
+// - bean-check reports a syntax error AND validates the entries that did
+//   parse: the unbalanced transaction (`Transaction does not balance: (10
+//   USD)`) and the balance assertion after it (`accumulated 100 USD`), with
+//   the error on the same lines (8, 4, 10) as `check`. WASM, the FFI and the
+//   LSP validated nothing after a parse error (#2949).
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -133,6 +138,38 @@ pub const SURFACE_CASES: &[SurfaceCase] = &[
                 code: "E2001",
                 line: 18,
                 message: "Balance failed for Assets:Cash: expected 0 USD, got -2100 USD",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "validation after a parse error",
+        source: "2024-01-01 open Assets:Bank
+2024-01-01 open Equity:Opening
+
+2024-01-02 * \"fund\"
+  Assets:Bank      100 USD
+  Equity:Opening  -90 USD
+
+garbage
+
+2024-01-04 balance Assets:Bank 0 USD
+",
+        findings: &[
+            Finding {
+                code: "P0012",
+                line: 8,
+                message: "parse error: unexpected input",
+            },
+            Finding {
+                code: "E3001",
+                line: 4,
+                message: "Transaction does not balance: residual 10 USD",
+            },
+            Finding {
+                code: "E2001",
+                line: 10,
+                message: "Balance failed for Assets:Bank: expected 0 USD, got 100 USD",
             },
         ],
         closes_nonempty: false,

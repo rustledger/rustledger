@@ -561,19 +561,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `--workspace` on Check, Clippy and Documentation: without it cargo
+        # acts on `default-members` only, which leaves out rustledger-wasm and
+        # the three FFI crates, so a lint in one of them reached main unseen
+        # (a `redundant_pub_crate` in rustledger-wasm, from #2952). All four
+        # build on the host target, so no extra target or feature set is
+        # needed. Test and Doctests still cover `default-members` only.
         include:
           - name: Check
-            cmd: cargo check --all-features --all-targets
+            cmd: cargo check --workspace --all-features --all-targets
             components: ""
           - name: Clippy
-            cmd: cargo clippy --all-features --all-targets -- -D warnings
+            cmd: cargo clippy --workspace --all-features --all-targets -- -D warnings
             components: clippy
           - name: Test
             cmd: cargo nextest run --all-features
             components: ""
             install: nextest
           - name: Documentation
-            cmd: cargo doc --all-features --no-deps
+            cmd: cargo doc --workspace --all-features --no-deps
             components: ""
             env: RUSTDOCFLAGS=-Dwarnings
           # Private items too (#2512): the build above skips them, so a

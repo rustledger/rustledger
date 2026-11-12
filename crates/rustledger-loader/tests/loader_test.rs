@@ -3764,3 +3764,35 @@ fn document_discovery_takes_only_strictly_valid_account_directories() {
     assert_eq!(documents, ["Assets:\u{65e5}\u{672c}"]);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
+
+/// `LoadResult::take_parse_errors` takes exactly the parse errors out of
+/// `errors` and leaves every other load error (#2949), so a surface reports
+/// them one by one and `process` still sees the rest.
+#[test]
+fn test_take_parse_errors_leaves_the_other_load_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("main.beancount");
+    std::fs::write(
+        &path,
+        "include \"missing.beancount\"\n2024-01-01 open Assets:Bank\ngarbage\n",
+    )
+    .expect("write");
+    let mut result = load_raw(&path).expect("load");
+    assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+
+    let parse_errors = result.take_parse_errors();
+    assert_eq!(parse_errors.len(), 1, "{parse_errors:?}");
+    assert!(matches!(
+        &parse_errors[0],
+        LoadError::ParseErrors { errors, .. } if errors.len() == 1
+    ));
+    assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+    assert!(
+        !matches!(result.errors[0], LoadError::ParseErrors { .. }),
+        "{:?}",
+        result.errors
+    );
+    // What did parse is still loaded.
+    assert_eq!(result.directives.len(), 1);
+    assert!(result.take_parse_errors().is_empty());
+}

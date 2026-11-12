@@ -467,13 +467,20 @@ use crate::types::{Error, LedgerOptions};
 /// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
 /// lone header string moves it to no other field, so `* "p" <bad>` keeps
 /// payee `p` where `p` was the narration; an older blob would keep serving
-/// the shifted fields. (v100 was held by #2931 and v101 by #2952, and
-/// neither was released.)
+/// the shifted fields. (v100 was held by #2931 and never released.)
+/// v103: loader v73, unchanged. Both payloads move (#2949): a source with a
+/// parse error is booked and validated over the entries that did parse, as
+/// `rledger check` validates it, so a `ParsedLedger` archives those
+/// directives and their validation errors where it archived none, and a
+/// `Ledger` archives each parse error with its code and line where it
+/// archived one line-less `parse errors in <path>`. An older blob would keep
+/// serving the old errors: a `ParsedLedger` with no directives and no
+/// validation errors for a source with a parse error, and a `Ledger` with one
+/// line-less parse error per file. (v101 was never released.)
 /// v104: loader v74, PARSER OUTPUT changed (#2931, for #2928). A BOM in the
 /// middle of a line starts an invalid token that runs to the next blank, as
 /// in beancount, so a quote after it opens no string; an older blob would
-/// keep serving such a file with its old errors and values. (v103 is held by
-/// #2952.)
+/// keep serving such a file with its old errors and values.
 pub const CACHE_VERSION: u32 = 104;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

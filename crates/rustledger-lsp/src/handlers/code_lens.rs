@@ -61,8 +61,8 @@ use super::utils::{LineIndex, PositionEncoding, count_noun};
 /// verdict the lens cannot back up.
 ///
 /// The balance lens ALSO renders neutrally when validation would have
-/// been skipped for this buffer (parse errors elsewhere in the file,
-/// or `source.len() > MAX_VALIDATION_FILE_SIZE`). Without this, the
+/// been skipped for this buffer (`source.len() > MAX_VALIDATION_FILE_SIZE`;
+/// a parse error no longer skips it, #2949). Without this, the
 /// diagnostic cache reads `Some(&[])` and the lens would render `✓`
 /// for assertions the validator never evaluated — the inverse-symmetric
 /// failure of #1264.
@@ -77,10 +77,10 @@ pub fn handle_code_lens(
     let mut lenses = Vec::new();
     let uri = params.text_document.uri.as_str();
     // Even with a populated cache, the validator may have declined to
-    // run (large file, or parse errors elsewhere). Treat that as cold-
+    // run (a large file). Treat that as cold-
     // start for the lens: the cache is `Some(&[])` not because the
     // assertion holds but because no balance verdict was computed.
-    let verdict_diagnostics = if validation_would_run(source, parse_result) {
+    let verdict_diagnostics = if validation_would_run(source) {
         cached_diagnostics
     } else {
         None
@@ -798,47 +798,46 @@ mod tests {
         );
     }
 
-    /// When the buffer has parse errors elsewhere, `all_diagnostics`
-    /// (diagnostics.rs:554) skips validation entirely; the cache for
-    /// the URI then contains only parse-error diagnostics — none of
-    /// which sit at the balance line. The lens MUST render neutrally
-    /// in this case, not ✓: the validator did not evaluate the
-    /// assertion. This is the inverse-symmetric failure of the #1264
-    /// dead-link UX (silent ✓ instead of silent ⚠) — both come from
-    /// the lens asserting verdicts it cannot back up.
+    /// When the buffer is over the validation size cap, `all_diagnostics`
+    /// skips validation entirely; the cache for the URI then holds nothing
+    /// at the balance line. The lens MUST render neutrally in this case,
+    /// not ✓: the validator did not evaluate the assertion. This is the
+    /// inverse-symmetric failure of the #1264 dead-link UX (silent ✓
+    /// instead of silent ⚠): both come from the lens asserting verdicts it
+    /// cannot back up. (A parse error used to skip validation too; it no
+    /// longer does, as `rledger check` validates after one, #2949.)
     #[test]
-    fn balance_lens_neutral_when_parse_errors_skip_validation() {
-        // Open + balance directives come first (cleanly parsed, so the
-        // balance lens is always emitted regardless of how the parser
-        // recovers from the trailing garbage). The malformed line at
-        // the END forces `parse_result.errors` to be non-empty without
-        // making the test depend on parser-recovery behavior at the
-        // top of the file. The line starts with `@`: a column-0 `!` line
-        // is a comment, as in beancount (#2779), so it would not do.
-        let source = r#"2024-01-01 open Assets:Bank USD
-2024-01-31 balance Assets:Bank 100.00 USD
-@@@ syntax garbage on a trailing line
-"#;
-        let result = parse(source);
-        assert!(
-            !result.errors.is_empty(),
-            "test setup: source must produce a parse error to exercise \
-             the validation-skip branch. got errors = {:?}",
-            result.errors,
+    fn balance_lens_neutral_when_the_size_cap_skips_validation() {
+        // Open + balance directives first, then comment lines enough to put
+        // the buffer over the 500 KB cap.
+        let mut source = String::from(
+            "2024-01-01 open Assets:Bank USD\n2024-01-31 balance Assets:Bank 100.00 USD\n",
         );
+        source.push_str(&"; padding\n".repeat(60 * 1024));
+        assert!(
+            !super::super::diagnostics::validation_would_run(&source),
+            "test setup: the buffer must be over the validation size cap"
+        );
+        let result = parse(&source);
         let params = code_lens_params();
 
         // Diagnostic cache populated and contains nothing at the
         // balance line. Pre-fix the lens would have read this as
         // "validator approved" and rendered ✓.
         let balance_lens = find_balance_lens(
-            handle_code_lens(&params, source, &result, Some(&[]), PositionEncoding::Utf16)
-                .expect("lenses emitted"),
+            handle_code_lens(
+                &params,
+                &source,
+                &result,
+                Some(&[]),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
         );
         let cmd = balance_lens.command.as_ref().expect("ships resolved");
         assert!(
             !cmd.title.contains('✓') && !cmd.title.contains('⚠'),
-            "parse-error skip path: lens must not claim a verdict the \
+            "size-cap skip path: lens must not claim a verdict the \
              validator never computed. got {:?}",
             cmd.title
         );

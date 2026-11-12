@@ -321,8 +321,11 @@ pub fn load(source: &str, filename: &str, expand_pads: bool) -> out::LoadResult 
 }
 
 /// Run the semantic validation session over a loaded result and return its
-/// validation-phase errors. Empty when the input has parse errors (validation
-/// only runs on syntactically-valid input, matching `validate`).
+/// validation-phase errors. No load error stops it, as none stops the
+/// validating loader `rledger check` runs: a parse error is reported and the
+/// entries that did parse are validated, as `check` and bean-check validate
+/// them. It used to return nothing on any parse-phase error, so one syntax
+/// error hid every other finding (#2949).
 ///
 /// Shared by `validate` and the `load`/`load_file` path so the primary load
 /// surface reports balance-assertion failures (and the other Late checks) like
@@ -339,9 +342,6 @@ fn semantic_validation_errors(
     loaded: &ffi::helpers::LoadResult,
     filename: Option<&str>,
 ) -> (Vec<ffi::Error>, Vec<rustledger_validate::BalanceActual>) {
-    if loaded.errors.iter().any(|e| e.phase == "parse") {
-        return (Vec::new(), Vec::new());
-    }
     let today = jiff::Zoned::now().date();
     // The options `rledger check` validates with, from the ledger's own
     // (`LoadResult::validation_options`): a default set ignored

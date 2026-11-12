@@ -225,32 +225,52 @@ pub fn run_with_writer<W: io::Write>(
     // bean-query prints nothing for it. They are `rledger lint`'s to report.
     // #2238 turned validation on here without this skip, so `query` printed
     // an E1004 that `check` and bean-query both stay silent on.
-    let reported: Vec<(&str, &str)> = ledger
-        .options
-        .warnings
+    // The option diagnostics go through the loader's canonical mapping, so
+    // each carries its option's file and line, as in `check` (#2925).
+    let option_errors = rustledger_loader::option_warnings_to_errors(&ledger.options.warnings);
+    let reported: Vec<(&str, &str, Option<(String, usize)>)> = option_errors
         .iter()
-        .map(|w| (w.code, w.message.as_str()))
+        .map(|e| {
+            let site = e
+                .location
+                .as_ref()
+                .map(|loc| (loc.file.display().to_string(), loc.line));
+            (e.code.as_str(), e.message.as_str(), site)
+        })
         .chain(
             ledger
                 .errors
                 .iter()
                 .filter(|err| !is_advisory_only_code(&err.code))
-                .map(|err| (err.code.as_str(), err.message.as_str())),
+                .map(|err| (err.code.as_str(), err.message.as_str(), None)),
         )
         .collect();
     if !reported.is_empty() && !args.no_errors {
         if let Some(sink) = diagnostics {
-            for (code, message) in reported {
+            for (code, message, site) in reported {
+                let (file, line) = site.unzip();
                 sink.emit(crate::cmd::report_cmd::Diagnostic {
                     code: Some(code.to_string()),
+                    file,
+                    line,
                     ..crate::cmd::report_cmd::Diagnostic::message(message)
                 });
             }
         } else {
             // A failed write to the diagnostics stream must not cost the
             // reader the query's results.
-            for (code, message) in reported {
-                let _ = writeln!(err, "{code}: {message}");
+            for (code, message, site) in reported {
+                let location = site.map_or_else(String::new, |(file, line)| {
+                    format!(
+                        "{}:{line}: ",
+                        rustledger_plugin::escape_untrusted_line(&file)
+                    )
+                });
+                // A message quotes the ledger's option keys and values, and a
+                // terminal reads this line, so it is escaped as
+                // `Diagnostic::to_line` escapes the sink's (#2538).
+                let message = rustledger_plugin::escape_untrusted_text(message);
+                let _ = writeln!(err, "{location}{code}: {message}");
             }
             let _ = writeln!(err);
         }

@@ -55,9 +55,14 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// Everything else is taken from the TOP-LEVEL file only. The split is by what
 /// an option governs, not by one blanket rule (#2151):
 ///
-/// * These describe the file that declares them. A sub-ledger naming its own
-///   operating currency or document root is describing itself, not overriding
-///   its includer, so they accumulate.
+/// * These are the ones beancount 3.2.3 aggregates across files
+///   (`loader.aggregate_options_map`): `operating_currency` is merged,
+///   `display_precision` goes into the merged `dcontext`, and
+///   `insert_pythonpath` becomes `pythonpath`. A sub-ledger naming its own
+///   operating currency is describing itself, not overriding its includer.
+///   `documents` is not among them: beancount keeps only the top-level
+///   file's, so an included root is ignored (E7009) and never scanned or
+///   checked for existence (#2925).
 /// * Everything else defines global computation or the ledger's identity.
 ///   `booking_method` decides which lot a sale consumes and
 ///   `inferred_tolerance_default` decides what counts as balanced, so letting
@@ -85,7 +90,6 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// did.
 const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "operating_currency",
-    "documents",
     "insert_pythonpath",
     "display_precision",
 ];
@@ -611,6 +615,15 @@ pub struct OptionWarning {
     pub option: String,
     /// Option value.
     pub value: String,
+    /// Where the `option` line is: its file and 1-based line, as beancount
+    /// locates every option error (#2925). `None` only for an option set
+    /// through [`Options::set`] / [`Options::set_scoped`], which have no
+    /// source to point at.
+    ///
+    /// Every surface reads it from here: `rledger check` (text and JSON, and
+    /// `ag-rledger check` through it), the LSP's diagnostic range, WASM's
+    /// `option_errors`, and the FFI.
+    pub site: Option<OptionSite>,
 }
 
 impl OptionWarning {
@@ -776,6 +789,12 @@ pub struct Options {
     /// ledger refuses when that method is not the one this value asks for
     /// (see [`Self::query_refusal`]).
     pub rejected_booking_method: Option<RejectedOption>,
+
+    /// Where each applied value was written, `(option, value, site)`, for the
+    /// diagnostics raised once every option is set (E7006 through
+    /// [`Self::locate`], E7010 in [`Self::rooted_leaf_warnings`]). Transient,
+    /// like `warnings`: filled by [`Self::set_scoped_at`] and not cached.
+    value_sites: Vec<(String, String, OptionSite)>,
 }
 
 impl Default for Options {
@@ -921,6 +940,7 @@ impl Options {
                     ),
                     option: key.to_string(),
                     value: leaf.to_string(),
+                    site: self.site_of(key, leaf).cloned(),
                 })
             })
             .collect()
@@ -987,6 +1007,7 @@ impl Options {
             set_options: FxHashSet::default(),
             warnings: Vec::new(),
             rejected_booking_method: None,
+            value_sites: Vec::new(),
         }
     }
 
@@ -1013,6 +1034,7 @@ impl Options {
             message: message.to_string(),
             option: key.to_string(),
             value: value.to_string(),
+            site: None,
         });
     }
 
@@ -1026,8 +1048,10 @@ impl Options {
         self.set_scoped_at(key, value, top_level, None);
     }
 
-    /// [`Self::set_scoped`] for an option written at `site`, so a rejection
-    /// that refuses queries ([`Self::query_refusal`]) can say where it is.
+    /// [`Self::set_scoped`] for an option written at `site`. Every diagnostic
+    /// the option raises carries the site ([`OptionWarning::site`]), as
+    /// beancount locates every option error, and so does a rejection that
+    /// refuses queries ([`Self::query_refusal`]).
     pub fn set_scoped_at(
         &mut self,
         key: &str,
@@ -1035,14 +1059,84 @@ impl Options {
         top_level: bool,
         site: Option<OptionSite>,
     ) {
-        self.set_scoped_inner(key, value, top_level);
+        let mark = self.warnings.len();
+        let applied = self.set_scoped_inner(key, value, top_level);
+        let Some(site) = site else {
+            return;
+        };
+        for warning in &mut self.warnings[mark..] {
+            warning.site.get_or_insert_with(|| site.clone());
+        }
         // A new rejection starts with no site (see the `booking_method` arm);
         // this is where it was written.
         if key == "booking_method"
             && let Some(rejected) = &mut self.rejected_booking_method
             && rejected.site.is_none()
         {
-            rejected.site = site;
+            rejected.site = Some(site.clone());
+        }
+        if applied {
+            self.value_sites
+                .push((key.to_string(), value.to_string(), site));
+        }
+    }
+
+    /// Where `option` was last applied with `value`, when it was set through
+    /// [`Self::set_scoped_at`].
+    #[must_use]
+    pub fn site_of(&self, option: &str, value: &str) -> Option<&OptionSite> {
+        self.value_sites
+            .iter()
+            .rev()
+            .find(|(k, v, _)| k == option && v == value)
+            .map(|(_, _, site)| site)
+    }
+
+    /// These options with every location dropped: each diagnostic's site,
+    /// the applied values' sites and the rejected `booking_method`'s.
+    ///
+    /// For comparing what two loads MEAN rather than where they were written:
+    /// `rledger merge` and `split` move options to other files and lines, and
+    /// must still find the result the same ledger.
+    #[must_use]
+    pub fn without_locations(&self) -> Self {
+        let mut options = self.clone();
+        options.value_sites.clear();
+        for warning in &mut options.warnings {
+            warning.site = None;
+        }
+        if let Some(rejected) = &mut options.rejected_booking_method {
+            rejected.site = None;
+        }
+        options
+    }
+
+    /// Give each of `warnings` that has no site the site of the `option`
+    /// line it is about. For the diagnostics raised after the options are
+    /// set, such as the E7006 of [`crate::document_root_warnings`], which
+    /// reads only the values.
+    ///
+    /// By occurrence, not by value alone: `warnings` follow the applied
+    /// values in order, one per occurrence, so the n-th warning for an
+    /// `(option, value)` gets the n-th line that applied it. The same
+    /// `documents` root written on two lines of the top-level file is two
+    /// warnings at two lines, not both at the last one.
+    pub fn locate(&self, warnings: &mut [OptionWarning]) {
+        let mut seen: FxHashMap<(String, String), usize> = FxHashMap::default();
+        for warning in warnings {
+            if warning.site.is_some() {
+                continue;
+            }
+            let nth = seen
+                .entry((warning.option.clone(), warning.value.clone()))
+                .or_insert(0);
+            warning.site = self
+                .value_sites
+                .iter()
+                .filter(|(k, v, _)| *k == warning.option && *v == warning.value)
+                .nth(*nth)
+                .map(|(_, _, site)| site.clone());
+            *nth += 1;
         }
     }
 
@@ -1084,7 +1178,8 @@ impl Options {
         (asked != Some(booked_with)).then_some(rejected)
     }
 
-    fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) {
+    /// Whether the value was applied.
+    fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) -> bool {
         // A read-only option is not scoped out: it may not be set from any
         // file, so it gets its E7005 error from `set_inner`, which never
         // applies it. Scoping it out would turn that error into the E7009
@@ -1095,29 +1190,55 @@ impl Options {
             && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
             && !READONLY_OPTIONS.contains(&key)
         {
-            // A deprecated option is still deprecated when it is also ignored,
-            // and E7004 is an error where the notice below is a warning. Raise
-            // it first so scoping cannot quietly downgrade the severity of a
-            // diagnostic that existed before this check did.
-            self.warn_if_deprecated(key, value);
+            // beancount parses an included file with its own `Builder` and
+            // fresh options, so the option's converter runs there: every value
+            // it rejects is an error at the included file's line, and the
+            // value, valid or not, is then dropped, since only the top-level
+            // file's options are kept (#2925). The same here: the value is
+            // read into a scratch `Options` that starts from the defaults, its
+            // diagnostics are kept, and the scratch is discarded. That raises
+            // E7004 for a deprecated option too (its arm in `apply` does), so
+            // being ignored cannot downgrade that error either. A rejected
+            // `booking_method` stays in the scratch: the top-level method
+            // governs, so it refuses no query.
+            //
+            // Stricter than Python, deliberately (#2925): an included file's
+            // `name_*` root does not govern that file's own accounts. beancount
+            // checks account roots while parsing the file, with that file's
+            // options, so `option "name_equity" "Capital"` followed by
+            // `open Capital:Z` in the same included file loads the account
+            // (with no account type) and bean-check is clean. rledger keeps
+            // one set of roots for the whole tree, the top-level file's, so
+            // that `open` is E1005: an account no ledger-wide root covers.
+            // Pinned by `included_name_option_does_not_root_its_own_file`.
+            let mut scratch = Self::new();
+            let accepted = scratch.apply(key, value);
+            self.warnings.append(&mut scratch.warnings);
+            // Only for a value beancount would have accepted: a rejected one
+            // already has its error, and "is ignored" would add nothing.
+            //
             // Its own code, not E7003. That one means "specified twice, last
             // wins" and is mapped downstream to `ErrorCode::DuplicateOption`;
             // this option may be the only one of its name in the tree.
-            self.warnings.push(OptionWarning {
-                code: "E7009",
-                message: format!(
-                    "Option \"{key}\" set in an included file is ignored; \
-                     the top-level ledger's value governs"
-                ),
-                option: key.to_string(),
-                value: value.to_string(),
-            });
-            return;
+            if accepted {
+                self.warnings.push(OptionWarning {
+                    code: "E7009",
+                    message: format!(
+                        "Option \"{key}\" set in an included file is ignored; \
+                         the top-level ledger's value governs"
+                    ),
+                    option: key.to_string(),
+                    value: value.to_string(),
+                    site: None,
+                });
+            }
+            return false;
         }
-        self.set_inner(key, value);
+        self.set_inner(key, value)
     }
 
-    fn set_inner(&mut self, key: &str, value: &str) {
+    /// Whether the value was applied.
+    fn set_inner(&mut self, key: &str, value: &str) -> bool {
         // Check for unknown options (E7001)
         let is_known = KNOWN_OPTIONS.contains(&key);
         if !is_known {
@@ -1126,6 +1247,7 @@ impl Options {
                 message: format!("Invalid option \"{key}\""),
                 option: key.to_string(),
                 value: value.to_string(),
+                site: None,
             });
         }
 
@@ -1136,8 +1258,9 @@ impl Options {
                 message: format!("Option '{key}' may not be set"),
                 option: key.to_string(),
                 value: value.to_string(),
+                site: None,
             });
-            return; // Don't apply the value
+            return false; // Don't apply the value
         }
 
         // Check for duplicate non-repeatable options (E7003).
@@ -1156,7 +1279,8 @@ impl Options {
         let already_set = self.set_options.contains(key);
         let mark = self.warnings.len();
 
-        if self.apply(key, value) {
+        let applied = self.apply(key, value);
+        if applied {
             if is_known && !is_repeatable && already_set {
                 self.warnings.insert(
                     mark,
@@ -1167,6 +1291,7 @@ impl Options {
                         ),
                         option: key.to_string(),
                         value: value.to_string(),
+                        site: None,
                     },
                 );
             }
@@ -1175,6 +1300,7 @@ impl Options {
             // `rooted_leaf_warnings`) may see a value that was never applied.
             self.set_options.insert(key.to_string());
         }
+        applied
     }
 
     /// Report a value the option's converter rejects, and keep the option as
@@ -1192,6 +1318,7 @@ impl Options {
             message,
             option: key.to_string(),
             value: value.to_string(),
+            site: None,
         });
         false
     }
@@ -1246,6 +1373,7 @@ impl Options {
             ),
             option: key.to_string(),
             value: value.to_string(),
+            site: None,
         });
         false
     }
@@ -1579,6 +1707,7 @@ mod tests {
             message: String::new(),
             option: String::new(),
             value: String::new(),
+            site: None,
         };
         assert_eq!(warning.phase(), "parse");
     }
@@ -1595,6 +1724,7 @@ mod tests {
             message: String::new(),
             option: String::new(),
             value: String::new(),
+            site: None,
         };
 
         for code in ["E7003", "E7009", "E7010", "E7011"] {
@@ -1806,6 +1936,263 @@ mod tests {
         );
     }
 
+    fn site(file: &str, line: usize) -> OptionSite {
+        OptionSite {
+            file: file.to_string(),
+            line,
+        }
+    }
+
+    /// An invalid value in an included file is reported as its converter
+    /// rejects it, at the included file's line, and nothing is applied, as
+    /// bean-check 3.2.3 reports it (#2925). One case per option family whose
+    /// value beancount validates and which does not cross an include.
+    #[test]
+    fn test_set_scoped_at_included_invalid_value_is_its_converter_error() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("name_assets", "assets", &["E7008"]),
+            ("name_liabilities", "liab", &["E7008"]),
+            ("name_equity", "capital", &["E7008"]),
+            ("name_income", "inc", &["E7008"]),
+            ("name_expenses", "exp", &["E7008"]),
+            ("account_rounding", "bad leaf", &["E7002"]),
+            ("account_previous_balances", "bad leaf", &["E7002"]),
+            ("account_previous_earnings", "bad leaf", &["E7002"]),
+            ("account_previous_conversions", "bad leaf", &["E7002"]),
+            ("account_current_earnings", "bad leaf", &["E7002"]),
+            ("account_current_conversions", "bad leaf", &["E7002"]),
+            ("account_unrealized_gains", "bad leaf", &["E7002"]),
+            ("inferred_tolerance_default", "USD:-0.01", &["E7002"]),
+            ("tolerance_multiplier", "abc", &["E7002"]),
+            // Deprecated as well as invalid: both, as bean-check prints both.
+            ("inferred_tolerance_multiplier", "abc", &["E7004", "E7002"]),
+            ("booking_method", "fifo", &["E7002"]),
+            ("plugin_processing_mode", "weird", &["E7002"]),
+        ];
+        for (key, value, expected) in cases {
+            let mut opts = Options::new();
+            opts.set_scoped_at(key, value, false, Some(site("sub.beancount", 7)));
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(&codes, expected, "{key} = {value:?}");
+            assert!(
+                opts.warnings.iter().all(OptionWarning::is_error),
+                "{key}: an error, so check exits 1 as bean-check does"
+            );
+            assert!(
+                opts.warnings
+                    .iter()
+                    .all(|w| w.site == Some(site("sub.beancount", 7))),
+                "{key}: at the included file's line: {:?}",
+                opts.warnings
+            );
+            assert!(
+                opts.set_options.is_empty(),
+                "{key}: an included value is never applied"
+            );
+            assert_eq!(
+                opts.rejected_booking_method, None,
+                "{key}: the top-level method governs, so an included rejection refuses no query"
+            );
+        }
+    }
+
+    /// A value the converter accepts is still ignored in an included file,
+    /// with the E7009 warning at its line, and not applied (#2151, #2925).
+    #[test]
+    fn test_set_scoped_at_included_valid_value_is_e7009() {
+        let cases: &[(&str, &str)] = &[
+            ("title", "Sub"),
+            ("name_equity", "Capital"),
+            ("account_rounding", "Rounding"),
+            ("account_previous_balances", "Opening"),
+            ("inferred_tolerance_default", "USD:0.01"),
+            ("tolerance_multiplier", "0.6"),
+            ("booking_method", "FIFO"),
+            ("render_commas", "TRUE"),
+            ("infer_tolerance_from_cost", "TRUE"),
+            ("use_precise_interpolation", "TRUE"),
+            ("plugin_processing_mode", "raw"),
+            ("long_string_maxlines", "abc"),
+            ("conversion_currency", "NOTHING"),
+        ];
+        for (key, value) in cases {
+            let mut opts = Options::new();
+            opts.set_scoped_at(key, value, false, Some(site("sub.beancount", 3)));
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7009"], "{key} = {value:?}");
+            assert_eq!(opts.warnings[0].site, Some(site("sub.beancount", 3)));
+            assert!(!opts.warnings[0].is_error(), "{key}: a warning, exit 0");
+            assert_eq!(
+                opts,
+                Options {
+                    warnings: opts.warnings.clone(),
+                    ..Options::new()
+                },
+                "{key}: nothing applied"
+            );
+        }
+        // An unrecognized boolean word reads as false there too: its E7011
+        // warning, then the E7009, both warnings, as bean-check is clean.
+        let mut opts = Options::new();
+        opts.set_scoped_at("render_commas", "bogus", false, Some(site("s", 1)));
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7011", "E7009"]);
+        assert!(opts.warnings.iter().all(|w| !w.is_error()));
+    }
+
+    /// Every diagnostic an option raises carries its site, the ones raised
+    /// later from the applied values too (#2925).
+    #[test]
+    fn test_set_scoped_at_stamps_every_diagnostic_with_its_site() {
+        let mut opts = Options::new();
+        opts.set_scoped_at("nosuch", "x", true, Some(site("m", 1)));
+        opts.set_scoped_at("title", "a", true, Some(site("m", 2)));
+        opts.set_scoped_at("title", "b", true, Some(site("m", 3)));
+        opts.set_scoped_at("filename", "f", true, Some(site("m", 4)));
+        opts.set_scoped_at("allow_pipe_separator", "TRUE", true, Some(site("m", 5)));
+        opts.set_scoped_at(
+            "account_previous_balances",
+            "Equity:Open",
+            true,
+            Some(site("m", 6)),
+        );
+        opts.set_scoped_at("documents", "missing", true, Some(site("m", 7)));
+        let rooted = opts.rooted_leaf_warnings();
+        opts.warnings.extend(rooted);
+        let mut docs = vec![OptionWarning {
+            code: "E7006",
+            message: String::new(),
+            option: "documents".to_string(),
+            value: "missing".to_string(),
+            site: None,
+        }];
+        opts.locate(&mut docs);
+        opts.warnings.extend(docs);
+
+        let located: Vec<(&str, usize)> = opts
+            .warnings
+            .iter()
+            .map(|w| (w.code, w.site.as_ref().map_or(0, |s| s.line)))
+            .collect();
+        assert_eq!(
+            located,
+            [
+                ("E7001", 1),
+                ("E7003", 3),
+                ("E7005", 4),
+                ("E7004", 5),
+                ("E7010", 6),
+                ("E7006", 7),
+            ]
+        );
+        // `set` has no source, so its diagnostics have no site.
+        let mut bare = Options::new();
+        bare.set("nosuch", "x");
+        assert_eq!(bare.warnings[0].site, None);
+    }
+
+    /// The same value applied twice is located at each of its lines, not
+    /// both at the last one (#2925 review).
+    #[test]
+    fn test_locate_is_by_occurrence() {
+        let mut opts = Options::new();
+        opts.set_scoped_at("documents", "missing", true, Some(site("main", 4)));
+        opts.set_scoped_at("documents", "missing", true, Some(site("main", 9)));
+        let warn = || OptionWarning {
+            code: "E7006",
+            message: String::new(),
+            option: "documents".to_string(),
+            value: "missing".to_string(),
+            site: None,
+        };
+        let mut docs = vec![warn(), warn()];
+        opts.locate(&mut docs);
+        let sites: Vec<Option<OptionSite>> = docs.into_iter().map(|w| w.site).collect();
+        assert_eq!(sites, [Some(site("main", 4)), Some(site("main", 9))]);
+    }
+
+    /// E7010 is about the value the option ends with, so it is at the last
+    /// line that set it, even when an earlier line set the same value.
+    #[test]
+    fn test_rooted_leaf_warning_is_at_the_last_line_that_set_it() {
+        let mut opts = Options::new();
+        for line in [2, 5] {
+            opts.set_scoped_at(
+                "account_previous_balances",
+                "Equity:Open",
+                true,
+                Some(site("m", line)),
+            );
+        }
+        let rooted = opts.rooted_leaf_warnings();
+        assert_eq!(rooted.len(), 1);
+        assert_eq!(rooted[0].code, "E7010");
+        assert_eq!(rooted[0].site, Some(site("m", 5)));
+    }
+
+    /// The same options written at other lines (or in other files, as
+    /// `rledger merge` and `split` move them) are the same once their
+    /// locations are dropped, diagnostics and a rejected `booking_method`
+    /// included; and differ while they have them.
+    #[test]
+    fn test_without_locations_drops_every_site() {
+        let build = |file: &str, offset: usize| {
+            let mut opts = Options::new();
+            opts.set_scoped_at("nosuch", "x", true, Some(site(file, 1 + offset)));
+            opts.set_scoped_at("booking_method", "fifo", true, Some(site(file, 2 + offset)));
+            opts.set_scoped_at("title", "t", true, Some(site(file, 3 + offset)));
+            opts
+        };
+        let (before, after) = (build("ledger.beancount", 0), build("flat.beancount", 7));
+        assert_ne!(before, after);
+        assert_ne!(before.warnings, after.warnings);
+        assert_eq!(before.without_locations(), after.without_locations());
+        let stripped = before.without_locations();
+        assert!(stripped.warnings.iter().all(|w| w.site.is_none()));
+        assert_eq!(stripped.warnings.len(), 2, "{:?}", stripped.warnings);
+        assert!(stripped.rejected_booking_method.unwrap().site.is_none());
+        assert!(stripped.value_sites.is_empty());
+    }
+
+    /// The canonical mapping every surface reads: severity, code, phase and
+    /// message off the warning, and its site as a point location, column 1.
+    #[test]
+    fn test_option_warnings_to_errors_carries_the_site() {
+        use crate::ErrorSeverity::{Error, Warning};
+        let mut opts = Options::new();
+        opts.set_scoped_at("booking_method", "fifo", true, Some(site("m.bean", 3)));
+        opts.set_scoped_at("title", "a", false, Some(site("s.bean", 1)));
+        opts.set("nosuch", "x");
+        let errors = crate::option_warnings_to_errors(&opts.warnings);
+        let seen: Vec<_> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.code.as_str(),
+                    e.severity,
+                    e.phase.as_str(),
+                    e.location
+                        .as_ref()
+                        .map(|l| (l.file.display().to_string(), l.line, l.column)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("E7002", Error, "parse", Some(("m.bean".to_string(), 3, 1))),
+                (
+                    "E7009",
+                    Warning,
+                    "parse",
+                    Some(("s.bean".to_string(), 1, 1))
+                ),
+                ("E7001", Error, "parse", None),
+            ]
+        );
+        assert_eq!(errors[0].message, opts.warnings[0].message);
+    }
+
     /// `option "plugin"` may not be set, as in beancount, from the top-level
     /// file or an included one: E7005, an error, and nothing applied (#2925).
     /// It used to be the deprecation E7004; scoping it out in an included
@@ -1833,16 +2220,20 @@ mod tests {
         let mut opts = Options::new();
         opts.set_scoped("operating_currency", "USD", true);
         opts.set_scoped("operating_currency", "EUR", false);
+        opts.set_scoped("display_precision", "EUR:0.001", false);
         opts.set_scoped("documents", "docs-from-include", false);
 
         assert!(
             opts.operating_currency.iter().any(|c| c == "EUR"),
             "an included operating_currency must still be collected",
         );
-        assert!(
-            opts.documents.iter().any(|d| d == "docs-from-include"),
-            "an included documents root must still be collected",
-        );
+        assert_eq!(opts.display_precision.get("EUR"), Some(&3));
+        // Not `documents`: beancount 3.2.3 keeps only the top-level file's
+        // (`load_file` gives `documents == []` for an included root), so it
+        // is ignored with E7009, like every other scoped option (#2925).
+        assert!(opts.documents.is_empty());
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7009"]);
     }
 
     #[test]

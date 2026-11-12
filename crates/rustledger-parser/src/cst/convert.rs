@@ -9614,10 +9614,12 @@ fn quiet_after_invalid_tokens(
     let mut dropped = vec![false; errors.len()];
     // The end (its `\n`, or the end of the source) of the last line handled.
     let mut line_end = 0;
-    for &first in &invalid {
+    for (k, &first) in invalid.iter().enumerate() {
         if first < line_end {
             continue;
         }
+        // `invalid` and `unread` hold the same starts, both sorted.
+        let token_end = unread[k].1;
         let line_start = stripped[line_end..first]
             .rfind('\n')
             .map_or(line_end, |i| line_end + i + 1);
@@ -9635,23 +9637,40 @@ fn quiet_after_invalid_tokens(
             if e.span.start > to {
                 break;
             }
-            dropped[i] = if e.span.start < at {
-                // On an indented line, a check of a construct the invalid
-                // token sits inside (a cost spec, an amount expression, a
-                // posting's trailing tokens), when the line's grammar fails at
-                // that token, not before it: `{{2 .USD}}` is the invalid
+            // A construct check's own error, not one that names an invalid
+            // token or stands for its line (`unexpected input`).
+            let construct_check = matches!(
+                &e.kind,
+                crate::ParseErrorKind::SyntaxError(m) if !m.starts_with("unexpected input")
+            );
+            dropped[i] = if e.span.start < at
+                || (e.span.start == at && e.span.end > token_end && construct_check)
+            {
+                // A check of a construct the invalid token sits inside (a
+                // cost spec, an amount expression, a posting's trailing
+                // tokens, a balance's amount), when the line's grammar fails
+                // at that token, not before it: `{{2 .USD}}` is the invalid
                 // token alone in beancount, `{}{$` an `unexpected LCURL` at
                 // the second `{` and the token. Not a line error, which
-                // starts where the line's content does.
-                // On a header line such an error is where its grammar fails
+                // starts where the line's content does. Such a check may
+                // start right at the token, when the token is glued to what
+                // comes before it: a posting's trailing tokens start where
+                // its amount ends (`1 HOOL<BOM>@ 2 USD`, `1 HOOL$@ 2 USD`).
+                // On a header line, only a construct check, when the header
+                // grammar reads up to the token (`balance Assets:A 1.00 $~
+                // 0.01 USD`); elsewhere the error is where the grammar fails
                 // first (`price /6"E_X`: the price expects a currency at the
                 // `/`), and is kept.
-                content > line_start
-                    && e.span.end > at
+                e.span.end > at
                     && matches!(e.kind, crate::ParseErrorKind::SyntaxError(_))
                     && *reaches.get_or_insert_with(|| {
-                        indented_grammar_reaches(stripped, line_start, line_end, first)
+                        if content > line_start {
+                            indented_grammar_reaches(stripped, line_start, line_end, first)
+                        } else {
+                            header_grammar_reaches(root, stripped, first)
+                        }
                     })
+                    && (content > line_start || construct_check)
             } else {
                 e.span.start > at
                     && invalid.binary_search(&(e.span.start - off)).is_err()
@@ -9705,6 +9724,37 @@ fn indented_grammar_reaches(
         super::directive_header::first_posting_defect(&tokens, end, stripped)
     };
     defect.is_none_or(|d| d.range.start >= first)
+}
+
+/// Whether beancount's grammar for the header line of the non-transaction
+/// directive the invalid token at `first` sits in reads up to that token
+/// before it fails, so the token is the line's first error
+/// (`quiet_after_invalid_tokens`): the header's tokens up to that one are run
+/// through the directive's rule (`first_header_defect`), the one
+/// `directive_header_check` applies. `false` for a token in no such directive, or
+/// not among its header's tokens. Linear in the header.
+fn header_grammar_reaches(root: &crate::SyntaxNode, stripped: &str, first: usize) -> bool {
+    let Ok(offset) = u32::try_from(first) else {
+        return false;
+    };
+    let Some(token) = root.token_at_offset(offset.into()).right_biased() else {
+        return false;
+    };
+    let Some(node) = token
+        .parent_ancestors()
+        .find(|n| super::directive_header::directive_keyword(n.kind()).is_some())
+    else {
+        return false;
+    };
+    let mut tokens = Vec::new();
+    header_line_tokens(&node, &mut tokens);
+    tokens.retain(|(_, r)| r.start <= first);
+    if tokens.last().is_none_or(|(_, r)| r.start != first) {
+        return false;
+    }
+    let end = tokens.last().map_or(first, |(_, r)| r.end);
+    super::directive_header::first_header_defect(node.kind(), &tokens, end, stripped)
+        .is_none_or(|d| d.range.start >= first)
 }
 
 /// An unreadable token's text as an error message names it: escaped (so a

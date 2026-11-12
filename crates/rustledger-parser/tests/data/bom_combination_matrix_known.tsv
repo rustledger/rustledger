@@ -4943,6 +4943,10 @@ foo\n<BOM>assets:A <BOM>\n	3:1,4:2	line-after-error-line
 x $<BOM>a:B\n	3:1	inner-bom-under-line-error
 x 1.5.<BOM>a:B\n	3:1	inner-bom-under-line-error
 2024-01-02 *\n  ab:<BOM>a:B\n	4:1	bom-glued-to-account
+2024-01-02 ;c<BOM>\n2024-01-03 open Assets:C\n	3:1	eol-reported-on-next-line
+2024-01-02 ;<BOM>\n	3:1	eol-reported-on-next-line
+2024-01-02 open\n<BOM>*<BOM>\n	3:1,4:1	bom-free-line-as-on-main+line-start-bom-before-comment
+2024-01-02 open\n<BOM>#<BOM>\n	3:1,4:1	bom-free-line-as-on-main+line-start-bom-before-comment
 2024-01-02 * "p" "n"\topen foo \t1 \t<BOM>* <BOM>Ü:A\n  Assets:A  1 HOOL {2 USD} @ 3 USD  <BOM>*  <BOM>a  Assets:A \t*\n	3:4,4:2	bom-glued-to-account
 <BOM>2024-01-02 document Assets:A "d.pdf"\n  Assets:A  1 HOOL {2 USD} @ 3 USD\tÜ:A #!d (1 + 2) <BOM>"s"\n  Assets:A  1 HOOL {2 USD} @ 3 USD \t<BOM>*  T#! {1 USD} <BOM>Ü:A  "a<BOM>b"\n\t% \tA \t"s"\t%\n\tkk: 1  ^l \t#t\n	3:1,4:1,5:2,6:1,7:1	indented-line-after-error+mid-line-hash-bang
 plugin "p"\n  A<BOM>b ;c \tfoo A\n<BOM><BOM>#t T#!\t<BOM>  <BOM>a \tkk:\n	4:2,5:1	mid-line-hash-bang
@@ -6388,7 +6392,7 @@ $x <BOM><BOM>assets:A T#!\t<BOM>x\t\t-2.5\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM>:A\t^l!<BOM>a-b:C\n	4:3	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>a-b:C'b ~<BOM>1:A\n	4:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A:B  1<BOM>2T#!\n	4:2	bom-glued-to-account
-2024-01-02 *\n  <BOM>Ü:A\t  1<BOM>2 \t-2.5,Ü:A\n	4:2	bom-glued-to-account-in-error-line
+2024-01-02 *\n  <BOM>Ü:A\t  1<BOM>2 \t-2.5,Ü:A\n	4:2	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A.b{\n	3:2	bom-glued-to-account
 $x <BOM>:A<BOM>"s"T#!\n	3:1	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM><BOM>x^l 'b\n	4:3	bom-glued-to-account
@@ -6605,7 +6609,7 @@ $x <BOM>assets:A<BOM>T#!\t$x\n	3:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 <BOM>Ü:A <BOM>"s" ;c\t<BOM>1.5\n	3:2	bom-glued-to-account
 2024-01-02 *\n  <BOM>:A\t;c\t<BOM>1.5<BOM>x.b\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>Ü:A\t$x\n	3:2	bom-glued-to-account
-2024-01-02 *\n  <BOM>1:A:B  1<BOM>2\t  1<BOM>2<BOM>%\n	4:3	bom-glued-to-account-in-error-line
+2024-01-02 *\n  <BOM>1:A:B  1<BOM>2\t  1<BOM>2<BOM>%\n	4:3	bom-glued-to-account
 <BOM>* <BOM><BOM>assets:A#t  1<BOM>2 T#!\n	3:2	mid-line-hash-bang
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>;c\t<BOM>1.5\t<BOM>%\n	4:1	bom-glued-to-account
 <BOM>:A ^l\t-2.5$x\n	3:1	bom-account-under-line-diagnostic

@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use rustledger_parser::cst::parse_red_only;
-use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse, parse_date};
+use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse};
 
 const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
 const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
@@ -232,15 +232,56 @@ fn indented(line: &str) -> bool {
     strip_boms(line).starts_with(is_blank)
 }
 
-/// A date alone on its line, before any blanks or a CRLF's `\r` (which
-/// beancount's lexer skips): a `DATE` token (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`,
-/// so `2024/01/02` and `2024-01-021` too) that is a real calendar date, as
-/// the parser's own `parse_date` decides it. beancount reports an invalid
-/// one (`2024-13-45`) on its own line, rledger too, so no `unexpected EOL`
-/// moves; and it reads a BOM-led date (`<BOM>2024-01-02`) as one invalid
-/// token, which reports nothing on the next line either.
+/// A date alone on its line: beancount's `DATE` token (`beancount_date`),
+/// then nothing it reads but blanks, a `\r` (which its lexer reads as a
+/// blank) and a `;` comment (which may start anywhere on a line there), so
+/// its grammar meets the end of the line right after the date and reports
+/// its `unexpected EOL` on the next line. Not after a BOM: beancount reads
+/// `<BOM>2024-01-02` as one invalid token, and reports nothing on the next
+/// line.
 fn date_alone(line: &str) -> bool {
-    parse_date(line.trim_end_matches([' ', '\t', '\r'])).is_ok()
+    let before_comment = line.split_once(';').map_or(line, |(head, _)| head);
+    beancount_date(before_comment.trim_end_matches([' ', '\t', '\r']))
+}
+
+/// Whether `token` is one `DATE` token to beancount 3.2.3's lexer that it
+/// turns into a date: its regex `[0-9]{4,}[-/][0-9]+[-/][0-9]+` (either
+/// separator at either place, so `2024-01/02` too), and fields that make a
+/// Python `datetime.date` (a year from 1 to 9999, so `02024` is 2024; a
+/// month from 1 to 12; a day of that month, leap years included). Its C code
+/// reads each field into a 32-bit integer that wraps, so `4294967297-01-01`
+/// is year 1 there, and `4294967296-01-01` year 0. An invalid one
+/// (`2024-13-45`, `10000-01-01`) is reported on its own line on both sides,
+/// so no `unexpected EOL` moves. Written out here rather than asked of the
+/// parser, so the parser is not the judge of its own counts; every case in
+/// `test_beancount_date_reads_dates_as_beancount_does` was checked against
+/// bean-check 3.2.3.
+fn beancount_date(token: &str) -> bool {
+    let mut fields = token.split(['-', '/']);
+    let (Some(year), Some(month), Some(day), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    let digits = |f: &str| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit());
+    if year.len() < 4 || !(digits(year) && digits(month) && digits(day)) {
+        return false;
+    }
+    let value = |f: &str| {
+        f.bytes().fold(0u32, |n, b| {
+            n.wrapping_mul(10).wrapping_add(u32::from(b - b'0'))
+        })
+    };
+    let (year, month, day) = (value(year), value(month), value(day));
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=9999).contains(&year) && (1..=days).contains(&day)
 }
 
 fn words(line: &str) -> impl Iterator<Item = &str> {
@@ -263,6 +304,8 @@ fn mid_line_hash_bang(line: &str) -> bool {
 fn lone_capital_glued(line: &str) -> bool {
     words(line).any(|w| {
         let mut chars = strip_boms(w).chars();
+        // `is_none_or` here would change nothing: a word of BOMs alone has
+        // no first character, and then no second one for the test below.
         chars.next().is_some_and(|c| c.is_ascii_uppercase())
             && chars
                 .next()
@@ -270,12 +313,24 @@ fn lone_capital_glued(line: &str) -> bool {
     })
 }
 
+/// The data lines of one of the lists: not empty, and not a header line,
+/// which starts `# ` or is a bare `#` (a source may start `#`).
+fn data_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+}
+
 /// The hand-kept exceptions (`data/bom_combination_matrix_exceptions.tsv`): a
 /// line no rule explains, by input and line, with why.
 fn exceptions() -> BTreeMap<(&'static str, usize), &'static str> {
-    EXCEPTIONS
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    parse_exceptions(EXCEPTIONS)
+}
+
+/// The exceptions written in `text`, as the exceptions file holds them.
+/// Panics on a malformed line or a reason that does not start with its
+/// counts.
+fn parse_exceptions(text: &str) -> BTreeMap<(&str, usize), &str> {
+    data_lines(text)
         .map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
             assert_eq!(f.len(), 3, "malformed exception line: {l:?}");
@@ -314,12 +369,15 @@ fn reason_counts(reason: &str) -> (usize, usize, usize) {
 }
 
 /// Whether line `l`'s difference is an end-of-file error put on another
-/// line: beancount reports errors on the line after the input's last line
-/// (`l` is that line, or the last line with that one after it), rledger the
-/// same number on the last line, and the two lines together agree.
+/// line: beancount reports errors on the input's last line `eof` (the
+/// split's last piece: the empty line after a final `\n`, or the last line
+/// itself in an input that does not end with one), rledger the same number
+/// on the line `last` before it, and the two lines together agree (`l` is
+/// one of the two).
 fn eof_error_on_last_line(lines: &[&str], l: usize, counts: &Counts) -> bool {
     let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
-    // `lines` ends with the empty text after the final `\n`.
+    // `lines` is never empty (a split yields at least one piece), so the
+    // subtraction never saturates, and `wrapping_sub` would be the same.
     let last = lines.len().saturating_sub(1);
     let eof = last + 1;
     // `bc[eof] > 0` cannot change the result: with the other three holding
@@ -328,7 +386,7 @@ fn eof_error_on_last_line(lines: &[&str], l: usize, counts: &Counts) -> bool {
     // only caller, `check_row`, skips. Nor can `l >= last` / `l >= eof`
     // for either `==` of the first test: no line past `eof` has a count on
     // either side (an error is at most at the end of the input, which is on
-    // line `eof`, after the final `\n`), so none is asked.
+    // line `eof`), so none is asked.
     // `rl[eof] <= 0` is `rl[eof] == 0` for a count.
     (l == last || l == eof)
         && get(&counts.bc, eof) > 0
@@ -455,6 +513,8 @@ fn ordinary_inner_boms(src: &str, roles: &BomRoles, span: &std::ops::Range<usize
 fn account_after_bom(line: &str) -> bool {
     line.find(BOM).is_some_and(|i| {
         line[i..].match_indices('\u{dc}').any(|(j, _)| {
+            // A split always yields a first piece, so `is_none_or` would
+            // be the same.
             line[i + j..]
                 .split(is_blank)
                 .next()
@@ -657,7 +717,7 @@ fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
                 let after = count(&src);
                 // `b` is still `f.bc` here, so either can be read: only this
                 // arm sets it, and no cause names `HASH_BANG` twice.
-                let share = (signed(r) - signed(b)) - (signed(after) - signed(f.hash_bang_bc));
+                let share = hash_bang_share(r, b, after, f.hash_bang_bc);
                 // Read by no later part today (`HASH_BANG` is the last part
                 // of every cause that names it); kept so that a part after
                 // it would measure what it left.
@@ -689,6 +749,14 @@ fn parts_hold(parts: &[&str], f: &LineFacts<'_>) -> bool {
         shares += share;
     }
     shares == signed(f.rl) - signed(f.bc)
+}
+
+/// The share of a line's difference a mid-line `#!` / `#+` accounts for
+/// (`parts_hold`): the difference before the hash-bang rewrite, rledger `r`
+/// less beancount `b`, less the difference after it, rledger `after` less
+/// beancount `hash_bang_bc` for the rewritten input.
+const fn hash_bang_share(r: usize, b: usize, after: usize, hash_bang_bc: usize) -> i64 {
+    (signed(r) - signed(b)) - (signed(after) - signed(hash_bang_bc))
 }
 
 /// Whether, with each account beancount reads with its BOMs written as an
@@ -731,7 +799,8 @@ fn cause(
     let facts = LineFacts::new(input, text, l, counts);
     let worse = r.abs_diff(b) > m.abs_diff(b);
     // The errors rledger reports beyond beancount's, and how many of them
-    // the named kind could be.
+    // the named kind could be. Read only where `r > b`, so it never
+    // saturates there, and `wrapping_sub` would be the same.
     let extra = r.saturating_sub(b);
     let accounts = get(&counts.rl_account, l);
     let boms = get(&counts.rl_bom, l);
@@ -742,8 +811,13 @@ fn cause(
     let glued_asked = r != b && facts.roles.account_in(&facts.span) && boms > 0;
     // The block's header: the last line before `l` that is not indented.
     // Starting the range at 4 would change nothing: where no line from 4 on
-    // is the header, `unwrap_or(3)` gives line 3 anyway.
+    // is the header, `unwrap_or(3)` gives line 3 anyway. `unwrap_or(2)`
+    // would change nothing either: line 2 is the head's second `open`,
+    // which is not a heading, has no error and holds no BOM, so it adds
+    // nothing to `block_err` and starts no `*` heading.
     let header = (3..l).rev().find(|&k| !indented(line(k))).unwrap_or(3);
+    // Trimming the end too (`trim_matches`) would change nothing: what a
+    // line starts with stays, and a blank line is empty either way.
     let block_err = (header..l)
         .any(|k| get(&counts.bc, k) > 0 || line(k).trim_start_matches(is_blank).starts_with(BOM));
     // The recovery causes, by the shape of the lines before `l`. Asked
@@ -791,9 +865,11 @@ fn cause(
             // grammar never pushes, so it reports no unclosed push at the end of
             // the file (line 0); rledger keeps the push.
             "failed-push-still-pushed"
-        } else if date_alone(text) || date_alone(line(l - 1)) {
+        } else if (date_alone(text) && r == b + 1) || (date_alone(line(l - 1)) && b == r + 1) {
             // A date alone on a line: beancount reports its `unexpected EOL` on
-            // the next line.
+            // the next line, rledger on the date's. So the date's line counts
+            // exactly one more here, and the next line one fewer; any other
+            // difference on either line is not this one.
             "eol-reported-on-next-line"
         } else if r > b && account_after_bom(text) && accounts >= extra {
             // An invalid account (non-ASCII first character) after a BOM token
@@ -1114,6 +1190,7 @@ fn check_row(line: &str) -> RowResult {
                 });
             }
         } else {
+            // Read only for the failure message below.
             let f = LineFacts::new(
                 &input,
                 lines.get(l.wrapping_sub(1)).copied().unwrap_or(""),
@@ -1176,11 +1253,14 @@ struct Accepted<'a> {
 /// than main (`data/bom_combination_matrix_worse_than_main.tsv`), by input
 /// and line. `BOM_MATRIX_UPDATE` never writes it.
 fn accepted() -> BTreeMap<(&'static str, usize), Accepted<'static>> {
+    parse_accepted(WORSE_THAN_MAIN)
+}
+
+/// The accepted lines written in `text`, as the worse-than-main file holds
+/// them. Panics on a malformed, unjustified or duplicate line.
+fn parse_accepted(text: &str) -> BTreeMap<(&str, usize), Accepted<'_>> {
     let mut out = BTreeMap::new();
-    for l in WORSE_THAN_MAIN
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
-    {
+    for l in data_lines(text) {
         let fields: Vec<&str> = l.split('\t').collect();
         assert_eq!(fields.len(), 5, "malformed accepted line: {l:?}");
         let standalone = (fields[3] != "-").then(|| fields[3].parse().expect("a count"));
@@ -1368,13 +1448,7 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         failures.len(),
         failures.join("\n")
     );
-    // A listed exception that no line needs any more (a rule explains it, or
-    // it matches) is stale.
-    let stale: Vec<String> = exceptions()
-        .keys()
-        .filter(|(t, l)| !excepted.contains(&((*t).to_string(), *l)))
-        .map(|(t, l)| format!("{t} line {l}"))
-        .collect();
+    let stale = stale_exceptions(exceptions().into_keys(), &excepted);
     assert!(
         stale.is_empty(),
         "{} listed exception(s) no longer needed, remove them from \
@@ -1481,10 +1555,7 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         return;
     }
 
-    let known: BTreeSet<(&str, &str, &str)> = KNOWN
-        .lines()
-        // Header lines start `# ` (or are a bare `#`); a source may start `#`.
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    let known: BTreeSet<(&str, &str, &str)> = data_lines(KNOWN)
         .map(|l| {
             let fields: Vec<&str> = l.split('\t').collect();
             assert!(
@@ -1550,9 +1621,7 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
             .join("\n")
     );
 
-    let recorded: BTreeSet<(&str, &str)> = TEXTS
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    let recorded: BTreeSet<(&str, &str)> = data_lines(TEXTS)
         .map(|l| {
             l.split_once('\t')
                 .unwrap_or_else(|| panic!("malformed texts line: {l:?}"))
@@ -1579,23 +1648,34 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
     );
 }
 
+/// The listed exceptions (`listed`, by input and line) that no line needs
+/// any more, so are stale: each one `listed-exception` did not explain
+/// (`excepted`, from `check_row`), because a rule explains its line, or the
+/// line matches.
+fn stale_exceptions<'a>(
+    listed: impl IntoIterator<Item = (&'a str, usize)>,
+    excepted: &BTreeSet<(String, usize)>,
+) -> Vec<String> {
+    listed
+        .into_iter()
+        .filter(|(t, l)| !excepted.contains(&((*t).to_string(), *l)))
+        .map(|(t, l)| format!("{t} line {l}"))
+        .collect()
+}
+
 /// The rows whose counts are those the lists record but whose causes (known
 /// list) or reported token texts (texts list) differ from them.
 fn relabeled_rows(
     computed: &[(String, String, String)],
     texts: &[(String, String)],
 ) -> Vec<String> {
-    let known: BTreeMap<&str, (&str, &str)> = KNOWN
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    let known: BTreeMap<&str, (&str, &str)> = data_lines(KNOWN)
         .filter_map(|l| {
             let mut f = l.split('\t');
             Some((f.next()?, (f.next()?, f.next()?)))
         })
         .collect();
-    let recorded: BTreeMap<&str, &str> = TEXTS
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    let recorded: BTreeMap<&str, &str> = data_lines(TEXTS)
         .filter_map(|l| l.split_once('\t'))
         .collect();
     let mut out = Vec::new();
@@ -1627,9 +1707,7 @@ type KnownRow = (
 
 /// The known list's rows, by source.
 fn known_rows() -> BTreeMap<&'static str, KnownRow> {
-    KNOWN
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    data_lines(KNOWN)
         .filter_map(|l| {
             let mut f = l.split('\t');
             let (tail, counts, causes) = (f.next()?, f.next()?, f.next()?);
@@ -2419,11 +2497,14 @@ fn test_cause_eof_error_on_last_line_needs_each_condition() {
 /// (`recorded_row`): beancount reports its `unexpected EOL` on line 4,
 /// rledger on line 3, with a blank, a tab or a CRLF's `\r` after the date,
 /// for a slash date, and for `2024-01-021` (a `DATE` to beancount, January
-/// 21) before another directive, and with two blanks, or a blank and a
-/// `\r`, after the date. Not a date alone, on made-up counts (each counts 1
-/// on its own line on both sides, a BOM-led date as one invalid token to
-/// beancount and as its `P0026` here): a BOM-led date, a date that is no
-/// calendar date, a date with a word after it, and an indented date.
+/// 21) before another directive, with two blanks, or a blank and a `\r`,
+/// after the date, and with a comment after it (`;c<BOM>` before another
+/// directive, and `;<BOM>` on the last line, where line 4 is the one after
+/// it). Not a date alone, on made-up counts (each counts 1 on its own line on
+/// both sides, a BOM-led date as one invalid token to beancount and as its
+/// `P0026` here): a BOM-led date, a date that is no calendar date, a date
+/// with a word after it, a date with a `#` comment after it (no comment to
+/// beancount mid-line), and an indented date.
 #[test]
 fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
     for tail in [
@@ -2433,6 +2514,7 @@ fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
         "2024-01-02\\t\\n",
         "2024-01-02\\r\\n",
         "2024/01/02\\n",
+        "2024-01-02 ;<BOM>\\n",
     ] {
         for l in [3, 4] {
             assert_eq!(
@@ -2442,21 +2524,24 @@ fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
             );
         }
     }
-    for l in [3, 4] {
-        assert_eq!(
-            recorded_cause(
-                "2024-01-021\\n2024-01-03 open Assets:C\\n",
-                "4:1 3:1 4:1 3:1 4:1 3:0,4:0 - - -",
-                l
-            ),
-            Some("eol-reported-on-next-line"),
-            "`2024-01-021` line {l}"
-        );
+    for tail in [
+        "2024-01-021\\n2024-01-03 open Assets:C\\n",
+        "2024-01-02 ;c<BOM>\\n2024-01-03 open Assets:C\\n",
+        "2024-01-02\\t;c\\n2024-01-03 open Assets:C\\n",
+    ] {
+        for l in [3, 4] {
+            assert_eq!(
+                recorded_cause(tail, "4:1 3:1 4:1 3:1 4:1 3:0,4:0 - - -", l),
+                Some("eol-reported-on-next-line"),
+                "{tail} line {l}"
+            );
+        }
     }
     for text in [
         "\u{FEFF}2024-01-02",
         "2024-13-45",
         "2024-01-02 x",
+        "2024-01-02 #c",
         "  2024-01-02",
     ] {
         assert_eq!(
@@ -2467,21 +2552,126 @@ fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
     }
 }
 
+/// `eol-reported-on-next-line` explains exactly one error moved from the
+/// date's line to the next: one more on the date's line, one fewer on the
+/// next. Any other difference on either line is not that one. Made-up
+/// counts on `2024-01-02` then `foo` (no BOM, and main's count unlike
+/// rledger's, so no later rule takes the line either).
+#[test]
+fn test_cause_eol_reported_on_next_line_needs_one_error_moved() {
+    let date_line =
+        |b: usize, r: usize| made_up_cause("2024-01-02\nfoo", 3, &line_counts(3, b, r, 9, 0));
+    assert_eq!(date_line(0, 1), Some("eol-reported-on-next-line"));
+    assert_eq!(date_line(0, 2), None, "two more on the date's line");
+    assert_eq!(date_line(1, 0), None, "one fewer on the date's line");
+    let next_line =
+        |b: usize, r: usize| made_up_cause("2024-01-02\nfoo", 4, &line_counts(4, b, r, 9, 0));
+    assert_eq!(next_line(2, 1), Some("eol-reported-on-next-line"));
+    assert_eq!(next_line(3, 1), None, "two fewer on the next line");
+    assert_eq!(next_line(1, 2), None, "one more on the next line");
+}
+
+/// `beancount_date` reads a `DATE` token as beancount 3.2.3 does, and
+/// `date_alone` what may follow it on its line. Each case was checked with
+/// bean-check 3.2.3 on the line followed by a line `x`: a date alone gives
+/// line 4 two errors there (its `unexpected EOL` and the `x`), anything else
+/// an error on each line.
+#[test]
+fn test_beancount_date_reads_dates_as_beancount_does() {
+    for date in [
+        "2024-01-02",
+        "2024/01/02",
+        "2024-01/02",
+        "2024/01-02",
+        "0001-01-02",
+        "9999-12-31",
+        "02024-01-02",
+        "2024-02-29",
+        "2000-02-29",
+        "1600-02-29",
+        "2024-01-0002",
+        "2024-001-02",
+        "2024-1-2",
+        "2024-01-021",
+        "2024-01-31",
+        "2024-03-31",
+        "2024-05-31",
+        "2024-06-30",
+        "2024-07-31",
+        "2024-08-31",
+        "2024-10-31",
+        "2024-12-31",
+        "4294967297-01-01",
+        "4294969320-01-02",
+        "2024-4294967297-02",
+        "2024-01-4294967298",
+    ] {
+        assert!(beancount_date(date), "{date} is a date to beancount");
+    }
+    for not_date in [
+        "0000-01-02",
+        "10000-01-01",
+        "2023-02-29",
+        "2100-02-29",
+        "1700-02-29",
+        "2024-00-10",
+        "2024-13-01",
+        "2024-01-00",
+        "2024-02-30",
+        "2024-04-31",
+        "2024-06-31",
+        "2024-09-31",
+        "2024-11-31",
+        "2024-12-32",
+        "202-01-02",
+        "2024-01-02-03",
+        "2024--01-02",
+        "2024-01-99999999999999999999",
+        "4294967296-01-02",
+        "6442450944-01-02",
+    ] {
+        assert!(
+            !beancount_date(not_date),
+            "{not_date} is no date to beancount"
+        );
+    }
+    for line in [
+        "2024-01-02 ;c",
+        "2024-01-02\t;c",
+        "2024-01-02;c",
+        "2024-01-02  ;",
+        "2024-01-02 ; c ; d",
+        "2024-01-02 \r ;c",
+        "2024-01-02\r",
+    ] {
+        assert!(date_alone(line), "{line:?} is a date alone");
+    }
+    for line in [
+        "2024-01-02 #c",
+        "2024-01-02 %c",
+        "2024-01-02 x ;c",
+        "  2024-01-02",
+    ] {
+        assert!(!date_alone(line), "{line:?} is no date alone");
+    }
+}
+
 /// A recovery cause is asked first only where beancount's count for the
 /// line alone is known and rledger counts the line alone the same: a line
 /// beancount crashed on alone (no entry) is not taken for one that matches.
-/// Made-up counts: beancount 1 on the date alone (line 3), rledger 1 and
-/// main 1 on the line after it, so the line is both `line-after-error-line`
-/// and `eol-reported-on-next-line`.
+/// Made-up counts: beancount 1 on `foo` (line 3), and on the date alone
+/// after it (line 4) beancount 0 and rledger 1 (main 9, so no later rule
+/// takes the line), so the line is both `line-after-error-line` and
+/// `eol-reported-on-next-line`.
 #[test]
 fn test_cause_recovery_first_needs_a_matching_count_alone() {
     let with_alone = |alone: Option<usize>| {
-        let mut counts = line_counts(4, 0, 1, 1, 0);
+        let mut counts = line_counts(4, 0, 1, 9, 0);
         counts.bc.insert(3, 1);
         counts.bc_alone = alone.map(|n| (4, n)).into_iter().collect();
-        made_up_cause("2024-01-02\nfoo", 4, &counts)
+        made_up_cause("foo\n2024-01-02", 4, &counts)
     };
-    let alone = standalone_count("foo");
+    let alone = standalone_count("2024-01-02");
     assert_eq!(with_alone(Some(alone)), Some("line-after-error-line"));
     assert_eq!(
         with_alone(Some(alone + 1)),
@@ -2913,4 +3103,238 @@ fn test_reason_counts_reads_the_leading_counts() {
 #[should_panic(expected = "a reason must start")]
 fn test_reason_counts_rejects_counts_not_at_the_start() {
     reason_counts("why: rledger counts 3 where beancount counts 4 (main 1)");
+}
+
+/// `line-start-bom-before-comment` strips only the BOMs a line starts with
+/// before asking whether beancount skips the line start: a `*` or `#` with a
+/// BOM after it is a skipped start (it has a character after it), which
+/// stripping the trailing BOM too would hide. Real counts (`recorded_row`):
+/// beancount 2 on line 4 (the open's `unexpected EOL` and the invalid
+/// token), rledger 1 (its `P0026`), and the line rewritten without its BOMs
+/// counted alike on both sides (so stripping both BOMs would name it
+/// `like-main-without-bom`).
+#[test]
+fn test_cause_line_start_bom_before_comment_keeps_a_trailing_bom() {
+    for tail in [
+        "2024-01-02 open\\n<BOM>*<BOM>\\n",
+        "2024-01-02 open\\n<BOM>#<BOM>\\n",
+    ] {
+        assert_eq!(
+            recorded_cause(tail, "4:2 3:1,4:1 4:2 3:1,4:1 4:2 3:0,4:1 - 70 -", 4),
+            Some("line-start-bom-before-comment"),
+            "{tail}"
+        );
+    }
+}
+
+/// `brace-hash-before-tag` needs a tag character after the `{#`: a `{#` at
+/// the end of the line has none. Made-up counts (rledger 2, beancount 1,
+/// main 1) that no other rule takes.
+#[test]
+fn test_cause_brace_hash_before_tag_needs_a_character_after_it() {
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" {#", &line3_counts(1, 2, 1, 0)),
+        None
+    );
+}
+
+/// `invalid-account-after-invalid-token` needs a BOM on the line: a
+/// `Ü`-led account after an invalid token with no BOM before it is not that
+/// line. Made-up counts (rledger 2 with one `P0006`, beancount 1, main 1).
+#[test]
+fn test_cause_invalid_account_after_invalid_token_needs_a_bom() {
+    let mut counts = line3_counts(1, 2, 1, 0);
+    counts.rl_account = BTreeMap::from([(3, 1)]);
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" $y \u{dc}x:A", &counts),
+        None
+    );
+}
+
+/// `holds` turns away an `invalid-account-after-invalid-token` line that
+/// gives no standalone count: the check needs one.
+#[test]
+fn test_holds_invalid_account_needs_a_standalone_count() {
+    assert!(!holds(
+        &accepted_as("invalid-account-after-invalid-token", None),
+        &made_up_worse("foo", 1, 2)
+    ));
+}
+
+/// With no line further from beancount than main, every accepted line is
+/// stale, and each is reported so.
+#[test]
+fn test_check_worse_than_main_reports_every_stale_accepted_line() {
+    let failures = check_worse_than_main(&[]);
+    assert_eq!(failures.len(), accepted().len());
+    assert!(
+        failures
+            .iter()
+            .all(|f| f.starts_with("accepted but no longer worse than main, remove it: ")),
+        "{failures:?}"
+    );
+}
+
+/// A listed exception is needed only where `listed-exception` explains its
+/// line. A line a rule explains is not one (`$n0 x1<BOM>y`, line 3,
+/// `inner-bom-under-line-error`), so listing it is stale; the first real
+/// exception's line is explained by its listing, so it is not.
+#[test]
+fn test_stale_exceptions_needs_the_listing_to_explain_the_line() {
+    let excepted_of = |tail: &str| -> BTreeSet<(String, usize)> {
+        let row = DATA
+            .lines()
+            .find(|row| row.split('\t').next().and_then(|s| s.strip_prefix(HEAD)) == Some(tail))
+            .unwrap_or_else(|| panic!("no table row for {tail:?}"));
+        let result = check_row(row);
+        result
+            .excepted
+            .iter()
+            .map(|&l| (result.tail.clone(), l))
+            .collect()
+    };
+    let ruled = "$n0 x1<BOM>y\\n";
+    assert_eq!(
+        stale_exceptions([(ruled, 3)], &excepted_of(ruled)),
+        vec![format!("{ruled} line 3")]
+    );
+    let ((tail, l), _) = exceptions()
+        .into_iter()
+        .next()
+        .expect("at least one listed exception");
+    let excepted = excepted_of(tail);
+    assert!(excepted.contains(&(tail.to_string(), l)));
+    assert!(stale_exceptions([(tail, l)], &excepted).is_empty());
+}
+
+/// The rewrite checks compare the rewritten line's count, none when the
+/// rewrite leaves it clean, with beancount's. Made-up roles: the BOM-led
+/// account of `open <BOM>Assets:A` rewritten is a clean `open`, and the BOM
+/// of `;x<BOM>y` (inside a comment, so no inner BOM to beancount) rewritten
+/// is still a comment, so each counts 0, which beancount's 1 is not.
+#[test]
+fn test_rewrite_checks_read_a_clean_line_as_no_error() {
+    let check = |text: &str, roles: BomRoles, bc: usize| {
+        let input = format!("{MADE_UP_HEAD}{text}\n");
+        let mut counts = line3_counts(bc, 0, 0, 0);
+        counts.roles = roles;
+        let facts = LineFacts::new(&input, text, 3, &counts);
+        (
+            facts.account_grammar_error_is_the_difference(),
+            facts.inner_boms_are_the_difference(),
+        )
+    };
+    let text = "2024-01-02 open \u{FEFF}Assets:A";
+    let at = MADE_UP_HEAD.len() + text.find('\u{FEFF}').expect("a BOM");
+    let account = || {
+        let mut roles = BomRoles::default();
+        roles.accounts.push(at..at + "\u{FEFF}Assets:A".len());
+        roles
+    };
+    assert!(check(text, account(), 0).0);
+    assert!(!check(text, account(), 1).0);
+    let text = "2024-01-02 open Assets:A ;x\u{FEFF}y";
+    let at = MADE_UP_HEAD.len() + text.find('\u{FEFF}').expect("a BOM");
+    let inner = || BomRoles {
+        accounts: Vec::new(),
+        inner: vec![at],
+    };
+    assert!(check(text, inner(), 0).1);
+    assert!(!check(text, inner(), 1).1);
+}
+
+/// `ordinary_accounts` and `ordinary_inner_boms` rewrite only the parts the
+/// roles name, and keep everything else, from the input's first byte on.
+#[test]
+fn test_rewrites_keep_the_rest_of_the_input() {
+    let src = "a \u{FEFF}Assets:A b x\u{FEFF}y";
+    let account = 2..2 + "\u{FEFF}Assets:A".len();
+    let inner = src.rfind('\u{FEFF}').expect("a BOM");
+    let roles = BomRoles {
+        accounts: vec![account],
+        inner: vec![inner],
+    };
+    assert_eq!(ordinary_accounts(src, &roles), "a Assets:X b x\u{FEFF}y");
+    assert_eq!(
+        ordinary_inner_boms(src, &roles, &(0..src.len())),
+        "a \u{FEFF}Assets:A b x$y"
+    );
+    assert_eq!(
+        ordinary_inner_boms(src, &roles, &(0..inner)),
+        src,
+        "the inner BOM is past the span"
+    );
+}
+
+/// A line rledger reads clean counts 0 alone.
+#[test]
+fn test_standalone_count_of_a_clean_line_is_zero() {
+    assert_eq!(standalone_count("2024-01-03 open Assets:C"), 0);
+    assert_eq!(standalone_count("foo"), 1);
+}
+
+/// `hash_bang_share` is the difference before the rewrite less the one after
+/// it.
+#[test]
+fn test_hash_bang_share_is_the_difference_it_takes_away() {
+    assert_eq!(hash_bang_share(3, 1, 2, 1), 1);
+    assert_eq!(hash_bang_share(1, 3, 2, 1), -3);
+    assert_eq!(hash_bang_share(2, 2, 1, 3), 2);
+}
+
+/// `data_lines` skips blank lines and header lines (`# ...`, a bare `#`),
+/// and keeps a source that starts with `#`.
+#[test]
+fn test_data_lines_skips_only_headers_and_blanks() {
+    let text = "# a header\n#\n\n#t x\t3:1\nrow\t1\n";
+    assert_eq!(
+        data_lines(text).collect::<Vec<_>>(),
+        vec!["#t x\t3:1", "row\t1"]
+    );
+}
+
+/// `parse_exceptions` reads the source, line and reason of each exception.
+#[test]
+fn test_parse_exceptions_reads_each_field() {
+    let reason = "rledger counts 1 where beancount counts 2 (main 1); why";
+    let text = format!("# header\n#\nsrc\\n\t4\t{reason}\n");
+    assert_eq!(
+        parse_exceptions(&text).into_iter().collect::<Vec<_>>(),
+        vec![(("src\\n", 4), reason)]
+    );
+}
+
+/// An exception with a blank reason is refused for that, before its counts
+/// are read.
+#[test]
+#[should_panic(expected = "no reason")]
+fn test_parse_exceptions_rejects_a_blank_reason() {
+    parse_exceptions("src\t4\t \n");
+}
+
+/// `parse_accepted` reads the cause, the standalone count (`-` for none)
+/// and the reason of each accepted line.
+#[test]
+fn test_parse_accepted_reads_each_field() {
+    let accepted = parse_accepted("# h\na\t3\tc1\t-\twhy a\nb\t4\tc2\t2\twhy b\n");
+    let a = &accepted[&("a", 3)];
+    assert_eq!((a.cause, a.standalone, a.why), ("c1", None, "why a"));
+    let b = &accepted[&("b", 4)];
+    assert_eq!((b.cause, b.standalone, b.why), ("c2", Some(2), "why b"));
+    assert_eq!(accepted.len(), 2);
+}
+
+/// An accepted line with a blank reason is refused.
+#[test]
+#[should_panic(expected = "no justification")]
+fn test_parse_accepted_rejects_a_blank_reason() {
+    parse_accepted("a\t3\tc\t-\t \n");
+}
+
+/// An accepted line whose reason is still a `TODO` (as the failure message
+/// for a new line writes it) is refused.
+#[test]
+#[should_panic(expected = "justification still to write")]
+fn test_parse_accepted_rejects_a_todo_reason() {
+    parse_accepted("a\t3\tc\t-\tTODO 1 2\n");
 }

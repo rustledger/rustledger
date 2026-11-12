@@ -271,6 +271,33 @@ EXTRA = [
     "2024-01-02 *\n  ab:" + BOM + "a:B\n",
     "x -" + BOM + "a:B\n",
     "x 2024-01-01" + BOM + "a:B\n",
+    # Round 21: a BOM glued to a posting's currency, or to a balance's
+    # number, right before its price, cost or tolerance (and the same with a
+    # blank before the BOM), with LF and CRLF line endings; a date alone with
+    # a comment after it; and a line-start BOM before a skipped line start
+    # with a BOM after it.
+    *[
+        line.replace("{E}", end)
+        for end in ("\n", "\r\n")
+        for gap in ("", " ")
+        for line in [
+            '2024-01-02 * "x"{E}  Assets:A  1 HOOL' + gap + BOM + tail
+            + "{E}  Assets:B  -2 USD{E}"
+            for tail in (
+                "@ 2 USD",
+                "@@ 2 USD",
+                "{2 USD}",
+                "{{2 USD}}",
+                "{{4 USD}} @@ 5 USD",
+                "~ 2 USD",
+            )
+        ]
+        + ["2024-01-02 balance Assets:A 1.00" + gap + BOM + "~ 0.01 USD{E}"]
+    ],
+    "2024-01-02 ;c" + BOM + "\n2024-01-03 open Assets:C\n",
+    "2024-01-02 ;" + BOM + "\n",
+    "2024-01-02 open\n" + BOM + "*" + BOM + "\n",
+    "2024-01-02 open\n" + BOM + "#" + BOM + "\n",
 ]
 
 PROBE_SEED = 2931

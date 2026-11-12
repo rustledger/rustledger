@@ -743,3 +743,51 @@ fn test_parse_bom_alone_at_eof_after_directive_is_one_error() {
     };
     assert_eq!(open.account.as_str(), "Assets:C", "{src:?}");
 }
+
+/// A BOM glued to a posting's currency right before its price or cost, or
+/// to a balance's number right before its tolerance, starts the line's one
+/// invalid token there (`<BOM>@`, `<BOM>{2`, `<BOM>~`), with or without a
+/// blank before it and with LF or CRLF line endings: one error, as in
+/// bean-check 3.2.3. A posting's trailing-tokens check, whose error starts
+/// where the amount ends, right at the glued token, and a balance's
+/// malformed-amount check reported a second one. The price or cost after
+/// the token is dropped (issue #2954), as it is with the blank.
+#[test]
+fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
+    for end in ["\n", "\r\n"] {
+        for gap in ["", " "] {
+            for tail in [
+                "@ 2 USD",
+                "@@ 2 USD",
+                "{2 USD}",
+                "{{2 USD}}",
+                "{{4 USD}} @@ 5 USD",
+                "~ 2 USD",
+            ] {
+                let src = format!(
+                    "{HEAD}2024-01-02 * \"x\"{end}  Assets:A  1 HOOL{gap}{BOM}{tail}{end}  \
+                     Assets:B  -2 USD{end}"
+                );
+                let result = parse_both(&src);
+                assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+                assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+                let posting = result
+                    .directives
+                    .iter()
+                    .find_map(|d| match &d.value {
+                        Directive::Transaction(t) => t.postings.first().cloned(),
+                        _ => None,
+                    })
+                    .expect("the transaction is kept");
+                assert!(
+                    posting.value.price.is_none() && posting.value.cost.is_none(),
+                    "{src:?}: {posting:?}"
+                );
+            }
+            let src = format!("{HEAD}2024-01-02 balance Assets:A 1.00{gap}{BOM}~ 0.01 USD{end}");
+            let result = parse_both(&src);
+            assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+            assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+        }
+    }
+}

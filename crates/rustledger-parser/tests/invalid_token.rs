@@ -119,6 +119,16 @@ fn test_parse_invalid_token_is_one_error() {
         ),
         // A metadata value in Unicode digits was dropped with no error.
         ("2024-01-01 open Assets:A\n  kk: \u{96b}\n", &[2][..]),
+        // A header's grammar that reads up to the invalid token fails at
+        // it, so the malformed-amount check of the balance it sits in
+        // reports nothing more; and a posting's trailing tokens that start
+        // right at a token glued to its currency are no error either.
+        ("2024-01-01 balance Assets:A 1.00 $~ 0.01 USD\n", &[1][..]),
+        ("2024-01-01 balance Assets:A 1.00$~ 0.01 USD\n", &[1][..]),
+        (
+            "2024-01-01 *\n  Assets:A  1 HOOL$~ 2 USD\n  Assets:B\n",
+            &[2][..],
+        ),
     ] {
         check(src, lines);
     }

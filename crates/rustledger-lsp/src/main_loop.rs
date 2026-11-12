@@ -75,7 +75,7 @@ use lsp_types::{
 };
 use parking_lot::RwLock;
 use rustledger_core::Directive;
-use rustledger_parser::{ParseResult, Spanned, parse};
+use rustledger_parser::{ParseResult, Spanned, bom, parse};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -467,8 +467,11 @@ impl MainLoopState {
             let Some(source) = path.canonicalize().ok().and_then(|c| loaded.get(&c)) else {
                 continue;
             };
+            // The loader keeps a file's leading BOM and an editor sends the
+            // buffer without it; only the parser strips it. Compare the two
+            // texts as the parser reads them.
             if let Some(doc) = vfs.get_mut(&path)
-                && doc.text() == source.as_str()
+                && bom::strip_leading(&doc.text()).0 == bom::strip_leading(source.as_str()).0
             {
                 doc.forget_last_clean_parse();
             }
@@ -4369,6 +4372,63 @@ mod tests {
         let published = drain_published(&receiver);
         b_shown = shown_for(&published, &b, b_shown);
         assert_eq!(sorted(b_shown), on_disk, "{published:?}");
+    }
+
+    /// Diagnostic codes with their 0-based lines.
+    type Codes = Vec<(String, u32)>;
+
+    /// Save main broken, as [`a_buffer_saved_broken_is_validated_as_loaded`]
+    /// does, with main's disk bytes `on_disk(text)` and its buffer
+    /// `in_buffer(text)`, and return what b shows after the reload and what
+    /// `check` reports for b on disk.
+    fn b_after_saving_main_broken(
+        on_disk: impl Fn(&str) -> String,
+        in_buffer: impl Fn(&str) -> String,
+    ) -> (Codes, Codes) {
+        let (_tmp, main, b) = ledger_dir(&on_disk(MAIN_WITH_Q));
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, &in_buffer(MAIN_WITH_Q));
+        let published = drain_published(&receiver);
+        let mut b_shown = shown_for(&published, &b, vec![]);
+        assert_eq!(b_shown, vec![], "{published:?}");
+
+        change_doc(&mut state, &main, 2, &in_buffer(MAIN_BROKEN_NO_Q));
+        let published = drain_published(&receiver);
+        b_shown = shown_for(&published, &b, b_shown);
+        assert_eq!(b_shown, vec![], "unsaved: {published:?}");
+
+        std::fs::write(&main, on_disk(MAIN_BROKEN_NO_Q)).expect("save main");
+        disk_changed(&mut state, &main);
+        let published = drain_published(&receiver);
+        let check = check_codes(
+            &[
+                ("main.beancount", &on_disk(MAIN_BROKEN_NO_Q)),
+                ("b.beancount", B_TEXT),
+            ],
+            "b.beancount",
+        );
+        (sorted(shown_for(&published, &b, b_shown)), check)
+    }
+
+    /// Review round 6 of #2949: the loader keeps a file's leading BOM, and an
+    /// editor sends the buffer without it. Main saved broken with a BOM is
+    /// still the text the buffer holds, so b gets what `check` reports.
+    #[test]
+    fn a_buffer_saved_broken_with_a_bom_is_validated_as_loaded() {
+        let (shown, check) =
+            b_after_saving_main_broken(|text| format!("{}{text}", bom::BOM), str::to_string);
+        assert_eq!(Some(check.clone()), b_own(), "the reference itself");
+        assert_eq!(shown, check);
+    }
+
+    /// The same with CRLF line endings, which the buffer and the disk share.
+    #[test]
+    fn a_buffer_saved_broken_with_crlf_is_validated_as_loaded() {
+        let crlf = |text: &str| text.replace('\n', "\r\n");
+        let (shown, check) = b_after_saving_main_broken(crlf, crlf);
+        assert_eq!(Some(check.clone()), b_own(), "the reference itself");
+        assert_eq!(shown, check);
     }
 
     /// The other half of the round-5 rule: a reload that reads a text other

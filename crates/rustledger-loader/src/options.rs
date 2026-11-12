@@ -236,11 +236,15 @@ impl BoolVocabulary {
 /// (`USD:١` is 1 in beancount); only ASCII digits are read here.
 fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
     let is_number_char = |c: char| c.is_ascii_digit() || c == '.';
-    let first_line = value.split('\n').next().unwrap_or_default();
-    let Some(colon) = first_line
-        .rmatch_indices(':')
-        .map(|(at, _)| at)
-        .find(|&at| first_line[at + 1..].starts_with(is_number_char))
+    let first_line = &value[..scan_bytes(value)
+        .position(|b| b == b'\n')
+        .unwrap_or(value.len())];
+    // The last `:` followed by a number character, scanning back from the end.
+    let Some(colon) = scan_bytes(first_line)
+        .rev()
+        .zip((0..first_line.len()).rev())
+        .find(|&(b, at)| b == b':' && first_line[at + 1..].starts_with(is_number_char))
+        .map(|(_, at)| at)
     else {
         return Err(format!(
             "Invalid value '{value}': expected CURRENCY:NUMBER, e.g. USD:0.01"
@@ -248,11 +252,13 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
     };
     let currency = &value[..colon];
     let rest = &value[colon + 1..];
-    let end = rest
-        .find(|c: char| !is_number_char(c))
+    // A byte of a non-ASCII character is never a digit or `.`, so the first
+    // such byte starts the first non-number character.
+    let end = scan_bytes(rest)
+        .position(|b| !(b.is_ascii_digit() || b == b'.'))
         .unwrap_or(rest.len());
     let (number, trailing) = rest.split_at(end);
-    let trailing_text = trailing.trim_matches(is_python_space);
+    let trailing_text = trim_python_space(trailing);
     if !trailing_text.is_empty() {
         return Err(format!(
             "Invalid value '{value}': unexpected text '{trailing_text}' after the number"
@@ -290,14 +296,16 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     // In beancount's order: `D()` drops commas and spaces, then `Decimal`
     // strips surrounding whitespace, then drops every `_`. So whitespace left
     // next to an `_` stays inside the number and makes it invalid (`"_\t1"`).
-    let cleaned: String = value.chars().filter(|c| !matches!(c, ',' | ' ')).collect();
-    let text: String = cleaned
-        .trim_matches(is_python_space)
-        .chars()
+    let cleaned: String = scan_chars(value)
+        .filter(|c| !matches!(c, ',' | ' '))
+        .collect();
+    let text: String = scan_chars(trim_python_space(&cleaned))
         .filter(|&c| c != '_')
         .collect();
     let text = text.as_str();
-    let unsigned = text.trim_start_matches(['+', '-']);
+    let unsigned = &text[scan_bytes(text)
+        .position(|b| !matches!(b, b'+' | b'-'))
+        .unwrap_or(text.len())..];
     if ["nan", "snan", "inf", "infinity"]
         .iter()
         .any(|word| unsigned.eq_ignore_ascii_case(word))
@@ -308,7 +316,7 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
         ));
     }
     let invalid = || format!("Invalid value '{value}': expected a decimal number");
-    let (mantissa, exponent) = match text.find(['e', 'E']) {
+    let (mantissa, exponent) = match scan_bytes(text).position(|b| matches!(b, b'e' | b'E')) {
         Some(at) => (&text[..at], Some(&text[at + 1..])),
         None => (text, None),
     };
@@ -332,8 +340,10 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     // Python can build that exponent: its context allows a final exponent
     // from `MIN_ETINY` to `MAX_EMAX`, so `0e1000000000000000000` is an error
     // in beancount and here.
-    if digits.bytes().all(|b| b == b'0' || b == b'.') {
-        let places = digits.split_once('.').map_or(0, |(_, frac)| frac.len());
+    if scan_bytes(digits).all(|b| b == b'0' || b == b'.') {
+        let places = scan_bytes(digits)
+            .position(|b| b == b'.')
+            .map_or(0, |dot| digits.len() - dot - 1);
         let places = i128::try_from(places).map_err(|_| not_held())?;
         let final_exponent = exponent.unwrap_or(0) - places;
         if !(PYTHON_MIN_ETINY..=PYTHON_MAX_EMAX).contains(&final_exponent) {
@@ -364,7 +374,9 @@ fn parse_exponent(text: &str) -> Option<i128> {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
-    let digits = digits.trim_start_matches('0');
+    let digits = &digits[scan_bytes(digits)
+        .position(|b| b != b'0')
+        .unwrap_or(digits.len())..];
     if digits.len() > 30 {
         return None;
     }
@@ -400,31 +412,40 @@ const DECIMAL_MAX_MANTISSA: i128 = 79_228_162_514_264_337_593_543_950_335;
 /// Linear in the input's length: the value is untrusted ledger text, read on
 /// every LSP edit, so no step may rescan it per digit.
 fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
-    let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
+    let (int_part, frac_part) = match scan_bytes(digits).position(|b| b == b'.') {
+        Some(at) => (&digits[..at], &digits[at + 1..]),
+        None => (digits, ""),
+    };
     let mut scale = i64::try_from(frac_part.len()).ok()?.checked_sub(exponent)?;
-    let coefficient: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).collect();
-    let Some(first) = coefficient.iter().position(|&b| b != b'0') else {
+    // The coefficient's digits, read from the input in place: no copy of it
+    // is built, so no step can grow or shift one digit at a time.
+    let coefficient = || scan_bytes(int_part).chain(scan_bytes(frac_part));
+    let Some(first) = coefficient().position(|b| b != b'0') else {
         // Zero: keep the written scale, as far as a `Decimal` holds one.
         return Decimal::try_from_i128_with_scale(0, u32::try_from(scale.clamp(0, 28)).ok()?).ok();
     };
-    let significant = &coefficient[first..];
-    let trailing_zeros = significant.iter().rev().take_while(|&&b| b == b'0').count();
+    let significant_len = int_part.len() + frac_part.len() - first;
+    // Stops at the nonzero digit at `first` at the latest.
+    let trailing_zeros = coefficient().rev().take_while(|&b| b == b'0').count();
     // Trailing zeros that must go before the rest can fit: the scale past
     // 28, and the digits past the 29 a 96-bit coefficient can have.
-    let len = i64::try_from(significant.len()).ok()?;
+    let len = i64::try_from(significant_len).ok()?;
     let must_pop = scale.saturating_sub(28).max(len - 29).max(0);
     if must_pop > i64::try_from(trailing_zeros).ok()? {
         return None;
     }
-    let mut kept = significant.len() - usize::try_from(must_pop).ok()?;
+    // At most 29 digits: `must_pop` is at least `len - 29`.
+    let mut kept = significant_len - usize::try_from(must_pop).ok()?;
     scale -= must_pop;
-    let mut n: i128 = std::str::from_utf8(&significant[..kept])
-        .ok()?
-        .parse()
-        .ok()?;
+    let kept_digits: String = coefficient()
+        .skip(first)
+        .take(kept)
+        .map(char::from)
+        .collect();
+    let mut n: i128 = kept_digits.parse().ok()?;
     // A 29-digit coefficient can still be past 96 bits: drop one more
     // trailing zero while there is one and the scale allows it.
-    while n > DECIMAL_MAX_MANTISSA && scale > 0 && significant[kept - 1] == b'0' {
+    while n > DECIMAL_MAX_MANTISSA && scale > 0 && kept_digits.as_bytes()[kept - 1] == b'0' {
         n /= 10;
         kept -= 1;
         scale -= 1;
@@ -438,6 +459,65 @@ fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
     }
     Decimal::try_from_i128_with_scale(n, u32::try_from(scale).ok()?).ok()
 }
+
+/// The bytes of `text`, each counted as scanned in tests.
+///
+/// With [`scan_chars`], the only way the option-number readers
+/// ([`parse_tolerance_map`], [`parse_beancount_decimal`] and their helpers)
+/// read the value: see [`note_scanned`] for why.
+fn scan_bytes(text: &str) -> impl DoubleEndedIterator<Item = u8> + '_ {
+    text.bytes().inspect(|_| note_scanned(1))
+}
+
+/// The characters of `text`, each counted as scanned in tests (see
+/// [`scan_bytes`]).
+fn scan_chars(text: &str) -> impl DoubleEndedIterator<Item = char> + '_ {
+    text.chars().inspect(|_| note_scanned(1))
+}
+
+/// `text` without the [`is_python_space`] characters at either end, as
+/// `str::trim_matches` gives it, scanning through [`scan_chars`].
+fn trim_python_space(text: &str) -> &str {
+    let start: usize = scan_chars(text)
+        .take_while(|&c| is_python_space(c))
+        .map(char::len_utf8)
+        .sum();
+    let rest = &text[start..];
+    let end = rest.len()
+        - scan_chars(rest)
+            .rev()
+            .take_while(|&c| is_python_space(c))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    &rest[..end]
+}
+
+#[cfg(test)]
+thread_local! {
+    /// In tests, the bytes and characters of option values the
+    /// option-number readers have scanned on this thread: how the tests bound
+    /// their work without timing it (#2948).
+    static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `n` units of an option value scanned, in `SCANNED`.
+///
+/// The contract: every scan of the value in [`parse_tolerance_map`],
+/// [`parse_beancount_decimal`], [`exact_decimal`] and their helpers must
+/// count here, by going through [`scan_bytes`] or [`scan_chars`]. A scan that
+/// does not is invisible to the linearity guard, and so is work that does not
+/// scan at all, such as copying or shifting a buffer: which is why no step
+/// builds a copy of the digits it could grow or shift one at a time.
+#[cfg(test)]
+fn note_scanned(n: usize) {
+    SCANNED.with(|scanned| scanned.set(scanned.get() + n));
+}
+
+/// Outside tests, a scan counts nothing (see the test build's version, which
+/// counts the work for the tests).
+#[cfg(not(test))]
+#[inline]
+const fn note_scanned(_n: usize) {}
 
 /// Whether `c` is whitespace to Python's `str.isspace`, which `str.strip` and
 /// `Decimal(str)` strip: Unicode `White_Space` (what `char::is_whitespace`
@@ -453,7 +533,7 @@ fn is_python_number_part(text: &str, fraction: bool) -> bool {
     let body = text.strip_prefix(['+', '-']).unwrap_or(text);
     let mut digits = 0;
     let mut dot = false;
-    for b in body.bytes() {
+    for b in scan_bytes(body) {
         match b {
             b'0'..=b'9' => digits += 1,
             b'.' if fraction && !dot => dot = true,
@@ -2548,27 +2628,76 @@ mod tests {
         assert!(parse_beancount_decimal("79228162514264337593543950336").is_err());
     }
 
-    /// `exact_decimal` is linear in the value's length: the value is untrusted
-    /// ledger text, and the LSP reads it on every edit. A version that
-    /// rescanned the leading zeros per trailing zero took 30 s here.
+    /// The option-number readers are linear in the value's length: the value
+    /// is untrusted ledger text, and the LSP reads it on every edit. A version
+    /// of `exact_decimal` that rescanned the leading zeros per trailing zero
+    /// took 30 s on 160,000 zeros a side.
+    ///
+    /// Counts the bytes and characters scanned rather than timing the calls,
+    /// so a loaded machine cannot fail it (#2948). It sees only the scans that
+    /// go through `scan_bytes` / `scan_chars` (see `note_scanned`): there,
+    /// a quadratic scan of these inputs counts millions, where each call may
+    /// count at most `MAX_SCANS_PER_BYTE` per input byte.
     #[test]
-    fn test_exact_decimal_is_linear_on_long_input() {
-        let zeros = "0".repeat(160_000);
+    fn test_exact_decimal_linear_digit_scans_on_long_input() {
+        use rust_decimal_macros::dec;
+
+        /// The most scans per input byte a call may make. The calls below
+        /// measure between 2.0 and 7.0 per byte (the highest is the long
+        /// multiplier, which is cleaned, filtered and checked before
+        /// `exact_decimal` reads it), so one more linear pass still fits,
+        /// where a quadratic scan of these 4,000-zero inputs makes thousands.
+        const MAX_SCANS_PER_BYTE: usize = 10;
+
+        /// The value `read` returns for `input`, checked to scan it linearly.
+        fn assert_linear<'a, T>(input: &'a str, read: impl FnOnce(&'a str) -> T) -> T {
+            SCANNED.with(|scanned| scanned.set(0));
+            let result = read(input);
+            let scanned = SCANNED.with(std::cell::Cell::get);
+            // Every call reads its whole input once, so a count under that
+            // means every hook was dropped (not that one was).
+            assert!(
+                (input.len()..=MAX_SCANS_PER_BYTE * input.len()).contains(&scanned),
+                "scanned {scanned} times for a {}-byte input",
+                input.len()
+            );
+            result
+        }
+
+        let zeros = "0".repeat(4_000);
         let value = format!("USD:{zeros}1{zeros}");
+        assert!(assert_linear(&value, parse_tolerance_map).is_err());
         let multiplier = format!("{zeros}1{zeros}");
-        let start = std::time::Instant::now();
-        assert!(parse_tolerance_map(&value).is_err());
-        assert!(parse_beancount_decimal(&multiplier).is_err());
+        assert!(assert_linear(&multiplier, parse_beancount_decimal).is_err());
         let fraction = format!("USD:0.{zeros}");
         assert_eq!(
-            parse_tolerance_map(&fraction).map(|(_, d)| d.scale()),
+            assert_linear(&fraction, parse_tolerance_map).map(|(_, d)| d.scale()),
             Ok(28)
         );
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "took {:?}",
-            start.elapsed()
+        // Trailing whitespace after the number, trimmed.
+        let spaced = format!("USD:1{}", "\t".repeat(8_000));
+        assert_eq!(
+            assert_linear(&spaced, parse_tolerance_map).map(|(_, d)| d),
+            Ok(dec!(1))
         );
+        // A long exponent: its leading zeros are skipped.
+        let exponent = format!("1e-{zeros}1");
+        assert_eq!(
+            assert_linear(&exponent, parse_beancount_decimal),
+            Ok(dec!(0.1))
+        );
+        // Separators and surrounding whitespace, dropped before the number
+        // is read.
+        let separated = format!("\t{}1\t", "_0,".repeat(4_000));
+        assert_eq!(
+            assert_linear(&separated, parse_beancount_decimal),
+            Ok(dec!(1))
+        );
+        // Many colons none of which a number follows: the search for the
+        // last `CURRENCY:` colon passes each of them, and must not rescan
+        // the line at any one of them.
+        let colons = format!("USD:1{}", ":a".repeat(4_000));
+        assert!(assert_linear(&colons, parse_tolerance_map).is_err());
     }
 
     /// A zero is 0 at any exponent Python's `Decimal` can build, and an error

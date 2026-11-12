@@ -294,7 +294,8 @@ impl Ledger {
     ///
     /// For surfaces that report only `errors`, not the option warnings: the
     /// E7002 itself is on `options.warnings`, so a surface listing both must
-    /// not list this as well.
+    /// not list this as well. A query surface lists both through
+    /// [`Self::query_option_errors`], which does that.
     #[must_use]
     pub fn query_refusal(&self) -> Option<LedgerError> {
         let rejected = self.options.query_refusal(self.booking_method)?;
@@ -312,6 +313,49 @@ impl Ledger {
             });
         }
         Some(err)
+    }
+
+    /// The option diagnostics a query surface lists:
+    /// [`option_warnings_to_errors`] over this ledger's options, with the
+    /// E7002 of the rejected `booking_method` that refuses queries replaced
+    /// by [`Self::query_refusal`], which names the same option at the same
+    /// line and says why the query did not answer (#2911, #2929).
+    ///
+    /// One rule for every query surface over a source that loads, so none
+    /// lists both and none lists the plain E7002 where the refusal belongs:
+    /// the FFI's `query`, `query-file` and `session.query`, and WASM's
+    /// `query`, `ParsedLedger.query`, `queryMultiFile` and `Ledger.query`,
+    /// pinned to agree by the cases in `tests/query_option_errors/cases.rs`.
+    /// A surface that reports a load (`rledger check`, the FFI's `load` and
+    /// `info()`) lists the plain [`option_warnings_to_errors`].
+    ///
+    /// A source that fails to parse is loaded too (#2949), so this holds
+    /// there as well, with one exception: WASM's `queryMultiFile`
+    /// (`query_with_filesystem` in `rustledger-wasm`, which points back here)
+    /// refuses on a parse error before a `Ledger` exists and lists no option
+    /// diagnostic, where the FFI's `query-file` lists this. Revisit when that
+    /// path can reach this rule (#2960).
+    #[must_use]
+    pub fn query_option_errors(&self) -> Vec<LedgerError> {
+        let mut errors = option_warnings_to_errors(&self.options.warnings);
+        if let (Some(rejected), Some(refusal)) = (
+            self.options.query_refusal(self.booking_method),
+            self.query_refusal(),
+        ) {
+            // The last E7002 for the rejected value at its site: the
+            // rejection the refusal is about.
+            let refused = self.options.warnings.iter().rposition(|w| {
+                w.code == "E7002"
+                    && w.option == rejected.key
+                    && w.value == rejected.value
+                    && w.site == rejected.site
+            });
+            match refused {
+                Some(i) => errors[i] = refusal,
+                None => errors.push(refusal),
+            }
+        }
+        errors
     }
 
     /// Return the directive stream merged with synthesized
@@ -491,6 +535,9 @@ pub struct LedgerError {
     /// Whether this is [`Ledger::query_refusal`]: a rejected option that
     /// would change the ledger's figures. See [`Self::blocks_queries`].
     option_refusal: bool,
+    /// Whether the validator reported this. See
+    /// [`Self::is_validation_finding`].
+    validation_finding: bool,
 }
 
 /// Error severity level.
@@ -532,6 +579,7 @@ impl LedgerError {
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: false,
         }
     }
 
@@ -550,6 +598,7 @@ impl LedgerError {
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: false,
         }
     }
 
@@ -590,6 +639,20 @@ impl LedgerError {
     #[must_use]
     pub const fn is_plugin_failure(&self) -> bool {
         self.plugin_failure
+    }
+
+    /// Whether the validator reported this (the Early and Late validation
+    /// passes and their finalize step), not the load, booking or a plugin.
+    ///
+    /// A finding describes the ledger as written; it does not make the
+    /// booked directives unsound to work with. A surface that runs more work
+    /// over a validated load (the FFI's host plugins, #2935) gates on the
+    /// other errors only, so a failed `balance` does not stop that work. The
+    /// code does not tell them apart: booking raises the validator's E4xxx
+    /// codes too ([`Self::is_booking_failure`]).
+    #[must_use]
+    pub const fn is_validation_finding(&self) -> bool {
+        self.validation_finding
     }
 
     /// Mark this error as a plugin failure ([`Self::is_plugin_failure`]).
@@ -1329,7 +1392,7 @@ fn run_booking(
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
-                    if let Some(location) = error_location(source_map, file_id, span.start) {
+                    if let Some(location) = source_map.locate(file_id, span.start) {
                         err = err.with_location(location);
                     }
                     errors.push(err);
@@ -1643,7 +1706,7 @@ fn dispatch_plugins(
             ),
         ) {
             Ok(output) => {
-                record_plugin_errors(errors, output.errors, source_map);
+                record_plugin_errors(errors, &output.errors, source_map);
                 apply_plugin_ops(directives, output.ops, errors, source_map)?;
             }
             Err(e) => errors.push(run_error_to_ledger(&e).with_plugin_failure()),
@@ -1702,48 +1765,142 @@ fn build_wrappers(
 #[cfg(feature = "plugins")]
 fn record_plugin_errors(
     errors: &mut Vec<LedgerError>,
-    plugin_errors: Vec<rustledger_plugin::PluginError>,
+    plugin_errors: &[rustledger_plugin::PluginError],
     source_map: &SourceMap,
 ) {
-    for err in plugin_errors {
-        // A plugin's text is shown to the user: escape its control
-        // characters (see `rustledger_plugin::untrusted`).
-        let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
-        let mut ledger_err = match err.severity {
-            rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", message).with_phase("plugin")
-            }
-            rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", message).with_phase("plugin")
-            }
-        };
-        // A native plugin that could not do its work (a config it cannot
-        // use) says so on the error; it returned its input unchanged.
-        if err.failed {
-            ledger_err = ledger_err.with_plugin_failure();
+    errors.extend(
+        plugin_errors
+            .iter()
+            .map(|err| plugin_error_to_ledger_error(err, source_map)),
+    );
+}
+
+/// One plugin error as a [`LedgerError`], as the loader records it.
+///
+/// Code `PLUGIN`, phase `plugin`, the plugin's severity, its message with
+/// control characters escaped, a plugin failure when the plugin says it
+/// could not do its work, and the location the plugin set (`source_file` /
+/// `line_number`, column 1).
+///
+/// The mapping every surface that runs a plugin shares: the loader's own
+/// pass (`record_plugin_errors`, for `plugin` directives) and the FFI's
+/// host-requested plugins (`rustledger_ffi_wasi::helpers::apply_plugins`),
+/// which reported a bare message with no code, location or severity, and
+/// unescaped (review of
+/// #2946).
+///
+/// Source-location resolution: if the plugin's `source_file` resolves to a
+/// real file in `source_map`, that file's path is the location; otherwise
+/// (a plugin-synthesized name such as `"<auto_accounts>"`, or a surface with
+/// no source map) the name itself, escaped, so the rendered location still
+/// attributes the error to where the plugin pointed.
+#[cfg(feature = "plugins")]
+#[must_use]
+pub fn plugin_error_to_ledger_error(
+    err: &rustledger_plugin::PluginError,
+    source_map: &SourceMap,
+) -> LedgerError {
+    // A plugin's text is shown to the user: escape its control
+    // characters (see `rustledger_plugin::untrusted`).
+    let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
+    let mut ledger_err = match err.severity {
+        rustledger_plugin::PluginErrorSeverity::Error => {
+            LedgerError::error("PLUGIN", message).with_phase("plugin")
         }
-        // Propagate plugin-set source location into `ErrorLocation`.
-        // Column defaults to 1 — plugin errors don't carry column info
-        // through the wrapper protocol.
-        if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
-            let resolved_path = source_map
-                .get_by_path(std::path::Path::new(file))
-                .map_or_else(
-                    || {
-                        std::path::PathBuf::from(
-                            rustledger_plugin::escape_untrusted_line(file).into_owned(),
-                        )
-                    },
-                    |f| f.path.clone(),
-                );
-            ledger_err = ledger_err.with_location(ErrorLocation {
-                file: resolved_path,
-                line: line as usize,
-                column: 1,
-            });
+        rustledger_plugin::PluginErrorSeverity::Warning => {
+            LedgerError::warning("PLUGIN", message).with_phase("plugin")
         }
-        errors.push(ledger_err);
+    };
+    // A native plugin that could not do its work (a config it cannot use)
+    // says so on the error; it returned its input unchanged.
+    if err.failed {
+        ledger_err = ledger_err.with_plugin_failure();
     }
+    // Column 1: plugin errors carry no column through the wrapper protocol.
+    if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
+        let resolved_path = source_map
+            .get_by_path(std::path::Path::new(file))
+            .map_or_else(
+                || {
+                    std::path::PathBuf::from(
+                        rustledger_plugin::escape_untrusted_line(file).into_owned(),
+                    )
+                },
+                |f| f.path.clone(),
+            );
+        ledger_err = ledger_err.with_location(ErrorLocation {
+            file: resolved_path,
+            line: line as usize,
+            column: 1,
+        });
+    }
+    ledger_err
+}
+
+/// Each parse error of a [`LoadError::ParseErrors`] as a [`LedgerError`], as
+/// `rledger check` reports it.
+///
+/// Code `P` and the four-digit kind code, phase
+/// `parse`, the parser's message and hint, at its file, line and column
+/// (resolved through `source_map`, which holds the file's text), with its
+/// span. Whether it blocks queries is [`LoadError::blocks_queries`] of the
+/// failure. Any other [`LoadError`] gives nothing.
+///
+/// For a surface that takes the parse errors out of the load
+/// ([`crate::LoadResult::take_parse_errors`]) to report them one by one:
+/// left in, [`process`] reports each file's as one line-less `parse errors
+/// in <path>` (review of #2946, #2949).
+///
+/// `rledger check` does not call this: its JSON arm in
+/// `rustledger/src/cmd/check.rs` (`LoadError::ParseErrors`) renders the same
+/// fields inline, from the file it re-reads, after filtering by rule. That
+/// copy is deliberate and points back here; the `parse-error-in-include`
+/// case of `rustledger/tests/ffi_check_parity/cases.rs` pins the two to agree
+/// on code, line, column and message. Revisit if either side gains a field
+/// the other lacks, or if `check` stops re-reading the file, at which point
+/// it should call this.
+///
+/// WASM does not call this either: `parse_error_fields` in
+/// `rustledger-wasm/src/helpers.rs` maps the same message, code, phase and
+/// hint once for every WASM surface, because its single-source surfaces
+/// (`parse`, `format`, `validateSource`) build no [`LoadError`] or
+/// [`SourceMap`] to call this with. (The [`LedgerError`] this returns does
+/// carry the end, in `source_span` and `file_id`; WASM's multi-file surfaces
+/// report null ends for validation and other non-parse findings only because
+/// their `From<LedgerError>` conversion does not locate it, issue #2964.) That copy
+/// is deliberate and points back here; its `parse_error_mapping_parity` test
+/// pins the two to agree on message, code, phase, hint, file, line and
+/// column. Revisit if WASM's single-source surfaces come to build a
+/// [`LoadError`] and [`SourceMap`], at which point WASM should call this.
+#[must_use]
+pub fn parse_errors_to_ledger_errors(
+    failure: &LoadError,
+    source_map: &SourceMap,
+) -> Vec<LedgerError> {
+    let LoadError::ParseErrors { path, errors } = failure else {
+        return Vec::new();
+    };
+    let file = source_map.get_by_path(path);
+    errors
+        .iter()
+        .map(|e| {
+            let mut err = LedgerError::error(format!("P{:04}", e.kind_code()), e.message())
+                .with_phase("parse");
+            err.hint.clone_from(&e.hint);
+            err.blocking_load = failure.blocks_queries();
+            if let Some(file) = file {
+                let (line, column) = file.line_col(e.span.start);
+                err = err
+                    .with_location(ErrorLocation {
+                        file: file.path.clone(),
+                        line,
+                        column,
+                    })
+                    .with_source_span((e.span.start, e.span.end), file.id as u16);
+            }
+            err
+        })
+        .collect()
 }
 
 /// Apply a plugin's `Vec<PluginOp>` to `directives` in place.
@@ -2216,27 +2373,6 @@ fn build_validation_options(
         .with_source_lines(source_lines(source_map))
 }
 
-/// Where an error at byte `offset` of `file_id` is: the file, line and column
-/// of a source file, or the name and line of a placeholder location (such as
-/// `<check_closing>:0`, #2713), which has no column (0) because no text is
-/// behind it. `None` for a synthesized directive, which has no location.
-fn error_location(source_map: &SourceMap, file_id: u16, offset: usize) -> Option<ErrorLocation> {
-    let Some(file) = source_map.get(file_id as usize) else {
-        let (file, line) = source_map.placeholder(file_id)?;
-        return Some(ErrorLocation {
-            file,
-            line: line as usize,
-            column: 0,
-        });
-    };
-    let (line, column) = file.line_col(offset);
-    Some(ErrorLocation {
-        file: file.path.clone(),
-        line,
-        column,
-    })
-}
-
 /// Convert a batch of [`rustledger_validate::ValidationError`]s into
 /// loader-level [`LedgerError`]s (with resolved `file:line:column`
 /// locations) and append to the existing list.
@@ -2272,7 +2408,7 @@ fn ledger_errors_extend(
         // to do the lookup themselves (issue #901).
         let location = err
             .span
-            .and_then(|span| error_location(source_map, err.file_id?, span.start));
+            .and_then(|span| source_map.locate(err.file_id?, span.start));
         errors.push(LedgerError {
             severity: severity_level,
             code: err.code.code().to_string(),
@@ -2286,6 +2422,7 @@ fn ledger_errors_extend(
             plugin_failure: false,
             blocking_load: false,
             option_refusal: false,
+            validation_finding: true,
         });
     }
 }
@@ -2518,6 +2655,176 @@ mod validation_options_tests {
 
         assert_eq!(vo.inferred_tolerance_default.get("CLP"), Some(&dec!(0.5)));
         assert_eq!(vo.account_types[0], "Activos");
+    }
+}
+
+#[cfg(test)]
+mod option_errors_tests {
+    use super::{ErrorSeverity, option_warnings_to_errors};
+    use crate::Options;
+
+    /// The shared mapping (#2929) reads severity, code and phase off each
+    /// warning and keeps its message: an E7002 (error) and an E7003
+    /// (warning, last value wins) come out as `rledger check` prints them,
+    /// with no location, since one set through `Options::set` has none.
+    #[test]
+    fn test_option_warnings_to_errors_reads_each_warning() {
+        let mut opts = Options::new();
+        opts.set("booking_method", "fifo");
+        opts.set("title", "A");
+        opts.set("title", "B");
+        assert_eq!(opts.warnings.len(), 2, "{:?}", opts.warnings);
+
+        let errors = option_warnings_to_errors(&opts.warnings);
+
+        assert_eq!(errors.len(), opts.warnings.len());
+        for (err, warning) in errors.iter().zip(&opts.warnings) {
+            assert_eq!(err.code, warning.code);
+            assert_eq!(err.message, warning.message);
+            assert_eq!(err.phase, warning.phase());
+            let expected = if warning.is_error() {
+                ErrorSeverity::Error
+            } else {
+                ErrorSeverity::Warning
+            };
+            assert_eq!(err.severity, expected, "{}", warning.code);
+            assert!(err.location.is_none(), "{}", warning.code);
+            assert!(!err.is_validation_finding());
+            assert!(!err.blocks_queries());
+        }
+        assert_eq!(errors[0].code, "E7002");
+        assert_eq!(errors[0].severity, ErrorSeverity::Error);
+        assert_eq!(errors[1].code, "E7003");
+        assert_eq!(errors[1].severity, ErrorSeverity::Warning);
+    }
+
+    /// `is_validation_finding` holds for what the validator reported (a
+    /// failed `balance`) and not for a booking failure, though booking raises
+    /// the validator's codes: the FFI's host plugins are gated on the second
+    /// and must not be on the first (#2935).
+    #[cfg(feature = "validation")]
+    #[test]
+    fn test_is_validation_finding_marks_the_validators_errors_only() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "2024-01-01 open Assets:A USD\n\
+             2024-01-01 open Assets:B\n\
+             2024-01-02 balance Assets:A 5 USD\n\
+             2024-01-03 * \"sell what is not held\"\n  Assets:B  -1 HOOL {}\n  Assets:A\n",
+        );
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let options = super::LoadOptions {
+            validate: true,
+            ..Default::default()
+        };
+        let ledger = super::process(raw, &options).expect("processes");
+
+        let balance = ledger
+            .errors
+            .iter()
+            .find(|e| e.code == "E2001")
+            .unwrap_or_else(|| panic!("a failed balance: {:?}", ledger.errors));
+        assert!(balance.is_validation_finding());
+        let booking = ledger
+            .errors
+            .iter()
+            .find(|e| e.is_booking_failure())
+            .unwrap_or_else(|| panic!("a booking failure: {:?}", ledger.errors));
+        assert!(!booking.is_validation_finding(), "{booking:?}");
+    }
+
+    /// A query surface lists the refusal where the rejected `booking_method`'s
+    /// E7002 is, once, and every other option diagnostic as a load lists it
+    /// (#2911, #2929).
+    #[test]
+    fn test_query_option_errors_replaces_the_refused_e7002() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "option \"title\" \"A\"\n\
+             option \"booking_method\" \"fifo\"\n\
+             option \"title\" \"B\"\n\
+             2024-01-01 open Assets:A\n",
+        );
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = super::process(raw, &super::LoadOptions::default()).expect("processes");
+
+        let load: Vec<_> = option_warnings_to_errors(&ledger.options.warnings);
+        let query = ledger.query_option_errors();
+        assert_eq!(load.len(), 2, "{load:?}");
+        assert_eq!(query.len(), 2, "{query:?}");
+        let refusal = ledger.query_refusal().expect("fifo refuses");
+        let e7002 = load
+            .iter()
+            .position(|e| e.code == "E7002")
+            .expect("the E7002");
+        assert!(load[e7002].message.starts_with("Invalid value \"fifo\""));
+        assert_eq!(query[e7002].message, refusal.message);
+        assert!(query[e7002].blocks_queries());
+        assert_eq!(
+            query[e7002].location.as_ref().map(|l| l.line),
+            load[e7002].location.as_ref().map(|l| l.line),
+            "at the option's line"
+        );
+        let other = 1 - e7002;
+        assert_eq!(query[other].message, load[other].message);
+    }
+
+    /// The refusal replaces the E7002 of the rejection it is about, matched
+    /// by its site too: with the same bad `booking_method` in the main file
+    /// and in an include, the refusal is at the main file's line, and the
+    /// include's E7002 is listed as it is.
+    #[test]
+    fn test_query_option_errors_replaces_the_e7002_at_the_refusals_site() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "option \"booking_method\" \"fifo\"\n\
+             include \"inc.beancount\"\n\
+             2024-01-01 open Assets:A\n",
+        );
+        vfs.add_file("inc.beancount", "option \"booking_method\" \"fifo\"\n");
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = super::process(raw, &super::LoadOptions::default()).expect("processes");
+        let refusal = ledger.query_refusal().expect("fifo refuses");
+
+        let at = |e: &super::LedgerError| {
+            e.location.as_ref().map(|l| {
+                (
+                    l.file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    l.line,
+                )
+            })
+        };
+        let query: Vec<_> = ledger
+            .query_option_errors()
+            .iter()
+            .filter(|e| e.code == "E7002")
+            .map(|e| (at(e), e.message == refusal.message))
+            .collect();
+        assert_eq!(
+            query,
+            vec![
+                (Some(("main.beancount".to_string(), 1)), true),
+                (Some(("inc.beancount".to_string(), 1)), false),
+            ],
+            "{:?}",
+            ledger.options.warnings
+        );
     }
 }
 
@@ -2807,7 +3114,7 @@ mod plugin_decision_tests {
         let mut errors = Vec::new();
         super::record_plugin_errors(
             &mut errors,
-            vec![
+            &[
                 rustledger_plugin::PluginError::error("cannot use the config").mark_failed(),
                 rustledger_plugin::PluginError::error("a finding"),
             ],

@@ -629,6 +629,36 @@ impl SourceMap {
         PlaceholderLines(Arc::clone(&self.placeholders))
     }
 
+    /// Where an error at byte `offset` of `file_id` is: the file, line and
+    /// column of a source file ([`SourceFile::line_col`], so the column
+    /// counts characters), or the name and line of a placeholder location
+    /// (such as `<check_closing>:0`, #2713), which has no column (0) because
+    /// no text is behind it. `None` for a synthesized directive, which has no
+    /// location, and for any other id the map does not hold.
+    ///
+    /// The one rule every surface locates a finding by: the loader's own
+    /// [`crate::LedgerError`]s (so `rledger check`), the FFI component's
+    /// validation findings and the WASM surface's. Each surface re-derived
+    /// it once, and the copies drifted (a column left out, a column counted
+    /// in bytes; #2946).
+    #[must_use]
+    pub fn locate(&self, file_id: u16, offset: usize) -> Option<crate::ErrorLocation> {
+        let Some(file) = self.get(usize::from(file_id)) else {
+            let (file, line) = self.placeholder(file_id)?;
+            return Some(crate::ErrorLocation {
+                file,
+                line: line as usize,
+                column: 0,
+            });
+        };
+        let (line, column) = file.line_col(offset);
+        Some(crate::ErrorLocation {
+            file: file.path.clone(),
+            line,
+            column,
+        })
+    }
+
     /// Format a span for display.
     #[must_use]
     pub fn format_span(&self, file_id: usize, span: &Span) -> String {

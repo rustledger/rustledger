@@ -477,7 +477,16 @@ use crate::types::{Error, LedgerOptions};
 /// validation errors for a source with a parse error, and a `Ledger` with one
 /// line-less parse error per file. (v101 was never released; v104 is held by
 /// #2931.)
-pub const CACHE_VERSION: u32 = 103;
+/// v105: loader v73, unchanged. ARCHIVED LAYOUT moved (#2946): the
+/// `ParsedLedger` payload gained `query_option_errors` and the `Ledger` payload
+/// `query_errors`, what a query lists, in which a rejected `booking_method`'s
+/// E7002 is the refusal that says why the query does not answer
+/// (`Ledger::query_option_errors`, as the FFI lists it). A v103 blob holds
+/// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
+/// also carries its parse and validation errors at character columns now,
+/// where a byte column read high after a BOM or a multi-byte character.
+/// (v104 is held by #2931.)
+pub const CACHE_VERSION: u32 = 105;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -540,6 +549,9 @@ pub struct ParsedLedgerPayload {
     /// restored ledger gates its operations on that list and must not refuse
     /// a query over an invalid option.
     pub option_errors: Vec<Error>,
+    /// The option diagnostics a query lists (`Ledger::query_option_errors`):
+    /// a rejected `booking_method`'s E7002 is the refusal (#2929).
+    pub query_option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
     /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
     /// #2882: a parse error or a booking failure). The archived
@@ -581,6 +593,9 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
+    /// What a query lists: `errors` with the option diagnostics as a query
+    /// lists them (`Ledger::query_option_errors`, #2929).
+    pub query_errors: Vec<Error>,
     /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
     /// #2861: a parse error, a file that could not be read or decrypted, a
     /// booking failure). Archived because
@@ -975,6 +990,7 @@ mod tests {
                 "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
+            query_errors: Vec::new(),
             query_refused: true,
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
@@ -1028,6 +1044,7 @@ option "operating_currency" "USD"
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         };
@@ -1061,6 +1078,7 @@ option "operating_currency" "USD"
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         })
@@ -1075,6 +1093,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .expect("serialize");
@@ -1107,6 +1126,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
@@ -1135,6 +1155,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
@@ -1181,6 +1202,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
@@ -1197,6 +1219,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         })

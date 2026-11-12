@@ -3269,6 +3269,7 @@ name = "rustledger-ffi-component-tests"
 version = "0.24.0"
 dependencies = [
  "anyhow",
+ "parking_lot 0.13.0",
  "rustledger-booking",
  "rustledger-budget",
  "rustledger-core",

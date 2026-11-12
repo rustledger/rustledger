@@ -264,9 +264,16 @@ fn directive_from_core(d: &Directive, line: u32, filename: &str) -> wit::Directi
     }
 }
 
+/// The name the loader gives source text (`ffi::helpers::load_source`), as
+/// beancount's `load_string` names it, and so the file a source-text error
+/// is in.
+const SOURCE_NAME: &str = "<string>";
+
 fn error(e: ffi::Error) -> wit::Error {
     wit::Error {
         message: e.message,
+        code: e.code,
+        filename: e.file,
         line: e.line,
         column: e.column,
         field: e.field,
@@ -418,8 +425,28 @@ fn semantic_validation_errors(
             if err.code.severity() == rustledger_validate::Severity::Warning {
                 e.severity = "warning".to_string();
             }
-            if let Some(span) = err.span {
-                e = e.with_line(loaded.line_lookup.byte_to_line(span.start));
+            e.code = Some(err.code.code().to_string());
+            // A span is a place in the source text (file id 0) only: one in a
+            // plugin's directive (a placeholder id) or another file says
+            // nothing about the text, and was mapped to whatever line of it
+            // the offset fell on (#2935). The same file-id rule as the WASM
+            // surface's `validation_error_to_wasm`
+            // (`rustledger-wasm/src/helpers.rs`), which points back here;
+            // change both together. The location itself is not a copy: both
+            // read it from the loader's canonical, `SourceMap::locate`.
+            if let Some(span) = err.span.filter(|_| err.file_id.is_none_or(|id| id == 0)) {
+                // Line and column as the loader locates a finding, so as
+                // `rledger check` reports them; the column was left out
+                // (review of #2946, pinned by `check_parity`, whose BOM case
+                // reads a column past 1).
+                match loaded.source_map.locate(0, span.start) {
+                    Some(location) => {
+                        e = e.with_line(location.line as u32);
+                        e.column = Some(location.column as u32);
+                    }
+                    None => e = e.with_line(loaded.line_lookup.byte_to_line(span.start)),
+                }
+                e.file = Some(SOURCE_NAME.to_string());
             }
             e
         })
@@ -526,6 +553,16 @@ fn load_result(
     attach_balance_diffs(&mut entries, &balance_actuals);
     let mut errors = loaded.errors;
     errors.extend(validation_errs);
+    // Last, once validation has run: in `errors` an option diagnostic is a
+    // parse-phase error, which would have skipped it (#2929).
+    errors.extend(loaded.option_errors);
+    // The source is the loader's `<string>`; its errors are in the file the
+    // embedder named, as its entries are.
+    for e in &mut errors {
+        if e.file.as_deref() == Some(SOURCE_NAME) {
+            e.file = Some(filename.to_string());
+        }
+    }
     out::LoadResult {
         entries,
         errors: errors.into_iter().map(error).collect(),
@@ -715,14 +752,30 @@ fn simple_error(message: String) -> wit::Error {
 /// `handle_validate` orchestration (`load_source` + `ValidationSession`).
 pub fn validate(source: &str) -> out::ValidateResult {
     let load = ffi::helpers::load_source(source);
-    let parse_error_count = load.errors.iter().filter(|e| e.phase == "parse").count();
     let (validation_errs, _actuals) = semantic_validation_errors(&load, None);
     let mut errors = load.errors;
     errors.extend(validation_errs);
+    validate_result(errors, load.option_errors)
+}
 
+/// The validate-result for a load's `errors` (its own and its validation
+/// findings) and its option diagnostics, shared by `validate` and
+/// `validate-file` so the two count alike.
+///
+/// The option diagnostics go last and are counted in neither count: they are
+/// parse-phase on the wire, and `parse-error-count` counts the source's parse
+/// errors (#2929). `valid` goes by severity: it was `errors.is_empty()`, so a
+/// warning alone (an E7003 duplicate option, a plugin's notice) made a ledger
+/// invalid that `rledger check` passes.
+fn validate_result(
+    mut errors: Vec<ffi::Error>,
+    option_errors: Vec<ffi::Error>,
+) -> out::ValidateResult {
+    let parse_error_count = errors.iter().filter(|e| e.phase == "parse").count();
     let validate_error_count = errors.iter().filter(|e| e.phase == "validate").count();
+    errors.extend(option_errors);
     out::ValidateResult {
-        valid: errors.is_empty(),
+        valid: !errors.iter().any(ffi::Error::is_error),
         errors: errors.into_iter().map(error).collect(),
         parse_error_count: parse_error_count as u32,
         validate_error_count: validate_error_count as u32,
@@ -815,7 +868,7 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         return out::QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: refused_errors(loaded),
+            errors: load_errors(loaded),
         };
     }
     let directives = rustledger_booking::merge_with_padding_spanned(
@@ -834,14 +887,15 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
     )
 }
 
-/// The errors a refused query over `loaded` reports: the load's errors, then
-/// the reason a rejected `booking_method` refuses (#2911), which is listed on
-/// query results only.
-fn refused_errors(loaded: &ffi::helpers::LoadResult) -> Vec<wit::Error> {
+/// The errors a query over `loaded` lists: the load's errors, then its option
+/// diagnostics as a query lists them (#2929): a rejected `booking_method`'s
+/// E7002 is the refusal that says why the query does not answer (#2911,
+/// [`rustledger_loader::Ledger::query_option_errors`]).
+fn load_errors(loaded: &ffi::helpers::LoadResult) -> Vec<wit::Error> {
     loaded
         .errors
         .iter()
-        .chain(&loaded.query_refusal)
+        .chain(&loaded.query_option_errors)
         .cloned()
         .map(error)
         .collect()
@@ -853,9 +907,7 @@ fn with_load_errors(
     loaded: &ffi::helpers::LoadResult,
     mut result: out::QueryResult,
 ) -> out::QueryResult {
-    result
-        .errors
-        .splice(0..0, loaded.errors.iter().cloned().map(error));
+    result.errors.splice(0..0, load_errors(loaded));
     result
 }
 
@@ -1008,8 +1060,9 @@ fn run_query_with_tables(
 /// The error every query of a refused [`batch`] reports first. When a load
 /// error caused the refusal, it is in the batch's `load`. When a rejected
 /// `booking_method` whose booking differs from the request caused it (#2911),
-/// which is not a load error, the reason follows this error in each query's
-/// own errors.
+/// the batch's `load` lists that option's plain E7002 among its option
+/// diagnostics (#2929), and the refusal, which says why no query answers,
+/// follows this error in each query's own errors.
 const BATCH_REFUSED: &str = "Cannot execute query: a parse or booking error leaves the ledger incomplete, or a rejected booking_method books a method other than the one the ledger asks for; see the load errors and the errors that follow";
 
 /// `query.batch`: load `source` once, then run several queries against it,
@@ -1030,8 +1083,8 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
                 // The refusal names itself; the cause is in the load, or,
-                // for a rejected `booking_method`, which the load does not
-                // list as an error (#2911), here beside it.
+                // for a rejected `booking_method`, follows it here (#2911):
+                // the load lists only that option's plain E7002.
                 errors: std::iter::once(simple_error(BATCH_REFUSED.to_string()))
                     .chain(loaded.query_refusal.iter().cloned().map(error))
                     .collect(),
@@ -1060,10 +1113,38 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             })
             .collect()
     };
+    // One name for the source across the batch: its entries and load errors
+    // are `<stdin>`, so its query errors are too, not the loader's `<string>`.
+    let queries = query_results
+        .into_iter()
+        .map(|mut r| {
+            r.errors = named_source(r.errors, STDIN_NAME);
+            r
+        })
+        .collect();
     out::BatchResult {
-        load: load_result(loaded, "<stdin>", false),
-        queries: query_results,
+        load: load_result(loaded, STDIN_NAME, false),
+        queries,
     }
+}
+
+/// The name a source-text surface with no name from the embedder gives its
+/// entries (`batch`, a session from source).
+const STDIN_NAME: &str = "<stdin>";
+
+/// `errors` with the loader's name for the source text ([`SOURCE_NAME`])
+/// replaced by `name`, the one the surface gives its entries, so an error
+/// and the entry it is about name one file.
+fn named_source(errors: Vec<wit::Error>, name: &str) -> Vec<wit::Error> {
+    errors
+        .into_iter()
+        .map(|mut e| {
+            if e.filename.as_deref() == Some(SOURCE_NAME) {
+                e.filename = Some(name.to_string());
+            }
+            e
+        })
+        .collect()
 }
 
 // ---- file variants ----
@@ -1159,8 +1240,14 @@ pub fn load_file(
     // Inject a filesystem that routes GPG decryption to the `host.decrypt`
     // import — the sandbox can't run gpg or read the keyring (#1667).
     let fs = Box::new(HostDecryptFs(rustledger_loader::DiskFileSystem));
-    match ffi::helpers::load_file_with_fs(std::path::Path::new(path), path_security, Some(fs)) {
+    // Validated as `rledger check` validates it, the findings at their own
+    // file and line: `load-file` reported none at all (#2935).
+    match ffi::helpers::load_file_with_fs(std::path::Path::new(path), path_security, Some(fs), true)
+    {
         Ok(fl) => {
+            // Only the load's own errors gate the host's plugins, and by
+            // severity (`apply_plugins`): neither a validation finding nor an
+            // option diagnostic leaves the directives unsound (#2929).
             let mut errors = fl.errors;
             let opts = fl.options;
             let tolerance_multiplier = fl.tolerance_multiplier;
@@ -1175,7 +1262,13 @@ pub fn load_file(
                 fl.directive_files,
                 &mut errors,
                 &opts,
+                &fl.source_map,
             );
+            // The findings validate the ledger as written: the host's plugins
+            // run after the pipeline, where `rledger check --plugin` runs its
+            // inside. Then the option diagnostics, last (#2929).
+            errors.extend(fl.validation_errors);
+            errors.extend(fl.option_errors);
             // Opt-in pad expansion for balance consumers (#1628); synthesized
             // transactions have no source location.
             let (directives, directive_lines, directive_files) = if expand_pads {
@@ -1230,15 +1323,21 @@ pub fn load_file(
     }
 }
 
-// validate/query/batch over a file match the JSON-RPC handlers: read the file
-// and run the single-source path (these do not resolve includes).
-
-/// Validate the ledger at `path`. Reads the file and runs the single-source
-/// [`validate`] path (no include resolution); a read failure becomes an
-/// invalid result carrying the I/O error.
+/// Validate the ledger at `path` as `rledger check` does: loaded as a file,
+/// its includes resolved (confined to the ledger's tree, as `load-file` and
+/// `query-file` confine them by default), and validated by the canonical
+/// pipeline, so every finding is reported at its own file and line (#2935).
+/// It used to read the text and validate it as one source, with no include
+/// resolution, so a ledger split across files was validated without most of
+/// its directives. A load failure becomes an invalid result carrying it.
 pub fn validate_file(path: &str) -> out::ValidateResult {
-    match read_file(path) {
-        Ok(src) => validate(&src),
+    let fs = Box::new(HostDecryptFs(rustledger_loader::DiskFileSystem));
+    match ffi::helpers::load_file_with_fs(std::path::Path::new(path), true, Some(fs), true) {
+        Ok(fl) => {
+            let mut errors = fl.errors;
+            errors.extend(fl.validation_errors);
+            validate_result(errors, fl.option_errors)
+        }
         Err(e) => out::ValidateResult {
             valid: false,
             errors: vec![simple_error(e)],
@@ -1847,9 +1946,12 @@ fn held_tolerance_multiplier(
             Ok(value) => (value, None),
             Err(e) => (
                 default,
-                Some(simple_error(format!(
-                    "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
-                ))),
+                Some(held_option_error(
+                    "E7002",
+                    format!(
+                        "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
+                    ),
+                )),
             ),
         }
     };
@@ -1877,11 +1979,24 @@ fn held_booking_method(options: &mut wit::LedgerOptions) -> Option<wit::Error> {
     if checked.warnings.is_empty() {
         return None;
     }
+    let code = checked.warnings[0].code;
     let given = std::mem::replace(&mut options.booking_method, default.to_string());
-    Some(simple_error(format!(
-        "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
-         using the default {default}"
-    )))
+    Some(held_option_error(
+        code,
+        format!(
+            "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
+             using the default {default}"
+        ),
+    ))
+}
+
+/// An invalid value in held options, as an error with the code the loader
+/// gives the same option value in a ledger (E7002), so a host can match it
+/// by code as it matches an option diagnostic from a load.
+fn held_option_error(code: &str, message: String) -> wit::Error {
+    let mut error = simple_error(message);
+    error.code = Some(code.to_string());
+    error
 }
 
 /// Replace empty `name-*` roots in host-supplied options with their
@@ -1913,20 +2028,24 @@ pub struct SessionState {
     directives: Vec<rustledger_core::Directive>,
     lines: Vec<u32>,
     files: Vec<String>,
+    /// What `info()` lists: the load's errors, then its option diagnostics.
     errors: Vec<wit::Error>,
+    /// What a query lists: `errors`, with the option diagnostics as a query
+    /// lists them, the refusal of a rejected `booking_method` in place of
+    /// its plain E7002 (`rustledger_loader::Ledger::query_option_errors`,
+    /// #2911, #2929).
+    query_errors: Vec<wit::Error>,
     /// Whether a query refuses: the load reported an error that blocks
     /// queries (a parse error, a file that could not be read or decrypted, a
     /// booking failure: [`rustledger_loader::LedgerError::blocks_queries`],
     /// the rule the file-based query surfaces share, #2861), or the load
     /// failed outright. Every other error, an include of a missing file among
     /// them, is reported beside the rows. A session from source text follows
-    /// the same rule (#2882); it refused on any load error before.
+    /// the same rule (#2882); it refused on any load error before. A rejected
+    /// `booking_method` whose ledger books another method refuses too
+    /// (#2911). The option diagnostics are appended once the session plugins
+    /// have run (#2929), so they never stop them.
     query_blocked: bool,
-    /// Why a query refuses though no error blocks it: a rejected
-    /// `booking_method` whose ledger books another method (#2911). Listed on
-    /// query results only, not among `errors`, which `info()` echoes and the
-    /// session plugins are gated on.
-    query_refusal: Option<wit::Error>,
     options: wit::LedgerOptions,
     /// The ledger's `tolerance_multiplier`, for the padding a query inserts
     /// (a difference within a balance's tolerance is not padded, #2901).
@@ -2010,7 +2129,7 @@ impl SessionState {
     /// Parse + book from source text (single synthetic `<stdin>` filename).
     pub fn from_source(source: &str) -> Self {
         let loaded = ffi::helpers::load_source(source);
-        let files = vec!["<stdin>".to_string(); loaded.directives.len()];
+        let files = vec![STDIN_NAME.to_string(); loaded.directives.len()];
         let spans = loaded
             .spanned_directives
             .iter()
@@ -2025,8 +2144,28 @@ impl SessionState {
             lines: loaded.directive_lines,
             files,
             query_blocked,
-            query_refusal: loaded.query_refusal.map(error),
-            errors: loaded.errors.into_iter().map(error).collect(),
+            // The load's errors, then its option diagnostics (#2929), as a
+            // load lists them and as a query does, in the file the entries
+            // are in.
+            query_errors: named_source(
+                loaded
+                    .errors
+                    .iter()
+                    .chain(&loaded.query_option_errors)
+                    .cloned()
+                    .map(error)
+                    .collect(),
+                STDIN_NAME,
+            ),
+            errors: named_source(
+                loaded
+                    .errors
+                    .into_iter()
+                    .chain(loaded.option_errors)
+                    .map(error)
+                    .collect(),
+                STDIN_NAME,
+            ),
             options: options(loaded.options),
             tolerance_multiplier: loaded.tolerance_multiplier,
             plugins: loaded.plugins,
@@ -2096,13 +2235,17 @@ impl SessionState {
             directives,
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
+            query_errors: multiplier_error
+                .iter()
+                .chain(&booking_method_error)
+                .cloned()
+                .collect(),
             errors: multiplier_error
                 .into_iter()
                 .chain(booking_method_error)
                 .collect(),
             query_blocked: false,
             tolerance_multiplier,
-            query_refusal: None,
             options,
             plugins: vec![],
             includes: vec![],
@@ -2143,7 +2286,6 @@ impl SessionState {
                 // A rejected `booking_method` refuses queries too (#2911),
                 // but is kept out of `errors`, which gate the session plugins.
                 let query_blocked = !errors.is_empty() || fl.query_refusal.is_some();
-                let query_refusal = fl.query_refusal.map(error);
                 let tolerance_multiplier = fl.tolerance_multiplier;
                 let opts = fl.options;
                 let plugin_dtos = fl.plugins;
@@ -2168,6 +2310,7 @@ impl SessionState {
                     in_files,
                     &mut errors,
                     &opts,
+                    &fl.source_map,
                 );
                 // Spans from each directive's line and file, AFTER the session
                 // plugins ran: they can add or drop directives, and `lines` /
@@ -2189,8 +2332,22 @@ impl SessionState {
                     lines,
                     files,
                     query_blocked,
-                    query_refusal,
-                    errors: notices.into_iter().chain(errors).map(error).collect(),
+                    // The option diagnostics last, once the session plugins
+                    // have run, which they must not stop (#2929): as a load
+                    // lists them, and as a query does.
+                    query_errors: notices
+                        .iter()
+                        .chain(&errors)
+                        .chain(&fl.query_option_errors)
+                        .cloned()
+                        .map(error)
+                        .collect(),
+                    errors: notices
+                        .into_iter()
+                        .chain(errors)
+                        .chain(fl.option_errors)
+                        .map(error)
+                        .collect(),
                     options: options(opts),
                     tolerance_multiplier,
                     plugins: plugin_dtos,
@@ -2208,9 +2365,9 @@ impl SessionState {
                 directives: vec![],
                 lines: vec![],
                 files: vec![],
+                query_errors: vec![simple_error(e.clone())],
                 errors: vec![simple_error(e)],
                 query_blocked: true,
-                query_refusal: None,
                 options: options(ffi::LedgerOptions::default()),
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 plugins: vec![],
@@ -2270,12 +2427,7 @@ impl SessionState {
             return out::QueryResult {
                 columns: vec![],
                 rows: vec![],
-                errors: self
-                    .errors
-                    .iter()
-                    .chain(&self.query_refusal)
-                    .cloned()
-                    .collect(),
+                errors: self.query_errors.clone(),
             };
         }
         let directives = self.padded_spanned.get_or_init(|| {
@@ -2303,7 +2455,9 @@ impl SessionState {
         );
         // The non-blocking load errors still reach the caller, ahead of the
         // query's own.
-        result.errors.splice(0..0, self.errors.iter().cloned());
+        result
+            .errors
+            .splice(0..0, self.query_errors.iter().cloned());
         result
     }
 
@@ -2656,6 +2810,8 @@ impl SessionState {
                 .into_iter()
                 .map(|e| wit::Error {
                     message: format!("{}: {}", e.date, e.reason),
+                    code: None,
+                    filename: None,
                     line: None,
                     column: None,
                     field: e.account.map(|a| a.as_str().to_string()),
@@ -3242,6 +3398,8 @@ pub fn import_extract(
 fn extract_warning(message: String) -> wit::Error {
     wit::Error {
         message,
+        code: None,
+        filename: None,
         line: None,
         column: None,
         field: None,
@@ -3494,6 +3652,16 @@ option \"display_precision\" \"USD:0.001\"
             "{:?}",
             invalid.errors
         );
+        // The code the loader gives the same value in a ledger.
+        let mut loader = rustledger_loader::Options::new();
+        loader.set("tolerance_multiplier", "two");
+        assert_eq!(
+            invalid.errors[0].code.as_deref(),
+            Some(loader.warnings[0].code),
+            "{:?}",
+            invalid.errors
+        );
+        assert_eq!(invalid.errors[0].code.as_deref(), Some("E7002"));
         assert_eq!(invalid.info().options.inferred_tolerance_multiplier, "0.5");
         assert_eq!(padding(&invalid), padding(&default));
 
@@ -3567,15 +3735,24 @@ option \"display_precision\" \"USD:0.001\"
                 "{sent:?}: {:?}",
                 rejected.errors
             );
+            assert_eq!(
+                rejected.errors[0].code.as_deref(),
+                Some("E7002"),
+                "{sent:?}: {:?}",
+                rejected.errors
+            );
             assert_eq!(rejected.info().options.booking_method, "STRICT", "{sent:?}");
         }
     }
 
-    /// #2911: a session from a file whose `booking_method` was rejected
-    /// still runs the host's session plugins and lists no refusal among its
-    /// errors (`info()`), but its queries refuse with the reason.
+    /// #2911, #2929: a session from a file whose `booking_method` was
+    /// rejected still runs the host's session plugins, lists the option's
+    /// E7002 among its errors (`info()`) and not the refusal as well, and its
+    /// queries refuse, listing the refusal in the E7002's place
+    /// (`Ledger::query_option_errors`).
     #[test]
     fn test_from_file_invalid_booking_method_refuses_queries_only() {
+        const E7002: &str = "Invalid value \"fifo\" for option \"booking_method\"";
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("main.beancount");
         std::fs::write(
@@ -3600,23 +3777,27 @@ option \"display_precision\" \"USD:0.001\"
             "the session plugin must run: {:?}",
             session.errors
         );
-        assert!(
-            !session
-                .errors
-                .iter()
-                .any(|e| e.message.contains("booking method")),
-            "the refusal is not a load error: {:?}",
+        let listed = |errors: &[super::wit::Error]| {
+            (
+                errors
+                    .iter()
+                    .filter(|e| e.message.starts_with(E7002))
+                    .count(),
+                errors
+                    .iter()
+                    .filter(|e| e.message.contains("is not a booking method"))
+                    .count(),
+            )
+        };
+        assert_eq!(
+            listed(&session.info().errors),
+            (1, 0),
+            "the E7002, not the refusal: {:?}",
             session.errors
         );
         let result = session.query("SELECT narration");
         assert!(result.columns.is_empty(), "{result:?}");
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.message.contains("\"fifo\" is not a booking method")),
-            "{result:?}"
-        );
+        assert_eq!(listed(&result.errors), (0, 1), "{result:?}");
     }
 
     /// Commodity `precision:` metadata travels IN the held entries (it is
@@ -4973,10 +5154,540 @@ mod validation_options_tests {
     }
 }
 
+/// The FFI side of the drift guard against `rledger check` (#2929, #2935):
+/// `load`, `load-file`, `validate` and `validate-file` must report exactly the
+/// diagnostics `rustledger/tests/ffi_check_parity_test.rs` pins `check` to:
+/// code, severity, file, line and message, on the WIT `error` record itself
+/// (4.0.0 carries `code` and `filename`).
+#[cfg(test)]
+mod check_parity {
+    include!("../../rustledger/tests/ffi_check_parity/cases.rs");
+
+    use super::{out, wit};
+
+    /// Code, severity, file, line, column, message.
+    type Row = (
+        Option<String>,
+        String,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+        String,
+    );
+
+    fn write_case(case: &CheckParityCase) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (path, text) in case.files {
+            std::fs::write(dir.path().join(path), text).expect("write");
+        }
+        let entry = dir
+            .path()
+            .join(case.entry)
+            .to_str()
+            .expect("utf-8 path")
+            .to_string();
+        (dir, entry)
+    }
+
+    /// `errors` as compared rows, each file relative to `dir` when it is in
+    /// it.
+    fn rows(errors: &[wit::Error], dir: Option<&std::path::Path>) -> Vec<Row> {
+        let mut rows: Vec<Row> = errors
+            .iter()
+            .map(|e| {
+                let file = e.filename.as_ref().map(|f| {
+                    dir.and_then(|dir| std::path::Path::new(f).strip_prefix(dir).ok())
+                        .map_or_else(|| f.clone(), |p| p.display().to_string())
+                });
+                (
+                    e.code.clone(),
+                    e.severity.clone(),
+                    file,
+                    e.line,
+                    e.column,
+                    e.message.clone(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// `case`'s diagnostics as rows, the entry file named `entry_as` (the
+    /// name a source-text surface gives it).
+    fn expected(case: &CheckParityCase, entry_as: &str) -> Vec<Row> {
+        let mut rows: Vec<Row> = case
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    Some(d.code.to_string()),
+                    d.severity.to_string(),
+                    d.file
+                        .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
+                    d.line,
+                    d.column,
+                    d.message.to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// The counts `validate` and `validate-file` give every case: invalid,
+    /// no parse error (an option diagnostic is not one, #2929), and every
+    /// other diagnostic a validate-phase one.
+    fn assert_counts(case: &CheckParityCase, surface: &str, result: &out::ValidateResult) {
+        assert!(!result.valid, "{} via {surface}", case.name);
+        assert_eq!(
+            (result.parse_error_count, result.validate_error_count),
+            case.counts(),
+            "{} via {surface}",
+            case.name
+        );
+    }
+
+    #[test]
+    fn test_file_surfaces_report_what_check_reports() {
+        for case in CHECK_PARITY_CASES {
+            let (dir, entry) = write_case(case);
+            let want = expected(case, case.entry);
+
+            let loaded = super::load_file(&entry, false, &[], false);
+            assert_eq!(
+                rows(&loaded.errors, Some(dir.path())),
+                want,
+                "{} via load-file",
+                case.name
+            );
+
+            let validated = super::validate_file(&entry);
+            assert_eq!(
+                rows(&validated.errors, Some(dir.path())),
+                want,
+                "{} via validate-file",
+                case.name
+            );
+            assert_counts(case, "validate-file", &validated);
+        }
+    }
+
+    #[test]
+    fn test_source_surfaces_report_what_check_reports() {
+        for case in CHECK_PARITY_CASES.iter().filter(|c| c.is_single_file()) {
+            let source = case.entry_text();
+
+            // `load` names the source as the embedder does.
+            let loaded = super::load(source, "main.beancount", false);
+            assert_eq!(
+                rows(&loaded.errors, None),
+                expected(case, "main.beancount"),
+                "{} via load",
+                case.name
+            );
+
+            // `validate` has no name for it but the loader's.
+            let validated = super::validate(source);
+            assert_eq!(
+                rows(&validated.errors, None),
+                expected(case, super::SOURCE_NAME),
+                "{} via validate",
+                case.name
+            );
+            assert_counts(case, "validate", &validated);
+        }
+    }
+
+    /// `check_commodity`'s finding for a currency the fixture never declares:
+    /// the evidence a host plugin ran. Nothing else reports it, where a bare
+    /// `HOOL` was also in the fixture's E2005 message.
+    const HOOL_UNDECLARED: &str = "Missing Commodity directive for 'HOOL'";
+
+    /// The host's plugins still run when the ledger has option diagnostics
+    /// (and validation findings): neither is among the errors they are gated
+    /// on (#2929).
+    #[test]
+    fn test_host_plugins_run_over_option_diagnostics() {
+        let case = &CHECK_PARITY_CASES[0];
+        let (_dir, entry) = write_case(case);
+        let plugins = ["check_commodity".to_string()];
+        let ran = |errors: &[wit::Error]| {
+            errors
+                .iter()
+                .filter(|e| e.message.starts_with(HOOL_UNDECLARED))
+                .count()
+                == 1
+        };
+
+        let loaded = super::load_file(&entry, false, &plugins, false);
+        assert!(ran(&loaded.errors), "load-file: {:?}", loaded.errors);
+        let session = super::SessionState::from_file(&entry, false, &plugins);
+        let info = session.info();
+        assert!(ran(&info.errors), "session.from-file: {:?}", info.errors);
+        // The option diagnostics are listed after them, once.
+        assert_eq!(
+            info.errors
+                .iter()
+                .filter(|e| e.message.starts_with("Invalid value \"fifo\""))
+                .count(),
+            1,
+            "{:?}",
+            info.errors
+        );
+    }
+
+    /// A ledger plugin's warning no longer stops the host's plugins (#2929):
+    /// the gate counted any entry, so a `rename_accounts` notice skipped
+    /// every plugin the host asked for.
+    #[test]
+    fn test_host_plugins_run_over_a_ledger_plugins_warning() {
+        const USD_UNDECLARED: &str = "Missing Commodity directive for 'USD'";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(
+            &path,
+            "plugin \"rename_accounts\" \"{'Expenses:Nothing': 'Expenses:$1'}\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n\
+             2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+        )
+        .expect("write");
+        let entry = path.to_str().expect("utf-8");
+        let plugins = ["check_commodity".to_string()];
+        let ran =
+            |errors: &[wit::Error]| errors.iter().any(|e| e.message.starts_with(USD_UNDECLARED));
+
+        let loaded = super::load_file(entry, false, &plugins, false);
+        assert!(
+            loaded
+                .errors
+                .iter()
+                .any(|e| e.severity == "warning" && e.message.contains("rename_accounts")),
+            "the fixture's ledger plugin must warn: {:?}",
+            loaded.errors
+        );
+        assert!(
+            ran(&loaded.errors),
+            "the host's plugin must run over a warning: {:?}",
+            loaded.errors
+        );
+        let session = super::SessionState::from_file(entry, false, &plugins);
+        assert!(ran(&session.info().errors), "{:?}", session.info().errors);
+        // And a warning alone does not make the ledger invalid.
+        let validated = super::validate_file(entry);
+        assert!(validated.valid, "{:?}", validated.errors);
+    }
+
+    /// A finding on a directive a plugin made carries a span in the plugin's
+    /// placeholder location, not in the source text, so it maps to no line
+    /// of the text, as WASM reads it (#2935). The span used to be mapped to
+    /// whatever line of the source its offset fell on.
+    #[test]
+    fn test_a_plugin_directives_finding_maps_to_no_source_line() {
+        const SOURCE: &str = "plugin \"beancount.plugins.check_closing\"\n\
+             2024-01-01 open Assets:A\n\
+             2024-01-01 open Income:X\n\
+             2024-01-02 * \"x\"\n  Assets:A  10 USD\n    closing: TRUE\n  Income:X\n";
+        let validated = super::validate(SOURCE);
+        let balance = validated
+            .errors
+            .iter()
+            .find(|e| e.message.starts_with("Balance failed for Assets:A"))
+            .unwrap_or_else(|| panic!("check_closing's balance fails: {:?}", validated.errors));
+        assert_eq!(
+            (balance.line, balance.filename.as_deref()),
+            (None, None),
+            "{balance:?}"
+        );
+    }
+
+    /// Every query surface lists a rejected `booking_method` as the refusal
+    /// that says why it does not answer, once, and not its plain E7002
+    /// (#2911, #2929); `load` and `info()` list the plain E7002 and no
+    /// refusal.
+    #[test]
+    fn test_query_surfaces_list_the_booking_method_refusal() {
+        const SOURCE: &str = "option \"booking_method\" \"fifo\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n\
+             2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n";
+        const QUERY: &str = "SELECT narration";
+        let listed = |errors: &[wit::Error]| {
+            (
+                errors
+                    .iter()
+                    .filter(|e| e.message.starts_with("Invalid value \"fifo\""))
+                    .count(),
+                errors
+                    .iter()
+                    .filter(|e| e.message.contains("\"fifo\" is not a booking method"))
+                    .count(),
+            )
+        };
+        let refused = |surface: &str, result: &out::QueryResult| {
+            assert!(result.rows.is_empty(), "{surface}: {result:?}");
+            assert_eq!(listed(&result.errors), (0, 1), "{surface}: {result:?}");
+            let refusal = result
+                .errors
+                .iter()
+                .find(|e| e.message.contains("is not a booking method"))
+                .expect("the refusal");
+            assert_eq!(refusal.line, Some(1), "at the option's line: {refusal:?}");
+            // As `query_refusal_error` gives it: not "parse", which would
+            // read as a parse error of a ledger that parsed.
+            assert_eq!(refusal.phase, "validate", "{refusal:?}");
+            assert_eq!(refusal.code.as_deref(), Some("E7002"), "{refusal:?}");
+        };
+
+        refused("query", &super::query(SOURCE, QUERY));
+        let session = super::SessionState::from_source(SOURCE);
+        refused("session.query (source)", &session.query(QUERY));
+        assert_eq!(listed(&session.info().errors), (1, 0), "info()");
+        let batch = super::batch(SOURCE, &[QUERY.to_string()]);
+        refused("batch", &batch.queries[0]);
+        assert_eq!(batch.queries[0].errors[0].message, super::BATCH_REFUSED);
+        // In the file a batch names its entries and load errors, `<stdin>`,
+        // not the loader's `<string>`.
+        let named = |result: &out::QueryResult| {
+            result
+                .errors
+                .iter()
+                .filter_map(|e| e.filename.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(&batch.queries[0]),
+            vec![super::STDIN_NAME.to_string()],
+            "batch: {:?}",
+            batch.queries[0]
+        );
+        assert_eq!(
+            named(&session.query(QUERY)),
+            vec![super::STDIN_NAME.to_string()],
+            "session.query (source)"
+        );
+        assert_eq!(listed(&batch.load.errors), (1, 0), "batch load");
+        assert_eq!(
+            listed(&super::load(SOURCE, "x", false).errors),
+            (1, 0),
+            "load"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, SOURCE).expect("write");
+        let path = path.to_str().expect("utf-8");
+        refused("query-file", &super::query_file(path, QUERY));
+        let session = super::SessionState::from_file(path, false, &[]);
+        refused("session.query (file)", &session.query(QUERY));
+        assert_eq!(listed(&session.info().errors), (1, 0), "info() (file)");
+        let batch = super::batch_file(path, &[QUERY.to_string()]);
+        refused("batch-file", &batch.queries[0]);
+        assert_eq!(listed(&batch.load.errors), (1, 0), "batch-file load");
+    }
+
+    /// A Python plugin the component does not run (E8005 in a build without
+    /// the runtime, E8004 when named by module): the findings stay, the E1001
+    /// for each account the plugin might have opened among them, as
+    /// `rledger check` reports them beside its plugin error. Neither skips
+    /// nor demotes validation over an unrun plugin, so the FFI does not
+    /// either (review of #2946).
+    #[test]
+    fn test_an_unrun_python_plugin_keeps_the_findings_as_check_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(
+            &path,
+            "plugin \"my_plugins.opener\"\n\n2024-01-02 * \"x\"\n  Assets:A  10 USD\n  Income:X\n",
+        )
+        .expect("write");
+        let entry = path.to_str().expect("utf-8");
+        for (surface, errors) in [
+            (
+                "load-file",
+                super::load_file(entry, false, &[], false).errors,
+            ),
+            ("validate-file", super::validate_file(entry).errors),
+        ] {
+            let codes: Vec<(Option<&str>, Option<u32>)> =
+                errors.iter().map(|e| (e.code.as_deref(), e.line)).collect();
+            assert!(
+                codes.contains(&(Some("E8005"), None)) || codes.contains(&(Some("E8004"), None)),
+                "{surface}: the plugin error: {errors:?}"
+            );
+            assert_eq!(
+                codes
+                    .iter()
+                    .filter(|c| **c == (Some("E1001"), Some(3)))
+                    .count(),
+                2,
+                "{surface}: both findings, at their line: {errors:?}"
+            );
+        }
+    }
+
+    /// A plugin the host asks for reports its errors as the same plugin
+    /// declared in the ledger does, so as `rledger check` does: code
+    /// `PLUGIN`, its severity, at the file and line it named (review of
+    /// #2946). They came back as a bare message with no code, file, line or
+    /// severity.
+    ///
+    /// Each file name holds a tab, which the escaping of a name a plugin
+    /// claims would rewrite: the error names the file as the load's source
+    /// map holds it, so `apply_plugins` must be handed that map, not an empty
+    /// one.
+    #[test]
+    fn test_host_requested_plugin_errors_match_ledger_declared_ones() {
+        // Line 1 is the `plugin` line in one, a comment in the other, so the
+        // posting is on the same line in both.
+        const BODY: &str = "2024-01-01 open Assets:A\n\
+             2024-01-01 open Assets:A:B\n\
+             2024-01-01 open Income:X\n\
+             2024-01-02 * \"x\"\n  Assets:A  10 USD\n  Income:X\n";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let declared = dir.path().join("declared\tledger.beancount");
+        std::fs::write(
+            &declared,
+            format!("plugin \"beancount.plugins.leafonly\"\n{BODY}"),
+        )
+        .expect("write");
+        let requested = dir.path().join("requested\tledger.beancount");
+        std::fs::write(&requested, format!("; the host asks for leafonly\n{BODY}")).expect("write");
+        let plugin_rows = |errors: Vec<wit::Error>, file: &std::path::Path| -> Vec<Row> {
+            errors
+                .into_iter()
+                .filter(|e| e.code.as_deref() == Some("PLUGIN"))
+                .map(|e| {
+                    assert_eq!(
+                        e.filename.as_deref(),
+                        file.to_str(),
+                        "the plugin error names its file: {e:?}"
+                    );
+                    (e.code, e.severity, None, e.line, e.column, e.message)
+                })
+                .collect()
+        };
+
+        let by_ledger = plugin_rows(
+            super::load_file(declared.to_str().expect("utf-8"), false, &[], false).errors,
+            &declared,
+        );
+        assert!(
+            !by_ledger.is_empty(),
+            "leafonly reports the non-leaf posting"
+        );
+        assert_eq!(
+            by_ledger[0].3,
+            Some(2),
+            "at the non-leaf account's open, as check: {by_ledger:?}"
+        );
+        let host = ["leafonly".to_string()];
+        let by_host = plugin_rows(
+            super::load_file(requested.to_str().expect("utf-8"), false, &host, false).errors,
+            &requested,
+        );
+        assert_eq!(by_host, by_ledger, "load-file");
+        let session =
+            super::SessionState::from_file(requested.to_str().expect("utf-8"), false, &host);
+        assert_eq!(
+            plugin_rows(session.info().errors, &requested),
+            by_ledger,
+            "session.from-file"
+        );
+    }
+}
+
+/// The FFI side of the drift guard for what a query lists about the ledger's
+/// options (#2911, #2929): `query`, `session.query`, `query-file` and a file
+/// session's `query` list exactly the errors of
+/// `rustledger-loader/tests/query_option_errors/cases.rs`, as the canonical
+/// `Ledger::query_option_errors` and every WASM query surface do.
+#[cfg(test)]
+mod query_option_parity {
+    include!("../../rustledger-loader/tests/query_option_errors/cases.rs");
+
+    use super::{out, wit};
+
+    /// Code, message, file, line.
+    type Row = (String, String, Option<String>, Option<u32>);
+
+    /// `result`'s errors as rows, `dir` (and its separator) taken off the
+    /// front of each file and out of each message.
+    fn rows(result: &out::QueryResult, dir: Option<&std::path::Path>) -> Vec<Row> {
+        let prefix = dir.map(|d| format!("{}/", d.display()));
+        let strip = |text: &str| match &prefix {
+            Some(prefix) => text.replace(prefix.as_str(), ""),
+            None => text.to_string(),
+        };
+        result
+            .errors
+            .iter()
+            .map(|e: &wit::Error| {
+                (
+                    e.code.clone().unwrap_or_default(),
+                    strip(&e.message),
+                    e.filename.as_deref().map(strip),
+                    e.line,
+                )
+            })
+            .collect()
+    }
+
+    /// `result` lists exactly `want`, in order, and answers or refuses as
+    /// `case` says.
+    fn check(
+        case: &QueryOptionCase,
+        surface: &str,
+        result: &out::QueryResult,
+        dir: Option<&std::path::Path>,
+        want: &[Row],
+    ) {
+        assert_eq!(rows(result, dir), want, "{} via {surface}", case.name);
+        assert_eq!(
+            !result.rows.is_empty(),
+            case.answers,
+            "{} via {surface}: {result:?}",
+            case.name
+        );
+    }
+
+    #[test]
+    fn test_query_surfaces_list_the_shared_option_errors() {
+        for case in QUERY_OPTION_CASES {
+            if case.is_single_file() {
+                let text = case.entry_text();
+                let result = super::query(text, QUERY);
+                let want = case.expected(Some(super::SOURCE_NAME), super::SOURCE_NAME);
+                check(case, "query", &result, None, &want);
+                let result = super::SessionState::from_source(text).query(QUERY);
+                let want = case.expected(Some(super::STDIN_NAME), super::SOURCE_NAME);
+                check(case, "session.query (source)", &result, None, &want);
+            }
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            for (path, text) in case.files {
+                std::fs::write(dir.path().join(path), text).expect("write");
+            }
+            let entry = dir.path().join(MAIN);
+            let entry = entry.to_str().expect("utf-8");
+            let want = case.expected(Some(MAIN), MAIN);
+            let result = super::query_file(entry, QUERY);
+            check(case, "query-file", &result, Some(dir.path()), &want);
+            let result = super::SessionState::from_file(entry, false, &[]).query(QUERY);
+            check(
+                case,
+                "session.query (file)",
+                &result,
+                Some(dir.path()),
+                &want,
+            );
+        }
+    }
+}
+
 /// The FFI side of the drift guard for which findings every diagnostic
-/// surface reports (#2937): `validate` and `load` report exactly what `rledger
-/// check`, WASM and the LSP report on the same ledgers. The wire error carries
-/// no code, so a finding is matched on its line and message.
+/// surface reports (#2937): `validate`, `load`, `validate-file` and
+/// `load-file` report exactly what `rledger check`, WASM and the LSP report on
+/// the same ledgers, matched on code, line and message.
 #[cfg(test)]
 mod surface_agreement {
     include!("../../rustledger-loader/tests/surface_agreement/cases.rs");
@@ -4984,17 +5695,24 @@ mod surface_agreement {
     use super::wit;
 
     fn check(case: &SurfaceCase, surface: &str, errors: &[wit::Error]) {
-        let mut got: Vec<(u32, &str)> = errors
+        let mut got: Vec<(u32, Option<&str>, &str)> = errors
             .iter()
-            .map(|e| (e.line.unwrap_or_default(), e.message.as_str()))
+            .map(|e| {
+                (
+                    e.line.unwrap_or_default(),
+                    e.code.as_deref(),
+                    e.message.as_str(),
+                )
+            })
             .collect();
         got.sort_unstable();
         let mut want: Vec<&Finding> = case.findings.iter().collect();
         want.sort_by_key(|f| f.line);
         let context = format!("{} via {surface}: {got:?}", case.name);
         assert_eq!(got.len(), want.len(), "{context}");
-        for ((line, message), finding) in got.iter().zip(&want) {
+        for ((line, code, message), finding) in got.iter().zip(&want) {
             assert_eq!(*line, finding.line, "{context}");
+            assert_eq!(*code, Some(finding.code), "{context}");
             assert!(message.starts_with(finding.message), "{context}");
         }
     }
@@ -5009,6 +5727,24 @@ mod surface_agreement {
                 let loaded = super::load(case.source, "ledger.beancount", expand_pads);
                 check(case, "load", &loaded.errors);
             }
+        }
+    }
+
+    /// The file surfaces validate through the canonical pipeline (#2935), so
+    /// they too must leave out the advisory-only `E1004` and set a refused
+    /// transaction aside (#2937).
+    #[test]
+    fn validate_file_and_load_file_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("ledger.beancount");
+            std::fs::write(&path, case.source).expect("write");
+            let path = path.to_str().expect("utf-8 path");
+            let validated = super::validate_file(path);
+            check(case, "validate-file", &validated.errors);
+            assert_eq!(validated.valid, case.findings.is_empty(), "{}", case.name);
+            let loaded = super::load_file(path, false, &[], false);
+            check(case, "load-file", &loaded.errors);
         }
     }
 }

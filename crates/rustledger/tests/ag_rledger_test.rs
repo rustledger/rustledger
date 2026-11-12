@@ -790,14 +790,25 @@ fn query_warnings_match_what_rledger_query_prints() {
         .unwrap_or_else(|| panic!("no warnings: {env}"))
         .iter()
         .map(|w| {
+            // An option diagnostic carries its file and line, which the
+            // terminal prints ahead of the code (#2925).
+            let location = match (w["file"].as_str(), w["line"].as_u64()) {
+                (Some(file), Some(line)) => format!("{file}:{line}: "),
+                _ => String::new(),
+            };
             format!(
-                "{}: {}",
+                "{location}{}: {}",
                 w["code"].as_str().unwrap(),
                 w["message"].as_str().unwrap()
             )
         })
         .collect();
     assert_eq!(carried, printed);
+    assert!(
+        carried[0].ends_with(": E7001: Invalid option \"not_a_real_option\"")
+            && carried[0].contains("diag.beancount:1: "),
+        "the option diagnostic is located: {carried:?}"
+    );
 }
 
 /// `--no-errors` suppresses the diagnostics in the envelope as it does on

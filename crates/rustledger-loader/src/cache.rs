@@ -730,6 +730,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     which are unknown options now. An older blob would keep serving the
 ///     old values, and be read at the wrong offsets.
 ///
+/// v71: LOADER OUTPUT changed, no archived layout moved (#2925). A `documents`
+///     option in an included file is ignored with the `E7009` warning, as in
+///     beancount, which keeps only the top-level file's roots: its directory
+///     is no longer scanned, so the `document` entries found under it are
+///     gone. A v69 blob of a ledger whose include sets an existing
+///     `documents` root would keep serving those entries with no `E7009`.
+///     (v70 is held by #2931 and v73 by #2944; v72 is left free.)
+///
 /// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An invalid
 ///     token after a lone header string moves it to no other field:
 ///     `* "p" <bad>` keeps payee `p` and an empty narration, where `p` loaded
@@ -737,8 +745,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     and this cache is saved only for a load with no errors (`rledger`'s
 ///     `loadcache`), so no blob holds the old fields; the bump only keeps the
 ///     convention that a parser output change bumps both caches, which
-///     `rustledger-wasm` pins. (v70 is held by #2931; v71 and v72 were left
-///     free for parallel lanes.)
+///     `rustledger-wasm` pins.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
@@ -1624,6 +1631,8 @@ mod tests {
         // encoding moves, so the arrays still hold.
         // v69 (#2925) drops two fields from `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived encoding moves, so the arrays still hold.
         // v73 (#2932) keeps a header string in its own field; no `CostNumber`
         // encoding moves, so the arrays still hold.
         const FIXTURE_VERSION: u32 = 73;
@@ -1779,6 +1788,8 @@ mod tests {
         // the hash below is unchanged.
         // v69 (#2925) drops two fields from `CachedOptions`, not from
         // `MetaValue`; the hash below is unchanged.
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived layout moves, so the hash below is unchanged.
         // v73 (#2932) keeps a header string in its own field; the hash below
         // is unchanged.
         const FIXTURE_VERSION: u32 = 73;

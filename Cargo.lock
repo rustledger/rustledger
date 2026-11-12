@@ -3334,6 +3334,7 @@ name = "rustledger-loader"
 version = "0.24.0"
 dependencies = [
  "blake3",
+ "dhat",
  "glob",
  "jiff",
  "parking_lot 0.13.0",

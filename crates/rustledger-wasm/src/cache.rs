@@ -455,11 +455,19 @@ use crate::types::{Error, LedgerOptions};
 /// after a booking error, setting the refused transaction aside, so it
 /// reports the `Balance failed` that follows one. An older blob would keep
 /// serving the old errors. (v95 is held by #2931; v96 was never released.)
-/// v98: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// v99: loader v71 (#2925). Both payloads' option diagnostics move: each
+/// carries its option's line, and a `Ledger`'s its file too, and an invalid
+/// option in an included file is its converter's error (`E7002`, `E7008`,
+/// ...) instead of the `E7009` warning, which is left for a value the
+/// converter accepts. The loader also ignores a `documents` option in an
+/// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
+/// no location and the old codes, and a `Ledger` with such an option as
+/// valid. (v98 was never released.)
+/// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
 /// lone header string moves it to no other field, so `* "p" <bad>` keeps
 /// payee `p` where `p` was the narration; an older blob would keep serving
-/// the shifted fields.
-pub const CACHE_VERSION: u32 = 98;
+/// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
+pub const CACHE_VERSION: u32 = 102;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -1120,7 +1128,7 @@ option "operating_currency" "USD"
             query_refused: false,
         })
         .unwrap();
-        bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CACHE_VERSION + 1).to_le_bytes());
         assert!(
             deserialize_ledger(&bytes)
                 .unwrap_err()

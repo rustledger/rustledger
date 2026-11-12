@@ -462,7 +462,11 @@ use crate::types::{Error, LedgerOptions};
 /// converter accepts. The loader also ignores a `documents` option in an
 /// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
 /// no location and the old codes, and a `Ledger` with such an option as
-/// valid. (v98 is held by #2944.)
+/// valid. (v98 was never released.)
+/// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// lone header string moves it to no other field, so `* "p" <bad>` keeps
+/// payee `p` where `p` was the narration; an older blob would keep serving
+/// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
 /// v105: loader v73, unchanged. ARCHIVED LAYOUT moved (#2946): the
 /// `ParsedLedger` payload gained `query_option_errors` and the `Ledger` payload
 /// `query_errors`, what a query lists, in which a rejected `booking_method`'s
@@ -502,7 +506,7 @@ pub const CACHE_VERSION: u32 = 105;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 71;
+const LOADER_CACHE_VERSION_PIN: u32 = 73;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

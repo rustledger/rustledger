@@ -103,6 +103,13 @@ pub struct ProcessedLedger {
     /// Surfaces that *report* diagnostics merge this in; surfaces that gate on
     /// soundness do not.
     pub option_errors: Vec<Error>,
+    /// The option diagnostics a query lists
+    /// ([`rustledger_loader::Ledger::query_option_errors`], the rule every
+    /// query surface shares with the FFI's): `option_errors` with a rejected
+    /// `booking_method`'s E7002 replaced by the refusal that says why the
+    /// query does not answer (#2911, #2929). `option_errors` itself where the
+    /// source did not load, as no option refuses then.
+    pub query_option_errors: Vec<Error>,
     /// Whether a query over the source refuses: it failed to parse, a
     /// transaction failed to book
     /// ([`rustledger_loader::LedgerError::blocks_queries`], the rule the
@@ -137,6 +144,18 @@ impl ProcessedLedger {
         all.extend(self.option_errors.iter().cloned());
         all
     }
+
+    /// What a query over the source lists: load diagnostics plus option
+    /// diagnostics as a query lists them ([`Self::query_option_errors`]), so a
+    /// rejected `booking_method`'s E7002 is the refusal that says why the
+    /// query does not answer, as the FFI's query surfaces list it (#2929).
+    /// [`Self::reported_errors`] for every surface that reports the load.
+    #[must_use]
+    pub fn reported_query_errors(&self) -> Vec<Error> {
+        let mut all = self.errors.clone();
+        all.extend(self.query_option_errors.iter().cloned());
+        all
+    }
 }
 
 /// Parse, book, and process a Beancount source string.
@@ -159,6 +178,11 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
         let options = extract_options(&parse_result.options);
         let option_errors = validate_option_tuples(&parse_result.options, &lookup);
+        // No `Ledger` exists on this path, so a query lists the plain option
+        // diagnostics here, not `Ledger::query_option_errors` as the FFI does
+        // over a source that fails to parse. A known divergence, noted on
+        // that function too (in `rustledger-loader/src/process.rs`); revisit
+        // when this path can reach it (#2960).
 
         return ProcessedLedger {
             directives: Vec::new(),
@@ -167,6 +191,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             booking_refused: Vec::new(),
             options,
             errors,
+            query_option_errors: option_errors.clone(),
             option_errors,
             // A parse error refuses a query (#1908).
             query_blocked: true,
@@ -194,6 +219,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 booking_refused: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
+                query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
                 parse_result,
@@ -226,6 +252,16 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             // fields move out: a blocking error, or a rejected
             // `booking_method` (#2911), whose E7002 is in `option_errors`.
             let query_blocked = ledger.blocks_queries();
+            // The option diagnostics as a query lists them, through the
+            // canonical (`Ledger::query_option_errors`), as the FFI lists them:
+            // the rejected `booking_method`'s E7002 is the refusal.
+            let query_option_errors = without_files(
+                ledger
+                    .query_option_errors()
+                    .into_iter()
+                    .map(Error::from)
+                    .collect(),
+            );
             let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
@@ -244,6 +280,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 options,
                 errors,
                 option_errors,
+                query_option_errors,
                 query_blocked,
                 parse_result,
                 lookup,
@@ -256,6 +293,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             booking_refused: Vec::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
+            query_option_errors: option_errors.clone(),
             option_errors,
             query_blocked: true,
             parse_result,

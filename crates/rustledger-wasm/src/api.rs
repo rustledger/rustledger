@@ -171,14 +171,14 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: load.reported_errors(),
+            errors: load.reported_query_errors(),
         };
         return to_js(&result);
     }
 
     // Carry the load's errors and warnings through every result path so
     // callers still see them alongside (or instead of) query output.
-    let warnings = load.reported_errors();
+    let warnings = load.reported_query_errors();
 
     // Parse the query
     let query = match parse_query(query_str) {
@@ -835,6 +835,12 @@ fn query_with_filesystem(
     // (`LoadError::blocks_queries`, #2861). An include of a missing file, an
     // include cycle, a duplicate include or an empty glob is reported beside
     // the rows, as `bean-query` and `rledger query` report it.
+    //
+    // This refusal lists no option diagnostics: it returns before a `Ledger`
+    // exists, so it cannot list `Ledger::query_option_errors` as the FFI's
+    // `query-file` does over a file that fails to parse. A known divergence,
+    // noted on that function too (in `rustledger-loader/src/process.rs`);
+    // revisit when this path can reach it (#2960).
     let load_errors = load_errors_to_errors(&load_result);
     if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
@@ -876,9 +882,12 @@ fn query_with_filesystem(
     // Advisory-only codes (E1004, closing an account with a balance) are not
     // reported by `rledger query` either: the same canonical predicate.
     let mut errors = crate::helpers::reported_ledger_errors(std::mem::take(&mut ledger.errors));
-    // This surface lists the ledger's errors, not the option warnings, so the
-    // rejected option's refusal says why the query did not answer.
-    errors.extend(ledger.query_refusal().map(Error::from));
+    // Then the option diagnostics as a query lists them, through the
+    // canonical (`Ledger::query_option_errors`), as the FFI's `query-file`
+    // lists them: the rejected `booking_method`'s E7002 is the refusal that
+    // says why the query did not answer (#2911, #2929). This surface listed
+    // the refusal alone and no other option diagnostic.
+    errors.extend(ledger.query_option_errors().into_iter().map(Error::from));
     if booking_failed {
         let result = QueryResult {
             columns: Vec::new(),

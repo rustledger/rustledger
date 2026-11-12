@@ -321,10 +321,19 @@ impl Ledger {
     /// by [`Self::query_refusal`], which names the same option at the same
     /// line and says why the query did not answer (#2911, #2929).
     ///
-    /// One rule for every query surface, so none lists both and none lists
-    /// the plain E7002 where the refusal belongs. A surface that reports a
-    /// load (`rledger check`, the FFI's `load` and `info()`) lists the plain
-    /// [`option_warnings_to_errors`].
+    /// One rule for every query surface over a source that loads, so none
+    /// lists both and none lists the plain E7002 where the refusal belongs:
+    /// the FFI's `query`, `query-file` and `session.query`, and WASM's
+    /// `query`, `ParsedLedger.query`, `queryMultiFile` and `Ledger.query`,
+    /// pinned to agree by the cases in `tests/query_option_errors/cases.rs`.
+    /// A surface that reports a load (`rledger check`, the FFI's `load` and
+    /// `info()`) lists the plain [`option_warnings_to_errors`].
+    ///
+    /// Not yet on a source that fails to parse: WASM's parse-error paths
+    /// (`load_and_book` and `query_with_filesystem` in `rustledger-wasm`,
+    /// which point back here) return before a `Ledger` exists, and list the
+    /// plain option diagnostics or none, where the FFI lists this. Revisit
+    /// when those paths can reach this rule (#2960).
     #[must_use]
     pub fn query_option_errors(&self) -> Vec<LedgerError> {
         let mut errors = option_warnings_to_errors(&self.options.warnings);
@@ -1840,6 +1849,15 @@ pub fn plugin_error_to_ledger_error(
 /// ([`crate::LoadResult::take_parse_errors`]) to report them one by one:
 /// left in, [`process`] reports each file's as one line-less `parse errors
 /// in <path>` (review of #2946, #2949).
+///
+/// `rledger check` does not call this: its JSON arm in
+/// `rustledger/src/cmd/check.rs` (`LoadError::ParseErrors`) renders the same
+/// fields inline, from the file it re-reads, after filtering by rule. That
+/// copy is deliberate and points back here; the `parse-error-in-include`
+/// case of `rustledger/tests/ffi_check_parity/cases.rs` pins the two to agree
+/// on code, line, column and message. Revisit if either side gains a field
+/// the other lacks, or if `check` stops re-reading the file, at which point
+/// it should call this.
 #[must_use]
 pub fn parse_errors_to_ledger_errors(
     failure: &LoadError,

@@ -1595,8 +1595,15 @@ mod check_parity_cases {
 }
 use check_parity_cases::{CHECK_PARITY_CASES, CheckParityCase};
 
-/// Code, severity, file, line, message.
-type CheckRow = (Option<String>, String, Option<String>, Option<u32>, String);
+/// Code, severity, file, line, column, message.
+type CheckRow = (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    String,
+);
 
 /// Each error as a row, sorted, a file under `/work/` named relative to it.
 fn check_rows(errors: &[rustledger::ledger::types::Error]) -> Vec<CheckRow> {
@@ -1610,6 +1617,7 @@ fn check_rows(errors: &[rustledger::ledger::types::Error]) -> Vec<CheckRow> {
                     .as_ref()
                     .map(|f| f.strip_prefix("/work/").unwrap_or(f).to_string()),
                 e.line,
+                e.column,
                 e.message.clone(),
             )
         })
@@ -1630,6 +1638,7 @@ fn expected_rows(case: &CheckParityCase, entry_as: &str) -> Vec<CheckRow> {
                 d.file
                     .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
                 d.line,
+                d.column,
                 d.message.to_string(),
             )
         })

@@ -433,7 +433,18 @@ fn semantic_validation_errors(
             // `validation_error_to_wasm` (`rustledger-wasm/src/helpers.rs`),
             // which points back here; change both together.
             if let Some(span) = err.span.filter(|_| err.file_id.is_none_or(|id| id == 0)) {
-                e = e.with_line(loaded.line_lookup.byte_to_line(span.start));
+                // Line and column as the loader locates a finding
+                // (`SourceFile::line_col`, as its `error_location` does), so
+                // as `rledger check` reports them; the column was left out
+                // (review of #2946, pinned by `check_parity`).
+                match loaded.source_map.get(0) {
+                    Some(text) => {
+                        let (line, column) = text.line_col(span.start);
+                        e = e.with_line(line as u32);
+                        e.column = Some(column as u32);
+                    }
+                    None => e = e.with_line(loaded.line_lookup.byte_to_line(span.start)),
+                }
                 e.file = Some(SOURCE_NAME.to_string());
             }
             e
@@ -1934,9 +1945,12 @@ fn held_tolerance_multiplier(
             Ok(value) => (value, None),
             Err(e) => (
                 default,
-                Some(simple_error(format!(
-                    "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
-                ))),
+                Some(held_option_error(
+                    "E7002",
+                    format!(
+                        "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
+                    ),
+                )),
             ),
         }
     };
@@ -1964,11 +1978,24 @@ fn held_booking_method(options: &mut wit::LedgerOptions) -> Option<wit::Error> {
     if checked.warnings.is_empty() {
         return None;
     }
+    let code = checked.warnings[0].code;
     let given = std::mem::replace(&mut options.booking_method, default.to_string());
-    Some(simple_error(format!(
-        "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
-         using the default {default}"
-    )))
+    Some(held_option_error(
+        code,
+        format!(
+            "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
+             using the default {default}"
+        ),
+    ))
+}
+
+/// An invalid value in held options, as an error with the code the loader
+/// gives the same option value in a ledger (E7002), so a host can match it
+/// by code as it matches an option diagnostic from a load.
+fn held_option_error(code: &str, message: String) -> wit::Error {
+    let mut error = simple_error(message);
+    error.code = Some(code.to_string());
+    error
 }
 
 /// Replace empty `name-*` roots in host-supplied options with their
@@ -3624,6 +3651,16 @@ option \"display_precision\" \"USD:0.001\"
             "{:?}",
             invalid.errors
         );
+        // The code the loader gives the same value in a ledger.
+        let mut loader = rustledger_loader::Options::new();
+        loader.set("tolerance_multiplier", "two");
+        assert_eq!(
+            invalid.errors[0].code.as_deref(),
+            Some(loader.warnings[0].code),
+            "{:?}",
+            invalid.errors
+        );
+        assert_eq!(invalid.errors[0].code.as_deref(), Some("E7002"));
         assert_eq!(invalid.info().options.inferred_tolerance_multiplier, "0.5");
         assert_eq!(padding(&invalid), padding(&default));
 
@@ -3697,6 +3734,12 @@ option \"display_precision\" \"USD:0.001\"
                 "{sent:?}: {:?}",
                 rejected.errors
             );
+            assert_eq!(
+                rejected.errors[0].code.as_deref(),
+                Some("E7002"),
+                "{sent:?}: {:?}",
+                rejected.errors
+            );
             assert_eq!(rejected.info().options.booking_method, "STRICT", "{sent:?}");
         }
     }
@@ -3708,6 +3751,7 @@ option \"display_precision\" \"USD:0.001\"
     /// (`Ledger::query_option_errors`).
     #[test]
     fn test_from_file_invalid_booking_method_refuses_queries_only() {
+        const E7002: &str = "Invalid value \"fifo\" for option \"booking_method\"";
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("main.beancount");
         std::fs::write(
@@ -3732,7 +3776,6 @@ option \"display_precision\" \"USD:0.001\"
             "the session plugin must run: {:?}",
             session.errors
         );
-        const E7002: &str = "Invalid value \"fifo\" for option \"booking_method\"";
         let listed = |errors: &[super::wit::Error]| {
             (
                 errors
@@ -5121,8 +5164,15 @@ mod check_parity {
 
     use super::{out, wit};
 
-    /// Code, severity, file, line, message.
-    type Row = (Option<String>, String, Option<String>, Option<u32>, String);
+    /// Code, severity, file, line, column, message.
+    type Row = (
+        Option<String>,
+        String,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+        String,
+    );
 
     fn write_case(case: &CheckParityCase) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5153,6 +5203,7 @@ mod check_parity {
                     e.severity.clone(),
                     file,
                     e.line,
+                    e.column,
                     e.message.clone(),
                 )
             })
@@ -5174,6 +5225,7 @@ mod check_parity {
                     d.file
                         .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
                     d.line,
+                    d.column,
                     d.message.to_string(),
                 )
             })
@@ -5392,6 +5444,26 @@ mod check_parity {
         let batch = super::batch(SOURCE, &[QUERY.to_string()]);
         refused("batch", &batch.queries[0]);
         assert_eq!(batch.queries[0].errors[0].message, super::BATCH_REFUSED);
+        // In the file a batch names its entries and load errors, `<stdin>`,
+        // not the loader's `<string>`.
+        let named = |result: &out::QueryResult| {
+            result
+                .errors
+                .iter()
+                .filter_map(|e| e.filename.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(&batch.queries[0]),
+            vec![super::STDIN_NAME.to_string()],
+            "batch: {:?}",
+            batch.queries[0]
+        );
+        assert_eq!(
+            named(&session.query(QUERY)),
+            vec![super::STDIN_NAME.to_string()],
+            "session.query (source)"
+        );
         assert_eq!(listed(&batch.load.errors), (1, 0), "batch load");
         assert_eq!(
             listed(&super::load(SOURCE, "x", false).errors),
@@ -5457,6 +5529,11 @@ mod check_parity {
     /// `PLUGIN`, its severity, at the file and line it named (review of
     /// #2946). They came back as a bare message with no code, file, line or
     /// severity.
+    ///
+    /// Each file name holds a tab, which the escaping of a name a plugin
+    /// claims would rewrite: the error names the file as the load's source
+    /// map holds it, so `apply_plugins` must be handed that map, not an empty
+    /// one.
     #[test]
     fn test_host_requested_plugin_errors_match_ledger_declared_ones() {
         // Line 1 is the `plugin` line in one, a comment in the other, so the
@@ -5466,13 +5543,13 @@ mod check_parity {
              2024-01-01 open Income:X\n\
              2024-01-02 * \"x\"\n  Assets:A  10 USD\n  Income:X\n";
         let dir = tempfile::tempdir().expect("tempdir");
-        let declared = dir.path().join("declared.beancount");
+        let declared = dir.path().join("declared\tledger.beancount");
         std::fs::write(
             &declared,
             format!("plugin \"beancount.plugins.leafonly\"\n{BODY}"),
         )
         .expect("write");
-        let requested = dir.path().join("requested.beancount");
+        let requested = dir.path().join("requested\tledger.beancount");
         std::fs::write(&requested, format!("; the host asks for leafonly\n{BODY}")).expect("write");
         let plugin_rows = |errors: Vec<wit::Error>, file: &std::path::Path| -> Vec<Row> {
             errors
@@ -5484,7 +5561,7 @@ mod check_parity {
                         file.to_str(),
                         "the plugin error names its file: {e:?}"
                     );
-                    (e.code, e.severity, None, e.line, e.message)
+                    (e.code, e.severity, None, e.line, e.column, e.message)
                 })
                 .collect()
         };
@@ -5515,6 +5592,94 @@ mod check_parity {
             by_ledger,
             "session.from-file"
         );
+    }
+}
+
+/// The FFI side of the drift guard for what a query lists about the ledger's
+/// options (#2911, #2929): `query`, `session.query`, `query-file` and a file
+/// session's `query` list exactly the errors of
+/// `rustledger-loader/tests/query_option_errors/cases.rs`, as the canonical
+/// `Ledger::query_option_errors` and every WASM query surface do.
+#[cfg(test)]
+mod query_option_parity {
+    include!("../../rustledger-loader/tests/query_option_errors/cases.rs");
+
+    use super::{out, wit};
+
+    /// Code, message, file, line.
+    type Row = (String, String, Option<String>, Option<u32>);
+
+    /// `result`'s errors as rows, `dir` (and its separator) taken off the
+    /// front of each file and out of each message.
+    fn rows(result: &out::QueryResult, dir: Option<&std::path::Path>) -> Vec<Row> {
+        let prefix = dir.map(|d| format!("{}/", d.display()));
+        let strip = |text: &str| match &prefix {
+            Some(prefix) => text.replace(prefix.as_str(), ""),
+            None => text.to_string(),
+        };
+        result
+            .errors
+            .iter()
+            .map(|e: &wit::Error| {
+                (
+                    e.code.clone().unwrap_or_default(),
+                    strip(&e.message),
+                    e.filename.as_deref().map(strip),
+                    e.line,
+                )
+            })
+            .collect()
+    }
+
+    /// `result` lists exactly `want`, in order, and answers or refuses as
+    /// `case` says.
+    fn check(
+        case: &QueryOptionCase,
+        surface: &str,
+        result: &out::QueryResult,
+        dir: Option<&std::path::Path>,
+        want: &[Row],
+    ) {
+        assert_eq!(rows(result, dir), want, "{} via {surface}", case.name);
+        assert_eq!(
+            !result.rows.is_empty(),
+            case.answers,
+            "{} via {surface}: {result:?}",
+            case.name
+        );
+    }
+
+    #[test]
+    fn test_query_surfaces_list_the_shared_option_errors() {
+        for case in QUERY_OPTION_CASES {
+            if case.is_single_file() {
+                let text = case.entry_text();
+                let result = super::query(text, QUERY);
+                let want = case.expected(Some(super::SOURCE_NAME), super::SOURCE_NAME);
+                check(case, "query", &result, None, &want);
+                let result = super::SessionState::from_source(text).query(QUERY);
+                let want = case.expected(Some(super::STDIN_NAME), super::SOURCE_NAME);
+                check(case, "session.query (source)", &result, None, &want);
+            }
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            for (path, text) in case.files {
+                std::fs::write(dir.path().join(path), text).expect("write");
+            }
+            let entry = dir.path().join(MAIN);
+            let entry = entry.to_str().expect("utf-8");
+            let want = case.expected(Some(MAIN), MAIN);
+            let result = super::query_file(entry, QUERY);
+            check(case, "query-file", &result, Some(dir.path()), &want);
+            let result = super::SessionState::from_file(entry, false, &[]).query(QUERY);
+            check(
+                case,
+                "session.query (file)",
+                &result,
+                Some(dir.path()),
+                &want,
+            );
+        }
     }
 }
 

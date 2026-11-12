@@ -1,7 +1,7 @@
 // The ledgers that pin what the FFI component's `load`, `load-file`,
 // `validate` and `validate-file` report against what `rledger check` reports
 // for the same ledger (#2929, #2935): every diagnostic's code, severity,
-// message, file and line.
+// message, file, line and column.
 //
 // Shared, through `include!`, by:
 //
@@ -15,11 +15,11 @@
 // Each side must report exactly `diagnostics`, so a change on either side
 // trips its own test against this one list.
 //
-// A diagnostic with no location (`file` and `line` are `None`, such as a
-// plugin that could not be resolved) is printed by `rledger check` at the
-// entry file's line 1, its JSON's stand-in for "no location"; the FFI reports
-// no file and no line. Every option diagnostic has its option's location
-// (#2925).
+// A diagnostic with no location (`file`, `line` and `column` are `None`, such
+// as a plugin that could not be resolved) is printed by `rledger check` at the
+// entry file's line 1, column 1, its JSON's stand-in for "no location"; the
+// FFI reports no file, no line and no column. Every option diagnostic has its
+// option's location (#2925).
 //
 // The option cases also close an account with a balance, the advisory-only E1004
 // that `rledger check` leaves out (bean-check does not flag it): no surface
@@ -37,6 +37,8 @@ pub struct ExpectedDiagnostic {
     pub file: Option<&'static str>,
     /// The 1-based line in `file`; `None` for no location.
     pub line: Option<u32>,
+    /// The 1-based column on `line`; `None` for no location.
+    pub column: Option<u32>,
     /// The message, exactly.
     pub message: &'static str,
 }
@@ -94,6 +96,7 @@ const OPTION_DIAGNOSTICS: [ExpectedDiagnostic; 3] = [
         severity: "error",
         file: Some("main.beancount"),
         line: Some(2),
+        column: Some(1),
         message: "Invalid value \"fifo\" for option \"booking_method\": expected one of \
                   STRICT, STRICT_WITH_SIZE, FIFO, LIFO, HIFO, AVERAGE, NONE",
     },
@@ -102,6 +105,7 @@ const OPTION_DIAGNOSTICS: [ExpectedDiagnostic; 3] = [
         severity: "error",
         file: Some("main.beancount"),
         line: Some(3),
+        column: Some(1),
         message: "Invalid account type name: 'x' cannot begin an account name, so the \
                   option keeps its previous value",
     },
@@ -110,6 +114,7 @@ const OPTION_DIAGNOSTICS: [ExpectedDiagnostic; 3] = [
         severity: "warning",
         file: Some("main.beancount"),
         line: Some(5),
+        column: Some(1),
         message: DUPLICATE_TITLE,
     },
 ];
@@ -166,6 +171,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(13),
+                column: Some(1),
                 message: PAD_WITH_COST,
             },
             // In the included file, at its line there: the line alone would
@@ -175,6 +181,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("accounts.beancount"),
                 line: Some(5),
+                column: Some(1),
                 message: BALANCE_FAILED,
             },
         ],
@@ -211,6 +218,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(15),
+                column: Some(1),
                 message: PAD_WITH_COST,
             },
             ExpectedDiagnostic {
@@ -218,6 +226,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(16),
+                column: Some(1),
                 message: BALANCE_FAILED,
             },
         ],
@@ -245,6 +254,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: None,
                 line: None,
+                column: None,
                 message: "Plugin not found: \"no_such_plugin\"",
             },
             ExpectedDiagnostic {
@@ -252,6 +262,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(3),
+                column: Some(1),
                 message: "Account Assets:A was never opened",
             },
             ExpectedDiagnostic {
@@ -259,6 +270,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(3),
+                column: Some(1),
                 message: "Account Income:X was never opened",
             },
         ],
@@ -281,6 +293,7 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 "2024-01-01 open Assets:B\n\
                  \n\
                  2024-01-03 open\n\
+                 2024-01-03 open Assets:Ü 10\n\
                  2024-01-04 * \"x\"\n  \
                    Assets:B  10 USD\n  \
                    Assets:A\n",
@@ -293,13 +306,26 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 severity: "error",
                 file: Some("inc.beancount"),
                 line: Some(3),
+                column: Some(1),
                 message: "parse error: unexpected input",
+            },
+            // Its column counts characters, not bytes, as `check` counts them:
+            // the `Ü` before it is two bytes.
+            ExpectedDiagnostic {
+                code: "P0012",
+                severity: "error",
+                file: Some("inc.beancount"),
+                line: Some(4),
+                column: Some(26),
+                message: "parse error: unexpected \"10\" in the open directive: expected the \
+                          end of the line",
             },
             ExpectedDiagnostic {
                 code: "E2001",
                 severity: "error",
                 file: Some("main.beancount"),
                 line: Some(3),
+                column: Some(1),
                 message: "Balance failed for Assets:A: expected 1 USD, got -10 USD",
             },
         ],

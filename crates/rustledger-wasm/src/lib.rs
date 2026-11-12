@@ -1113,6 +1113,7 @@ option "operating_currency" "USD"
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         };
@@ -1173,6 +1174,7 @@ option "operating_currency" "EUR"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         };
 

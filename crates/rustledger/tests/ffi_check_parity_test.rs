@@ -13,8 +13,15 @@ include!("ffi_check_parity/cases.rs");
 use std::process::Command;
 
 /// One diagnostic as compared: code, severity, file (relative to the case's
-/// directory), line, message.
-type Row = (String, String, Option<String>, Option<u32>, String);
+/// directory), line, column, message.
+type Row = (
+    String,
+    String,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    String,
+);
 
 #[test]
 fn test_check_reports_the_ffi_parity_diagnostics() {
@@ -49,23 +56,33 @@ fn test_check_reports_the_ffi_parity_diagnostics() {
             .map(|d| {
                 let file = d["file"].as_str().expect("file");
                 let line = u32::try_from(d["line"].as_u64().expect("line")).expect("u32");
+                let column = u32::try_from(d["column"].as_u64().expect("column")).expect("u32");
                 let code = d["code"].as_str().expect("code").to_string();
                 // A diagnostic with no location: `check` prints its stand-in,
-                // the entry as given, at line 1 (see `cases.rs`).
-                let (file, line) = if file == case.entry {
-                    assert!(line == 1, "{}: {code} at {file}:{line}", case.name);
-                    (None, None)
+                // the entry as given, at line 1, column 1 (see `cases.rs`).
+                let (file, line, column) = if file == case.entry {
+                    assert!(
+                        (line, column) == (1, 1),
+                        "{}: {code} at {file}:{line}:{column}",
+                        case.name
+                    );
+                    (None, None, None)
                 } else {
                     let relative = std::path::Path::new(file)
                         .strip_prefix(dir.path())
                         .unwrap_or_else(|_| std::path::Path::new(file));
-                    (Some(relative.display().to_string()), Some(line))
+                    (
+                        Some(relative.display().to_string()),
+                        Some(line),
+                        Some(column),
+                    )
                 };
                 (
                     code,
                     d["severity"].as_str().expect("severity").to_string(),
                     file,
                     line,
+                    column,
                     d["message"].as_str().expect("message").to_string(),
                 )
             })
@@ -79,6 +96,7 @@ fn test_check_reports_the_ffi_parity_diagnostics() {
                     d.severity.to_string(),
                     d.file.map(str::to_string),
                     d.line,
+                    d.column,
                     d.message.to_string(),
                 )
             })

@@ -251,6 +251,11 @@ pub struct ParsedLedger {
     /// not stop a query from running. Reported by `isValid`, `getErrors`, and
     /// `getParseErrors`; invisible to the gates.
     option_errors: Vec<Error>,
+    /// The option diagnostics a query lists
+    /// ([`crate::helpers::ProcessedLedger::query_option_errors`], through the
+    /// canonical `Ledger::query_option_errors`): a rejected `booking_method`'s
+    /// E7002 is the refusal that says why the query does not answer (#2929).
+    query_option_errors: Vec<Error>,
     /// Validation errors.
     validation_errors: Vec<Error>,
     /// Whether a query refuses: the load reported a parse error or a booking
@@ -290,6 +295,7 @@ impl ParsedLedger {
             query_directives: std::cell::OnceCell::new(),
             options: load.options,
             parse_errors: load.errors,
+            query_option_errors: load.query_option_errors,
             option_errors: load.option_errors,
             validation_errors,
             query_refused: load.query_blocked,
@@ -372,14 +378,15 @@ impl ParsedLedger {
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
         if self.query_refused {
             // The load's errors and option diagnostics, as the free `query`
-            // refuses with them (`reported_errors`).
+            // refuses with them (`reported_query_errors`): a rejected
+            // `booking_method`'s E7002 is the refusal (#2929).
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
                 errors: self
                     .parse_errors
                     .iter()
-                    .chain(&self.option_errors)
+                    .chain(&self.query_option_errors)
                     .cloned()
                     .collect(),
             };
@@ -409,7 +416,7 @@ impl ParsedLedger {
             &self.created_tables,
             self.parse_errors
                 .iter()
-                .chain(&self.option_errors)
+                .chain(&self.query_option_errors)
                 .cloned()
                 .collect(),
         )
@@ -565,6 +572,7 @@ impl ParsedLedger {
             options: self.options.clone(),
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
+            query_option_errors: self.query_option_errors.clone(),
             validation_errors: self.validation_errors.clone(),
             query_refused: self.query_refused,
         };
@@ -607,6 +615,7 @@ impl ParsedLedger {
             options: payload.options,
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
+            query_option_errors: payload.query_option_errors,
             validation_errors: payload.validation_errors,
             query_refused: payload.query_refused,
             editor_cache,
@@ -678,8 +687,14 @@ pub struct Ledger {
     /// measures a balance's tolerance with (#2901). Persisted in the cache
     /// payload, like `account_types`.
     tolerance_multiplier: rustledger_core::Decimal,
-    /// Processing errors (load, booking, validation).
+    /// Processing errors (load, booking, validation), then the option
+    /// diagnostics: what `getErrors` reports.
     errors: Vec<Error>,
+    /// What a query lists: the processing errors, then the option diagnostics
+    /// as a query lists them (`Ledger::query_option_errors`, the canonical the
+    /// FFI's query surfaces read): a rejected `booking_method`'s E7002 is the
+    /// refusal that says why the query does not answer (#2929).
+    query_errors: Vec<Error>,
     /// Whether `errors` holds one that stops a query from answering
     /// (`LedgerError::blocks_queries`, #2861: a parse error, a file that
     /// could not be read or decrypted, a booking failure), or the load or
@@ -745,6 +760,7 @@ impl Ledger {
                     booking_method: LoadOptions::default().booking_method,
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                     tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+                    query_errors: vec![Error::new(format!("Load error: {e}"))],
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                     query_refused: true,
@@ -784,6 +800,13 @@ impl Ledger {
                 // option errors below); every other error is reported beside
                 // the rows. Read before the fields move out.
                 let query_refused = ledger.blocks_queries();
+                // The option diagnostics as a query lists them, through the
+                // canonical, read before the fields move out.
+                let query_option_errors: Vec<Error> = ledger
+                    .query_option_errors()
+                    .into_iter()
+                    .map(Error::from)
+                    .collect();
                 let balance_discrepancies = ledger.balance_discrepancies;
                 let source_map = ledger.source_map;
                 let (directives, directive_spans): (Vec<Directive>, Vec<_>) = ledger
@@ -797,6 +820,7 @@ impl Ledger {
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors = crate::helpers::reported_ledger_errors(ledger.errors);
+                let query_errors = errors.iter().cloned().chain(query_option_errors).collect();
                 errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
@@ -814,6 +838,7 @@ impl Ledger {
                     summary_accounts,
                     tolerance_multiplier,
                     errors,
+                    query_errors,
                     editor_cache,
                     query_refused,
                     created_tables: std::cell::RefCell::default(),
@@ -832,6 +857,9 @@ impl Ledger {
                 booking_method,
                 summary_accounts,
                 tolerance_multiplier,
+                query_errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                    .chain(option_errors.iter().cloned())
+                    .collect(),
                 errors: std::iter::once(Error::new(format!("Processing error: {e}")))
                     .chain(option_errors)
                     .collect(),
@@ -920,7 +948,7 @@ impl Ledger {
             return to_js(&QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: self.errors.clone(),
+                errors: self.query_errors.clone(),
             });
         }
         let expanded = query_directives(
@@ -942,7 +970,7 @@ impl Ledger {
             },
             query_str,
             &self.created_tables,
-            self.errors.clone(),
+            self.query_errors.clone(),
         )
     }
 
@@ -1021,6 +1049,7 @@ impl Ledger {
                 self.summary_accounts.conversion_currency.clone(),
             ],
             errors: self.errors.clone(),
+            query_errors: self.query_errors.clone(),
             query_refused: self.query_refused,
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
@@ -1119,6 +1148,7 @@ impl Ledger {
             summary_accounts,
             tolerance_multiplier,
             errors: payload.errors,
+            query_errors: payload.query_errors,
             editor_cache,
             query_refused: payload.query_refused,
             created_tables: std::cell::RefCell::default(),
@@ -1218,6 +1248,7 @@ pub mod option_warning_severity_tests {
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
+            query_errors: Vec::new(),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),
@@ -1246,6 +1277,7 @@ pub mod option_warning_severity_tests {
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
+            query_errors: Vec::new(),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),
@@ -1290,6 +1322,7 @@ pub mod option_warning_severity_tests {
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
+                query_errors: Vec::new(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: false,
                 created_tables: std::cell::RefCell::default(),

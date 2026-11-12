@@ -288,22 +288,28 @@ fn exceptions() -> BTreeMap<(&'static str, usize), &'static str> {
 }
 
 /// The counts an exception's reason was written for, as (rledger,
-/// beancount, main), read from its `rledger counts X where beancount counts
-/// Y (main Z)`.
+/// beancount, main), read from the `rledger counts X where beancount counts
+/// Y (main Z)` it starts with, as the exceptions file's header says. Panics
+/// on a reason that does not start so.
 fn reason_counts(reason: &str) -> (usize, usize, usize) {
-    let number = |after: &str, upto: &str| -> usize {
-        let rest = reason
-            .split_once(after)
-            .unwrap_or_else(|| panic!("no `{after}` in the reason: {reason:?}"))
-            .1;
-        rest[..rest.find(upto).unwrap_or(rest.len())]
-            .parse()
-            .unwrap_or_else(|_| panic!("no count after `{after}` in the reason: {reason:?}"))
+    let fail = || -> ! {
+        panic!(
+            "a reason must start `rledger counts X where beancount counts Y (main Z)`: \
+             {reason:?}"
+        )
+    };
+    let mut rest = reason
+        .strip_prefix("rledger counts ")
+        .unwrap_or_else(|| fail());
+    let mut number = |upto: &str| -> usize {
+        let (n, after) = rest.split_once(upto).unwrap_or_else(|| fail());
+        rest = after;
+        n.parse().unwrap_or_else(|_| fail())
     };
     (
-        number("rledger counts ", " "),
-        number("beancount counts ", " "),
-        number("(main ", ")"),
+        number(" where beancount counts "),
+        number(" (main "),
+        number(")"),
     )
 }
 
@@ -1603,4 +1609,67 @@ fn regressed_rows(
         }
     }
     out
+}
+
+/// Counts for line 3 only: rledger 1, beancount 2, main 1 (no further from
+/// beancount than main), main 1 on the BOM-free analog, and beancount
+/// `analog_bc` on it. Nothing else is set, so no rule before the last one
+/// explains the line.
+fn late_analog_counts(analog_bc: usize) -> Counts {
+    let line3 = |n: usize| BTreeMap::from([(3, n)]);
+    Counts {
+        bc: line3(2),
+        rl: line3(1),
+        main: line3(1),
+        analog_bc: line3(analog_bc),
+        analog_main: line3(1),
+        hash_bang_bc: BTreeMap::new(),
+        bc_alone: BTreeMap::new(),
+        rl_bom: BTreeMap::new(),
+        rl_account: BTreeMap::new(),
+        roles: BomRoles::default(),
+        later_grammar: BTreeMap::new(),
+    }
+}
+
+/// The last rule of `cause`, `like-main-without-bom` on a line no further
+/// from beancount than main, holds only when beancount counts the BOM-free
+/// analog as it counts the line here. Where it counts the analog differently,
+/// the BOM changed beancount's count, so the difference is not main's old
+/// recovery gap: the line stays unexplained, even though main counts the
+/// analog as rledger counts the line.
+#[test]
+fn test_cause_like_main_without_bom_needs_beancounts_analog_count() {
+    let input =
+        "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * \"x\" \u{FEFF}q\n";
+    let lines: Vec<&str> = input.split('\n').collect();
+    let tail = "made-up row, in no data file";
+    assert_eq!(
+        cause(&lines, 3, &late_analog_counts(2), input, tail),
+        Some("like-main-without-bom"),
+        "beancount counts the analog as the line: main's old gap"
+    );
+    assert_eq!(
+        cause(&lines, 3, &late_analog_counts(3), input, tail),
+        None,
+        "beancount counts the analog differently: the BOM changed its count"
+    );
+}
+
+/// `reason_counts` reads the counts from the start of a reason, as the
+/// exceptions file's header says each reason starts.
+#[test]
+fn test_reason_counts_reads_the_leading_counts() {
+    assert_eq!(
+        reason_counts("rledger counts 3 where beancount counts 4 (main 1); why"),
+        (3, 4, 1)
+    );
+}
+
+/// A reason that mentions the counts anywhere but its start is malformed,
+/// not read from wherever they appear.
+#[test]
+#[should_panic(expected = "a reason must start")]
+fn test_reason_counts_rejects_counts_not_at_the_start() {
+    reason_counts("why: rledger counts 3 where beancount counts 4 (main 1)");
 }

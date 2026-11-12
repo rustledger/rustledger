@@ -4926,19 +4926,18 @@ pub fn token_has_stray_bom(kind: crate::SyntaxKind, text: &str) -> bool {
 /// BOM, as a token ending in one (an invalid run, an account) would have
 /// taken it in. So one look back, at the character before `start`, tells
 /// the two apart, at constant cost.
+///
+/// Such a token is only ever on an `ERROR_NODE` line: a line whose first
+/// content token is a BOM starts no directive, and no directive takes it in
+/// (see `holds_an_invalid_token`). So of the counts of invalid tokens, only
+/// [`report_invalid_tokens_of_error_line`] asks this; for
+/// `quiet_after_invalid_tokens` the BOM is its line's first invalid token,
+/// as beancount's is (see there).
 pub(super) fn is_line_start_bom_token(source: &str, start: usize, text: &str) -> bool {
-    source
-        .get(..start)
-        .is_some_and(|before| bom_token_starts_its_line(before, text))
-}
-
-/// [`is_line_start_bom_token`] for a token whose position is not at hand:
-/// `before` is any text that ends right where the token starts (the whole
-/// source before it, or just the token before it), empty at the start of the
-/// source or of a directive.
-fn bom_token_starts_its_line(before: &str, text: &str) -> bool {
     text.starts_with(crate::bom::BOM_CHAR)
-        && (before.is_empty() || before.ends_with(['\n', crate::bom::BOM_CHAR]))
+        && source.get(..start).is_some_and(|before| {
+            before.is_empty() || before.ends_with(['\n', crate::bom::BOM_CHAR])
+        })
 }
 
 /// Whether the invalid token `text`, starting at byte `start` of `source`, is
@@ -9542,9 +9541,17 @@ fn readable_start_of_an_error_line(prefix: &str) -> bool {
 /// on whatever followed. Kept after the invalid token: another invalid
 /// token's error (an error starting at an `ERROR_TOKEN`), an invalid date
 /// (beancount builds dates in its lexer, so it reports them wherever they
-/// stand) and a mid-file BOM. A BOM that starts its line does not count as an
-/// invalid token, as it is layout-transparent here
-/// ([`is_line_start_bom_token`]); a BOM-led run anywhere else does (#2928).
+/// stand) and a mid-file BOM. A BOM-led token counts as an invalid token
+/// (#2928), unless it is BOMs beancount reads into an account
+/// (`is_bom_account_token`).
+///
+/// That includes a BOM that starts its line ([`is_line_start_bom_token`]),
+/// which is beancount's first invalid token on the line too. Counting it
+/// changes no output today: such a line is an `ERROR_NODE` line, whose line
+/// error (and secondary BOM error) starts at the BOM, not after it, and whose
+/// other errors are all of the kinds kept above (an invalid token's error, at
+/// or inside an `ERROR_TOKEN`, an invalid date). So the line-start rule is
+/// not asked here.
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree for the
 /// `ERROR_TOKEN`s, only when there are errors at all, and steps over each
@@ -9578,7 +9585,6 @@ fn quiet_after_invalid_tokens(
                 rowan::NodeOrToken::Token(t) => {
                     if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
                         == K::ERROR_TOKEN
-                        && !is_line_start_bom_token(stripped, at, t.text())
                         && !is_bom_account_token(stripped, at, t.text())
                     {
                         invalid.push(at);
@@ -9832,15 +9838,19 @@ fn report_no_metadata_continuations(
 }
 
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than
-/// a mid-file BOM that starts its line, which is layout-transparent here
-/// ([`is_line_start_bom_token`]; a BOM-led run in the middle of a line is an
-/// invalid token like any other, #2928). `node` starts a line, as every
-/// directive does. Walks green nodes only, in source order, so the token
-/// before each one is at hand.
+/// BOMs beancount reads into an account (`is_bom_account_token`). A BOM-led
+/// run is an invalid token like any other here (#2928).
+///
+/// `node` is an `open` or a transaction, and a BOM that starts its line
+/// ([`is_line_start_bom_token`]) is never in it, so no line-start test is
+/// needed: the node's header starts with its date, and every later line it
+/// takes in starts with indentation (`is_indented_directive_continuation`,
+/// `is_indented_transaction_body_line`), so a line a BOM starts is an
+/// `ERROR_NODE` of its own. Walks green nodes only, in source order, so a
+/// token of BOMs alone is followed by the token after it.
 fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
     use rowan::Language as _;
     let mut stack = vec![node.children()];
-    let mut before = "";
     // A token of BOMs alone, held until the token after it says whether an
     // account of its own follows it (`is_bom_account_token`), which makes it
     // none of beancount's invalid tokens.
@@ -9859,9 +9869,7 @@ fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
                         return true;
                     }
                 }
-                if kind == crate::SyntaxKind::ERROR_TOKEN
-                    && !bom_token_starts_its_line(before, t.text())
-                {
+                if kind == crate::SyntaxKind::ERROR_TOKEN {
                     let text = t.text();
                     if text.chars().all(|c| c == crate::bom::BOM_CHAR) {
                         pending_boms = Some(text);
@@ -9869,7 +9877,6 @@ fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
                         return true;
                     }
                 }
-                before = t.text();
             }
         }
     }

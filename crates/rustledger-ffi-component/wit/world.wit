@@ -199,21 +199,24 @@ interface types {
 
   /// A load / validate / query error.
   ///
-  /// `filename` and `line` say where the error is: the file it is in and the
-  /// 1-based line in it. On a multi-file load that is an included file's own
-  /// path; for source text, the `filename` given to `load`, `<stdin>` for
-  /// `batch` and a session from source, and `<string>` for `validate` and
-  /// `query`. `code` is the diagnostic code `rledger check` reports
-  /// (`E2001`, `E7002`, `P0012`, ...). Each is `none` where the error has
-  /// none (4.0.0, #2935).
+  /// `filename`, `line` and `column` say where the error is: the file it is
+  /// in, the 1-based line in it, and the 1-based column on that line, counted
+  /// in characters (not bytes, so a BOM or a multi-byte character before it
+  /// counts once), as `rledger check` counts it. On a multi-file load that
+  /// is an included file's own path; for source text, the `filename` given
+  /// to `load`, `<stdin>` for `batch` and a session from source, and
+  /// `<string>` for `validate` and `query`. `code` is the diagnostic code
+  /// `rledger check` reports (`E2001`, `E7002`, `P0012`, ...). Each is
+  /// `none` where the error has none (4.0.0, #2935).
   ///
   /// A finding on a directive a plugin made has no place in the text, and
   /// the surfaces differ on it. The file surfaces (`load-file`,
   /// `validate-file`, `query-file`, a session from a file) report it as
   /// `rledger check` does: at the plugin's placeholder name, such as
   /// `<check_closing>`, and the line the plugin gave it, which is often 0, so
-  /// `line` is not 1-based there. The source-text surfaces (`load`,
-  /// `validate`) report it with no `filename` and no `line`.
+  /// `line` is not 1-based there, and at `column` 0, as there is no text to
+  /// count in. The source-text surfaces (`load`, `validate`) report it with
+  /// no `filename`, no `line` and no `column`.
   record error {
     message: string,
     code: option<string>,

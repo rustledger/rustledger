@@ -330,4 +330,50 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
             },
         ],
     },
+    // A BOM before line 1: three bytes, one character, so a finding there is
+    // at column 2, as `check` counts it. Every other case's columns are 1, so
+    // a surface that set the column to 1 (or counted bytes, 4) passed them
+    // (review of #2946).
+    CheckParityCase {
+        name: "bom",
+        files: &[(
+            "main.beancount",
+            "\u{FEFF}2024-01-02 balance Assets:X 1 USD\n\
+             2024-01-01 open Assets:Y\n",
+        )],
+        entry: "main.beancount",
+        diagnostics: &BOM_DIAGNOSTICS,
+    },
+    // The same with CRLF line endings.
+    CheckParityCase {
+        name: "bom-crlf",
+        files: &[(
+            "main.beancount",
+            "\u{FEFF}2024-01-02 balance Assets:X 1 USD\r\n\
+             2024-01-01 open Assets:Y\r\n",
+        )],
+        entry: "main.beancount",
+        diagnostics: &BOM_DIAGNOSTICS,
+    },
+];
+
+/// What the `bom` cases report: both findings on line 1, at column 2.
+#[allow(dead_code)]
+const BOM_DIAGNOSTICS: [ExpectedDiagnostic; 2] = [
+    ExpectedDiagnostic {
+        code: "E1001",
+        severity: "error",
+        file: Some("main.beancount"),
+        line: Some(1),
+        column: Some(2),
+        message: "Account Assets:X was never opened",
+    },
+    ExpectedDiagnostic {
+        code: "E2001",
+        severity: "error",
+        file: Some("main.beancount"),
+        line: Some(1),
+        column: Some(2),
+        message: "Balance failed for Assets:X: expected 1 USD, got 0 USD",
+    },
 ];

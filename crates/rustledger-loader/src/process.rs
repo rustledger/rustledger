@@ -1391,7 +1391,7 @@ fn run_booking(
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
-                    if let Some(location) = error_location(source_map, file_id, span.start) {
+                    if let Some(location) = source_map.locate(file_id, span.start) {
                         err = err.with_location(location);
                     }
                     errors.push(err);
@@ -2359,27 +2359,6 @@ fn build_validation_options(
         .with_source_lines(source_lines(source_map))
 }
 
-/// Where an error at byte `offset` of `file_id` is: the file, line and column
-/// of a source file, or the name and line of a placeholder location (such as
-/// `<check_closing>:0`, #2713), which has no column (0) because no text is
-/// behind it. `None` for a synthesized directive, which has no location.
-fn error_location(source_map: &SourceMap, file_id: u16, offset: usize) -> Option<ErrorLocation> {
-    let Some(file) = source_map.get(file_id as usize) else {
-        let (file, line) = source_map.placeholder(file_id)?;
-        return Some(ErrorLocation {
-            file,
-            line: line as usize,
-            column: 0,
-        });
-    };
-    let (line, column) = file.line_col(offset);
-    Some(ErrorLocation {
-        file: file.path.clone(),
-        line,
-        column,
-    })
-}
-
 /// Convert a batch of [`rustledger_validate::ValidationError`]s into
 /// loader-level [`LedgerError`]s (with resolved `file:line:column`
 /// locations) and append to the existing list.
@@ -2415,7 +2394,7 @@ fn ledger_errors_extend(
         // to do the lookup themselves (issue #901).
         let location = err
             .span
-            .and_then(|span| error_location(source_map, err.file_id?, span.start));
+            .and_then(|span| source_map.locate(err.file_id?, span.start));
         errors.push(LedgerError {
             severity: severity_level,
             code: err.code.code().to_string(),

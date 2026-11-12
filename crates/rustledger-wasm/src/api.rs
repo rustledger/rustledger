@@ -12,7 +12,7 @@ use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
 use crate::helpers::{
-    extract_options, has_fatal, load_and_book, option_warnings_to_errors, parse_error_to_wasm,
+    extract_options, has_fatal, load_and_book, option_warnings_to_errors, parse_errors_to_wasm,
     run_validation, to_js, validate_option_tuples,
 };
 #[cfg(feature = "completions")]
@@ -101,11 +101,7 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    let mut errors: Vec<Error> = result
-        .errors
-        .iter()
-        .map(|e| parse_error_to_wasm(e, &lookup, None))
-        .collect();
+    let mut errors: Vec<Error> = parse_errors_to_wasm(&result.errors, source);
 
     // This entry point never builds a loader `Options`, so nothing here used to
     // raise E7001/E7002 and an invalid option was invisible (#2299). Validating
@@ -267,16 +263,11 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
     use rustledger_parser::format::format_source_with_parsed;
 
     let parse_result = parse_beancount(source);
-    let lookup = LineLookup::new(source);
 
     if !parse_result.errors.is_empty() {
         let result = FormatResult {
             formatted: None,
-            errors: parse_result
-                .errors
-                .iter()
-                .map(|e| parse_error_to_wasm(e, &lookup, None))
-                .collect(),
+            errors: parse_errors_to_wasm(&parse_result.errors, source),
         };
         return to_js(&result);
     }

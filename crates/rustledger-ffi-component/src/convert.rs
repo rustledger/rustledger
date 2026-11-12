@@ -429,19 +429,20 @@ fn semantic_validation_errors(
             // A span is a place in the source text (file id 0) only: one in a
             // plugin's directive (a placeholder id) or another file says
             // nothing about the text, and was mapped to whatever line of it
-            // the offset fell on (#2935). The same rule as the WASM surface's
-            // `validation_error_to_wasm` (`rustledger-wasm/src/helpers.rs`),
-            // which points back here; change both together.
+            // the offset fell on (#2935). The same file-id rule as the WASM
+            // surface's `validation_error_to_wasm`
+            // (`rustledger-wasm/src/helpers.rs`), which points back here;
+            // change both together. The location itself is not a copy: both
+            // read it from the loader's canonical, `SourceMap::locate`.
             if let Some(span) = err.span.filter(|_| err.file_id.is_none_or(|id| id == 0)) {
-                // Line and column as the loader locates a finding
-                // (`SourceFile::line_col`, as its `error_location` does), so
-                // as `rledger check` reports them; the column was left out
-                // (review of #2946, pinned by `check_parity`).
-                match loaded.source_map.get(0) {
-                    Some(text) => {
-                        let (line, column) = text.line_col(span.start);
-                        e = e.with_line(line as u32);
-                        e.column = Some(column as u32);
+                // Line and column as the loader locates a finding, so as
+                // `rledger check` reports them; the column was left out
+                // (review of #2946, pinned by `check_parity`, whose BOM case
+                // reads a column past 1).
+                match loaded.source_map.locate(0, span.start) {
+                    Some(location) => {
+                        e = e.with_line(location.line as u32);
+                        e.column = Some(location.column as u32);
                     }
                     None => e = e.with_line(loaded.line_lookup.byte_to_line(span.start)),
                 }

@@ -472,8 +472,10 @@ use crate::types::{Error, LedgerOptions};
 /// `query_errors`, what a query lists, in which a rejected `booking_method`'s
 /// E7002 is the refusal that says why the query does not answer
 /// (`Ledger::query_option_errors`, as the FFI lists it). A v102 blob holds
-/// neither, so it is read at the wrong offsets. (v103 is held by #2952, v104
-/// by #2931.)
+/// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
+/// also carries its parse and validation errors at character columns now,
+/// where a byte column read high after a BOM or a multi-byte character.
+/// (v103 is held by #2952, v104 by #2931.)
 pub const CACHE_VERSION: u32 = 105;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

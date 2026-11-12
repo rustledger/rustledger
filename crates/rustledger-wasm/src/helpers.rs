@@ -13,9 +13,13 @@ use crate::utils::LineLookup;
 /// Convert a parser [`rustledger_parser::ParseError`] into the rich WASM
 /// [`Error`]: stable code (`P####`), `phase: "parse"`, hint, and the full
 /// source span (start + end line/column).
+///
+/// Located through the loader's [`rustledger_loader::LineIndex`], so the
+/// columns count characters as `rledger check` counts them; they counted
+/// bytes, and read high after a BOM or a multi-byte character (#2946).
 pub fn parse_error_to_wasm(
     e: &rustledger_parser::ParseError,
-    lookup: &LineLookup,
+    index: &rustledger_loader::LineIndex<'_>,
     file: Option<String>,
 ) -> Error {
     Error::new(e.to_string())
@@ -24,9 +28,30 @@ pub fn parse_error_to_wasm(
         .with_hint(e.hint.clone())
         .with_file(file)
         .with_span(
-            lookup.byte_to_line_col(e.span.start),
-            lookup.byte_to_line_col(e.span.end),
+            line_col_u32(index.line_col(e.span.start)),
+            line_col_u32(index.line_col(e.span.end)),
         )
+}
+
+/// Every parse error of `source` as [`parse_error_to_wasm`] reports it. The
+/// line index is built only when there is an error to locate.
+pub fn parse_errors_to_wasm(errors: &[rustledger_parser::ParseError], source: &str) -> Vec<Error> {
+    if errors.is_empty() {
+        return Vec::new();
+    }
+    let index = rustledger_loader::LineIndex::new(source);
+    errors
+        .iter()
+        .map(|e| parse_error_to_wasm(e, &index, None))
+        .collect()
+}
+
+/// A loader `(line, column)` as the WASM `Error`'s `u32`s.
+fn line_col_u32((line, column): (usize, usize)) -> (u32, u32) {
+    (
+        u32::try_from(line).unwrap_or(u32::MAX),
+        u32::try_from(column).unwrap_or(u32::MAX),
+    )
 }
 
 /// Convert a [`rustledger_validate::ValidationError`] into the rich WASM
@@ -34,9 +59,14 @@ pub fn parse_error_to_wasm(
 /// note, else context), and the source span when present. When the error has
 /// no span, falls back to `fallback_line` (the directive's date→line) to
 /// preserve the prior location behavior.
+///
+/// The span is located in `source_map` (the load's, holding the source as
+/// file 0) through the loader's canonical, [`rustledger_loader::SourceMap::locate`],
+/// so the line and column are the ones `rledger check` and the FFI report;
+/// the column counted bytes before (#2946).
 pub fn validation_error_to_wasm(
     e: &rustledger_validate::ValidationError,
-    lookup: &LineLookup,
+    source_map: &rustledger_loader::SourceMap,
     file: Option<String>,
     fallback_line: Option<u32>,
 ) -> Error {
@@ -62,12 +92,22 @@ pub fn validation_error_to_wasm(
     // A span is a place in the one source text (file id 0) only; one a
     // plugin's directive carries (a placeholder id) says nothing about it.
     // The FFI component's `semantic_validation_errors`
-    // (`rustledger-ffi-component/src/convert.rs`) applies the same rule and
-    // points back here; change both together (#2935).
-    if let Some(span) = e.span.filter(|_| e.file_id.is_none_or(|id| id == 0)) {
+    // (`rustledger-ffi-component/src/convert.rs`) applies the same file-id
+    // rule and points back here; change both together (#2935). The location
+    // is not a copy: both read it from `SourceMap::locate`.
+    let located = e
+        .span
+        .filter(|_| e.file_id.is_none_or(|id| id == 0))
+        .and_then(|span| {
+            Some((
+                source_map.locate(0, span.start)?,
+                source_map.locate(0, span.end)?,
+            ))
+        });
+    if let Some((start, end)) = located {
         out = out.with_span(
-            lookup.byte_to_line_col(span.start),
-            lookup.byte_to_line_col(span.end),
+            line_col_u32((start.line, start.column)),
+            line_col_u32((end.line, end.column)),
         );
     } else {
         out.line = fallback_line;
@@ -170,11 +210,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     // If there are parse errors, return early without processing
     if !parse_result.errors.is_empty() {
-        let errors: Vec<Error> = parse_result
-            .errors
-            .iter()
-            .map(|e| parse_error_to_wasm(e, &lookup, None))
-            .collect();
+        let errors = parse_errors_to_wasm(&parse_result.errors, source);
 
         let options = extract_options(&parse_result.options);
         let option_errors = validate_option_tuples(&parse_result.options, &lookup);
@@ -405,7 +441,7 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
         .filter(|err| !err.code.is_advisory_only())
         .map(|err| {
             let fallback_line = date_to_line.get(&err.date.to_string()).copied();
-            validation_error_to_wasm(err, &load.lookup, None, fallback_line)
+            validation_error_to_wasm(err, &load.source_map, None, fallback_line)
         })
         .collect()
 }
@@ -493,7 +529,7 @@ pub fn validate_option_tuples(
         // on these single-source entry points.
         let site = rustledger_loader::OptionSite {
             file: String::new(),
-            line: lookup.byte_to_line_col(span.start).0 as usize,
+            line: lookup.byte_to_line(span.start) as usize,
         };
         opts.set_scoped_at(key, value, true, Some(site));
     }
@@ -750,14 +786,39 @@ mod warning_severity_tests {
     #[test]
     fn validation_severity_follows_code() {
         use rustledger_validate::{ErrorCode, ValidationError};
-        let lookup = LineLookup::new("x");
+        let map = rustledger_loader::SourceMap::new();
         let date = rustledger_core::naive_date(2020, 1, 1).unwrap();
         let mk = |code| ValidationError::new(code, "m", date);
         // FutureDate is a warning code; AccountNotOpen (E1001) is an error.
-        let warn = validation_error_to_wasm(&mk(ErrorCode::FutureDate), &lookup, None, Some(1));
+        let warn = validation_error_to_wasm(&mk(ErrorCode::FutureDate), &map, None, Some(1));
         assert_eq!(warn.severity, Severity::Warning);
-        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
+        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &map, None, Some(1));
         assert_eq!(err.severity, Severity::Error);
+    }
+
+    /// #2946: a validation finding and a parse error are at their CHARACTER
+    /// columns, as `rledger check` reports them: a BOM (three bytes) and an
+    /// `Ü` (two) each count once. They counted bytes (4 and 27).
+    #[test]
+    fn test_error_columns_count_characters() {
+        let load =
+            load_and_book("\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n");
+        let mut got: Vec<_> = run_validation(&load)
+            .into_iter()
+            .map(|e| (e.code, e.line, e.column))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (Some("E1001".to_string()), Some(1), Some(2)),
+                (Some("E2001".to_string()), Some(1), Some(2)),
+            ]
+        );
+
+        let load = load_and_book("2024-01-03 open Assets:Ü 10\n");
+        let got: Vec<_> = load.errors.iter().map(|e| (e.line, e.column)).collect();
+        assert_eq!(got, [(Some(1), Some(26))]);
     }
 }
 

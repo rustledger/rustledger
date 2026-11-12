@@ -713,6 +713,7 @@ impl From<rustledger_loader::LedgerError> for Error {
             // `LedgerError` already carries code + phase + file location.
             code: (!e.code.is_empty()).then(|| e.code.clone()),
             phase: (!e.phase.is_empty()).then(|| e.phase.clone()),
+            // Drops `e.hint` (e.g. E8001's documents hint): issue #2964.
             hint: None,
             file: e
                 .location
@@ -720,7 +721,9 @@ impl From<rustledger_loader::LedgerError> for Error {
                 .map(|loc| loc.file.display().to_string()),
             line: e.location.as_ref().map(|loc| loc.line as u32),
             column: e.location.as_ref().map(|loc| loc.column as u32),
-            // `ErrorLocation` is a single point (no end); leave end positions null.
+            // `ErrorLocation` is a single point, so the end stays null, though
+            // `source_span` and `file_id` would locate it given the load's
+            // `SourceMap`, which this conversion lacks: issue #2964.
             end_line: None,
             end_column: None,
             severity: match e.severity {

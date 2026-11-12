@@ -20,9 +20,9 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
-use rustledger_ffi_component_tests::{component_built, component_path};
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use rustledger_ffi_component_tests::{compiled_component, component_built};
+use wasmtime::Store;
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
@@ -51,8 +51,7 @@ impl rustledger::ledger::host::Host for Host {
 }
 
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(

@@ -45,7 +45,12 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.18: `query`,
+/// The Component-Model api-version this build implements. 4.0: the `error`
+/// record gains `code` and `filename` (a breaking record change), `load`,
+/// `load-file`, `validate` and `validate-file` report the ledger's option
+/// diagnostics, `valid` and the `load-file` plugin gate go by severity, and
+/// `load-file` / `validate-file` validate the ledger with its includes as
+/// `rledger check` does (#2929, #2935); 3.18: `query`,
 /// `batch` and a session from source text answer by the same rule as the
 /// file variants (#2882); 3.17: `query-file`,
 /// `batch-file` and a session from a file refuse only when a file failed to
@@ -78,7 +83,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.18";
+const API_VERSION: &str = "4.0";
 
 struct Component;
 

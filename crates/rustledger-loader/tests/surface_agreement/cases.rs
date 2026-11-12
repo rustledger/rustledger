@@ -1,19 +1,20 @@
 // Ledgers on which every diagnostic surface must report the same findings
 // (#2937, #2949): `rledger check`, WASM (`validateSource`, `ParsedLedger`,
-// `Ledger.fromFiles`), the FFI component (`validate`, `load`) and the LSP.
+// `Ledger.fromFiles`), the FFI component (`validate`, `load`, `validate-file`,
+// `load-file`) and the LSP.
 //
 // Shared, through `include!`, by the drift-guard test of each surface:
 //
 // - `rustledger/tests/surface_agreement_test.rs` (`rledger check --format json`),
 // - `rustledger-wasm/tests/wasm_surface_agreement.rs` (`validateSource`,
 //   `ParsedLedger`, `Ledger.fromFiles`, the last two also from cache),
-// - `rustledger-ffi-component` (`validate`, `load`),
+// - `rustledger-ffi-component` (`validate`, `load`, `validate-file`,
+//   `load-file`),
 // - `rustledger-lsp` (`all_diagnostics`).
 //
-// Each surface must report exactly `diagnostics`, in any order: the same
-// code (the FFI wire error carries none, so it is matched on line and
-// message), on the same 1-based line, with a message starting with the
-// given text. The expected findings are bean-check 3.2.3's:
+// Each surface must report exactly `findings`, in any order: the same code,
+// on the same 1-based line, with a message starting with the given text.
+// The expected findings are bean-check 3.2.3's:
 //
 // - bean-check does not flag closing an account that still holds a balance,
 //   with or without `auto_accounts` / `currency_accounts`; `check` stays

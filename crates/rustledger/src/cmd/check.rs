@@ -340,6 +340,18 @@ pub fn run_with_writer<W: Write>(
                 let errors = &errors[..];
 
                 if json_mode {
+                    // A deliberate copy of
+                    // `rustledger_loader::parse_errors_to_ledger_errors`, which
+                    // the FFI reports parse errors through: the same code,
+                    // phase, message and character line and column, rendered
+                    // here inline because `check` re-reads the file and filters
+                    // by rule before rendering. The `parse-error-in-include`
+                    // case of `tests/ffi_check_parity/cases.rs` pins the two
+                    // to agree (code, line, column, message). Revisit, and
+                    // call the loader function here instead, if this arm gains
+                    // a field that function does not produce, or if `check`
+                    // stops re-reading the file (review of #2946).
+                    //
                     // One line-start table per file: `line_col_in` per span
                     // rescanned the file from byte 0, so a file with
                     // thousands of parse errors took seconds (#2632).

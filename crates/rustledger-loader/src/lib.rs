@@ -99,10 +99,10 @@ pub fn is_glob_pattern(path: &str) -> bool {
 pub use process::{
     BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
     LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
-    option_warnings_to_errors, process,
+    option_warnings_to_errors, parse_errors_to_ledger_errors, process,
 };
 #[cfg(feature = "plugins")]
-pub use process::{PluginPass, run_plugins};
+pub use process::{PluginPass, plugin_error_to_ledger_error, run_plugins};
 
 use rustledger_core::{Directive, DisplayContext};
 use rustledger_parser::{ParseError, Span, Spanned};

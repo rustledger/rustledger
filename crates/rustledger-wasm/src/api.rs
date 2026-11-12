@@ -12,7 +12,7 @@ use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
 use crate::helpers::{
-    extract_options, has_fatal, load_and_book, option_warnings_to_errors, parse_error_to_wasm,
+    extract_options, has_fatal, load_and_book, option_warnings_to_errors, parse_errors_to_wasm,
     run_validation, to_js, validate_option_tuples,
 };
 #[cfg(feature = "completions")]
@@ -28,6 +28,18 @@ use crate::utils::LineLookup;
 /// placed through `source_map` (the load's).
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
+///
+/// A parse error's message, code, phase and hint are WASM's one mapping,
+/// [`crate::helpers::parse_error_fields`], which also documents why WASM
+/// does not call the loader's `parse_errors_to_ledger_errors`. Unlike the
+/// single-source surfaces, `rledger check` and the FFI, this prefixes the
+/// message with the file's path (`main.beancount: parse error: ...`),
+/// though the file is in its own field too: a pre-existing divergence of
+/// every multi-file surface (`validateMultiFile`, `Ledger`,
+/// `queryMultiFile`), tracked in issue #2961. Drop the prefix there, with
+/// the matching adjustments in `tests/wasm_query_option_errors.rs` and in
+/// the `parse_error_mapping_parity` test of `src/helpers.rs`, which both
+/// strip it.
 pub fn load_errors_to_errors(
     load_errors: &[LoadError],
     source_map: &rustledger_loader::SourceMap,
@@ -45,11 +57,10 @@ pub fn load_errors_to_errors(
                 for parse_error in parse_errors {
                     let span = parse_error.span();
                     let file = source_map.get_by_path(path);
-                    let mut err = Error::new(format!("{}: {}", path.display(), parse_error))
-                        .with_code(format!("P{:04}", parse_error.kind_code()))
-                        .with_phase("parse")
-                        .with_hint(parse_error.hint.clone())
+                    let mut err = crate::helpers::parse_error_fields(parse_error)
                         .with_file(Some(path.display().to_string()));
+                    // The path prefix of issue #2961 (see above).
+                    err.message = format!("{}: {}", path.display(), err.message);
                     if let Some(file) = file {
                         let (sl, sc) = file.line_col(span.0);
                         let (el, ec) = file.line_col(span.1);
@@ -88,11 +99,7 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    let mut errors: Vec<Error> = result
-        .errors
-        .iter()
-        .map(|e| parse_error_to_wasm(e, &lookup, None))
-        .collect();
+    let mut errors: Vec<Error> = parse_errors_to_wasm(&result.errors, source);
 
     // This entry point never builds a loader `Options`, so nothing here used to
     // raise E7001/E7002 and an invalid option was invisible (#2299). Validating
@@ -158,14 +165,14 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: load.reported_errors(),
+            errors: load.reported_query_errors(),
         };
         return to_js(&result);
     }
 
     // Carry the load's errors and warnings through every result path so
     // callers still see them alongside (or instead of) query output.
-    let warnings = load.reported_errors();
+    let warnings = load.reported_query_errors();
 
     // Parse the query
     let query = match parse_query(query_str) {
@@ -254,16 +261,11 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
     use rustledger_parser::format::format_source_with_parsed;
 
     let parse_result = parse_beancount(source);
-    let lookup = LineLookup::new(source);
 
     if !parse_result.errors.is_empty() {
         let result = FormatResult {
             formatted: None,
-            errors: parse_result
-                .errors
-                .iter()
-                .map(|e| parse_error_to_wasm(e, &lookup, None))
-                .collect(),
+            errors: parse_errors_to_wasm(&parse_result.errors, source),
         };
         return to_js(&result);
     }
@@ -826,6 +828,12 @@ fn query_with_filesystem(
     // (`LoadError::blocks_queries`, #2861). An include of a missing file, an
     // include cycle, a duplicate include or an empty glob is reported beside
     // the rows, as `bean-query` and `rledger query` report it.
+    //
+    // This refusal lists no option diagnostics: it returns before a `Ledger`
+    // exists, so it cannot list `Ledger::query_option_errors` as the FFI's
+    // `query-file` does over a file that fails to parse. A known divergence,
+    // noted on that function too (in `rustledger-loader/src/process.rs`);
+    // revisit when this path can reach it (#2960).
     let load_errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
     if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
@@ -867,9 +875,12 @@ fn query_with_filesystem(
     // Advisory-only codes (E1004, closing an account with a balance) are not
     // reported by `rledger query` either: the same canonical predicate.
     let mut errors = crate::helpers::reported_ledger_errors(std::mem::take(&mut ledger.errors));
-    // This surface lists the ledger's errors, not the option warnings, so the
-    // rejected option's refusal says why the query did not answer.
-    errors.extend(ledger.query_refusal().map(Error::from));
+    // Then the option diagnostics as a query lists them, through the
+    // canonical (`Ledger::query_option_errors`), as the FFI's `query-file`
+    // lists them: the rejected `booking_method`'s E7002 is the refusal that
+    // says why the query did not answer (#2911, #2929). This surface listed
+    // the refusal alone and no other option diagnostic.
+    errors.extend(ledger.query_option_errors().into_iter().map(Error::from));
     if booking_failed {
         let result = QueryResult {
             columns: Vec::new(),

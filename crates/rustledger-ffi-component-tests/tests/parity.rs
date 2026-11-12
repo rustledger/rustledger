@@ -19,9 +19,9 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
-use rustledger_ffi_component_tests::{component_built, component_path};
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use rustledger_ffi_component_tests::{compiled_component, component_built};
+use wasmtime::Store;
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
@@ -60,8 +60,7 @@ impl rustledger::ledger::host::Host for Host {
 }
 
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -82,8 +81,7 @@ fn instantiate() -> Result<(Store<Host>, Rustledger)> {
 /// Like [`instantiate`], but grants the guest read access to `host_dir`,
 /// mounted at `/work`, so `load-file` can read files through WASI.
 fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -276,6 +274,25 @@ fn query_short_circuits_on_parse_error() -> Result<()> {
         "parse error must surface, not be swallowed"
     );
     assert!(r.rows.is_empty(), "no rows on parse error");
+    // The load goes on past a parse error (#2949), so the entries that did
+    // parse would give rows: the parse error alone must still refuse
+    // (review of #2946).
+    let r = inst.rustledger_ledger_ledger().call_query(
+        &mut store,
+        "2024-01-01 open Assets:A\n2024-01-01 open Income:B\n2024-01-03 open\n\
+         2024-01-04 * \"x\"\n  Assets:A  1 USD\n  Income:B\n",
+        "SELECT account",
+    )?;
+    assert_eq!(
+        r.errors
+            .iter()
+            .map(|e| (e.code.as_deref(), e.line))
+            .collect::<Vec<_>>(),
+        [(Some("P0012"), Some(3))],
+        "{:?}",
+        r.errors
+    );
+    assert!(r.rows.is_empty(), "a parse error refuses: {:?}", r.rows);
     Ok(())
 }
 
@@ -1586,6 +1603,133 @@ fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
             "{errors:?}"
         );
         assert_next_query_answers(&mut store, &inst)?;
+    }
+    Ok(())
+}
+
+/// The ledgers `rledger check` is pinned to in
+/// `rustledger/tests/ffi_check_parity_test.rs` (#2929, #2935).
+mod check_parity_cases {
+    include!("../../rustledger/tests/ffi_check_parity/cases.rs");
+}
+use check_parity_cases::{CHECK_PARITY_CASES, CheckParityCase};
+
+/// Code, severity, file, line, column, message.
+type CheckRow = (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    String,
+);
+
+/// Each error as a row, sorted, a file under `/work/` named relative to it.
+fn check_rows(errors: &[rustledger::ledger::types::Error]) -> Vec<CheckRow> {
+    let mut rows: Vec<_> = errors
+        .iter()
+        .map(|e| {
+            (
+                e.code.clone(),
+                e.severity.clone(),
+                e.filename
+                    .as_ref()
+                    .map(|f| f.strip_prefix("/work/").unwrap_or(f).to_string()),
+                e.line,
+                e.column,
+                e.message.clone(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// `case`'s diagnostics as rows, the entry file named `entry_as`.
+fn expected_rows(case: &CheckParityCase, entry_as: &str) -> Vec<CheckRow> {
+    let mut rows: Vec<_> = case
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                Some(d.code.to_string()),
+                d.severity.to_string(),
+                d.file
+                    .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
+                d.line,
+                d.column,
+                d.message.to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Through the built component, `load`, `load-file`, `validate` and
+/// `validate-file` report what `rledger check` reports for the same ledger:
+/// code, severity, file, line and message of the option diagnostics (#2929)
+/// and of the validation findings of a ledger with includes (#2935).
+#[test]
+fn check_parity_through_the_component() -> Result<()> {
+    if !component_built() {
+        return Ok(());
+    }
+    for case in CHECK_PARITY_CASES {
+        let dir = tempfile::tempdir()?;
+        for (path, text) in case.files {
+            std::fs::write(dir.path().join(path), text)?;
+        }
+        let entry = format!("/work/{}", case.entry);
+        let want = expected_rows(case, case.entry);
+        let (mut store, inst) = instantiate_in(dir.path())?;
+        let ledger = inst.rustledger_ledger_ledger();
+
+        let loaded = ledger.call_load_file(&mut store, &entry, false, &[], false)?;
+        assert_eq!(
+            check_rows(&loaded.errors),
+            want,
+            "{} via load-file",
+            case.name
+        );
+        let validated = ledger.call_validate_file(&mut store, &entry)?;
+        assert_eq!(
+            check_rows(&validated.errors),
+            want,
+            "{} via validate-file",
+            case.name
+        );
+        assert!(!validated.valid, "{}", case.name);
+        assert_eq!(
+            (validated.parse_error_count, validated.validate_error_count),
+            case.counts(),
+            "{}",
+            case.name
+        );
+
+        if case.is_single_file() {
+            let source = case.entry_text();
+            let loaded = ledger.call_load(&mut store, source, "main.beancount", false)?;
+            assert_eq!(
+                check_rows(&loaded.errors),
+                expected_rows(case, "main.beancount"),
+                "{} via load",
+                case.name
+            );
+            let validated = ledger.call_validate(&mut store, source)?;
+            assert_eq!(
+                check_rows(&validated.errors),
+                expected_rows(case, "<string>"),
+                "{} via validate",
+                case.name
+            );
+            assert_eq!(
+                (validated.parse_error_count, validated.validate_error_count),
+                case.counts(),
+                "{}",
+                case.name
+            );
+        }
     }
     Ok(())
 }

@@ -306,23 +306,27 @@ fn ledger_file_id(ledger: &rustledger_loader::Ledger, canonical: &std::path::Pat
 }
 
 /// The open buffers' part of the clean view (see
-/// `MainLoopState::publish_diagnostics`): the fresh parse of every open buffer
-/// that is a ledger file AND parses cleanly. A buffer with a parse error is
-/// left out, so the file is validated as last loaded from disk. Buffers that
-/// are not part of the ledger cannot affect its validation and are dropped.
+/// `MainLoopState::publish_diagnostics`): each open ledger buffer's
+/// clean-view parse ([`crate::vfs::Document::clean_view_parse`]), keyed by its
+/// `file_id`. A buffer that has not parsed cleanly since it was opened has
+/// none and is left out, so its file is validated as the ledger loaded it.
+/// Buffers that are not part of the ledger cannot affect its validation and
+/// are dropped.
 fn clean_buffer_overlays<'a>(
     ledger: &rustledger_loader::Ledger,
     parses: &'a [(PathBuf, Arc<ParseResult>)],
-) -> Vec<(u16, &'a [Spanned<Directive>])> {
+) -> Vec<(u16, &'a ParseResult)> {
     parses
         .iter()
-        .filter(|(_, parsed)| parsed.errors.is_empty())
-        .filter_map(|(canonical, parsed)| {
-            Some((
-                ledger_file_id(ledger, canonical)?,
-                parsed.directives.as_slice(),
-            ))
-        })
+        .filter_map(|(canonical, parsed)| Some((ledger_file_id(ledger, canonical)?, &**parsed)))
+        .collect()
+}
+
+/// The directives of a view, for the single-file path, which takes them
+/// without plugins.
+fn view_directives<'a>(view: &[(u16, &'a ParseResult)]) -> Vec<(u16, &'a [Spanned<Directive>])> {
+    view.iter()
+        .map(|(fid, parsed)| (*fid, parsed.directives.as_slice()))
         .collect()
 }
 
@@ -2087,12 +2091,39 @@ impl MainLoopState {
         }
         self.send_diagnostics_to_uri(&uri, vec![]);
 
-        // The closed buffer's unsaved text leaves the clean view, so the
-        // unopened files (now including this one) are republished from the
-        // ledger as loaded from disk.
+        // The closed buffer's unsaved text leaves the clean view with it, so
+        // every other ledger file is republished from the view without it:
+        // each other open ledger buffer from its own view, which republishes
+        // the unopened files (now including this one) as well; with no other
+        // ledger buffer open, the unopened files alone.
         if in_ledger {
-            self.publish_unopened_diagnostics();
+            let others = self.open_ledger_documents();
+            if others.is_empty() {
+                self.publish_unopened_diagnostics();
+            } else {
+                for (uri, text) in others {
+                    self.publish_diagnostics(&uri, &text);
+                }
+            }
         }
+    }
+
+    /// The URI and current text of every open buffer that is a file of the
+    /// loaded ledger.
+    fn open_ledger_documents(&self) -> Vec<(Uri, String)> {
+        let vfs = self.vfs.read();
+        let ledger_state = self.ledger_state.read();
+        vfs.iter()
+            .filter(|(path, _)| ledger_state.contains_file(path))
+            .filter_map(|(path, text)| {
+                let uri = crate::path_to_uri(path)
+                    .map_err(|e| {
+                        tracing::warn!("no file URI for {}: {e}; skipping", path.display());
+                    })
+                    .ok()?;
+                Some((uri, text))
+            })
+            .collect()
     }
 
     /// Handle workspace/didChangeWatchedFiles notification.
@@ -2262,58 +2293,86 @@ impl MainLoopState {
     ///
     /// # Which text each file is validated against (#2949, #1813)
     ///
-    /// Two views of the ledger, and no state carried between passes:
+    /// Two views of the ledger. "The ledger as loaded" below is the stored
+    /// [`LedgerState`](crate::ledger_state::LedgerState) load: it is read
+    /// from disk at startup or root adoption and re-read on a watched-file
+    /// change, not on every save.
     ///
-    /// - The CLEAN view: the ledger as loaded, with every open buffer that
-    ///   parses cleanly overlaid. An open buffer with a parse error is NOT
-    ///   overlaid; the file stays as it was last loaded from disk. Every file
-    ///   other than the one being published (the unopened includes that are
-    ///   cross-published from here, and the other open buffers' own passes)
-    ///   is validated against this view.
-    /// - The OWN view of the published buffer: the clean view plus this
-    ///   buffer's text, parse error or not, and the plugins it declares. Its
-    ///   diagnostics are what `rledger check` reports for the ledger with that
-    ///   text, so a syntax error does not hide the other findings in it.
+    /// - The CLEAN view: the ledger as loaded, with each open buffer's
+    ///   clean-view parse overlaid, directives AND plugin lines: its current
+    ///   parse when that has no error, else the latest parse of it that had
+    ///   none ([`crate::vfs::Document::clean_view_parse`]). A buffer that has
+    ///   not parsed cleanly since it was opened is not overlaid, and its file
+    ///   is as loaded. Every file other than the one being published (the
+    ///   unopened includes that are cross-published from here, and the other
+    ///   open buffers' own passes) is validated against this view.
+    /// - The OWN view of the published buffer: the clean view with this
+    ///   buffer's current text in its place, parse error or not, and the
+    ///   plugins that text declares. Its diagnostics are what `rledger check`
+    ///   reports for the ledger with that text, so a syntax error does not
+    ///   hide the other findings in it. One caveat: the set of FILES is the
+    ///   one the ledger loaded, so an `include` line added, removed or
+    ///   changed in a buffer takes effect when the ledger is next loaded, and
+    ///   until then the buffer's own diagnostics can differ from `check`'s.
     ///
     /// For a buffer that parses cleanly the two views are the same, so there
     /// is ONE validation, as before. Only a broken buffer costs a second one,
     /// for its own diagnostics.
     ///
-    /// Why the clean view leaves broken buffers out: a buffer broken mid-edit
-    /// loses whatever the error swallowed (typing one `"` makes a string of
-    /// every line up to the next quote, `open`s and `plugin`s included).
-    /// Validating other files against it would put E1001s on them on that
-    /// keystroke and take them away on the next. Since the clean view does
-    /// not depend on which buffer is being published, editing a clean buffer
-    /// while another is broken cannot publish them either, and nothing has to
-    /// be held back: every file gets its diagnostics on every pass. A file
-    /// SAVED broken is in the ledger as loaded with its parse error, so its
-    /// includes are validated as `rledger check` validates them. Closing a
-    /// buffer republishes the unopened files from the view without it
-    /// ([`Self::publish_unopened_diagnostics`]).
+    /// Why the clean view keeps a broken buffer's last clean parse, not its
+    /// text: a buffer broken mid-edit loses whatever the error swallowed
+    /// (typing one `"` makes a string of every line up to the next quote,
+    /// `open`s and `plugin`s included). Validating other files against it
+    /// would put E1001s on them on that keystroke and take them away on the
+    /// next. Falling back to the ledger as loaded instead would undo the
+    /// buffer's unsaved clean edits for the other files on that keystroke,
+    /// which flips them just the same. The clean view does not depend on
+    /// which buffer is being published, so every file gets its diagnostics on
+    /// every pass and a revalidation publishes each file the same way however
+    /// many buffers it publishes. A file SAVED broken is in the ledger as
+    /// loaded with its parse error, so its includes are validated as `rledger
+    /// check` validates them. Closing a buffer drops its clean-view parse,
+    /// and every other ledger file is republished from the view without it
+    /// (see `on_did_close`).
     fn publish_diagnostics(&mut self, uri: &Uri, text: &str) {
         self.diagnostics_passes += 1;
         // Every caller passes the document's current text, so this pass
         // settles any debounced one still pending for the same file. Covers
         // `didOpen`, root adoption and watched-file revalidation, which all
         // publish at once and would otherwise be followed by a redundant pass.
-        if let Ok(path) = uri_to_path(uri) {
-            self.diagnostics_schedule.cancel(&path);
+        let path = uri_to_path(uri).ok();
+        if let Some(path) = &path {
+            self.diagnostics_schedule.cancel(path);
         }
 
-        // Parse the current document.
-        let result = parse(text);
+        // Parse the current document, through the VFS when it holds this
+        // text, which also records a clean parse as the buffer's clean-view
+        // parse. `current_clean` is that parse: this buffer's part of the
+        // clean view.
+        let (result, current_clean): (Arc<ParseResult>, Option<Arc<ParseResult>>) = {
+            let mut vfs = self.vfs.write();
+            match path
+                .as_ref()
+                .and_then(|path| vfs.get_mut(path.as_path()))
+                .filter(|doc| doc.text() == text)
+            {
+                Some(doc) => (doc.parse_result(), doc.clean_view_parse()),
+                None => {
+                    let parsed = Arc::new(parse(text));
+                    let clean = parsed.errors.is_empty().then(|| Arc::clone(&parsed));
+                    (parsed, clean)
+                }
+            }
+        };
         let current_is_clean = result.errors.is_empty();
 
         // Canonicalize the current URI's path so we can both skip it when
         // collecting "other" buffer overlays and look up its file_id in
         // the ledger source map.
-        let current_canonical_path = uri_to_path(uri)
-            .ok()
-            .and_then(|p| p.canonical_for_loader_lookup());
+        let current_canonical_path = path.as_ref().and_then(|p| p.canonical_for_loader_lookup());
 
-        // Fresh parses for every OTHER open buffer, before the ledger-state
-        // read lock is taken (see `open_buffer_parses`).
+        // Clean-view parses for every OTHER open buffer, before the
+        // ledger-state read lock is taken (see `open_buffer_parses`).
         let other_buffer_parses = self.open_buffer_parses(current_canonical_path.as_deref());
 
         // Get ledger state and the current file's file_id.
@@ -2328,7 +2387,7 @@ impl MainLoopState {
         };
 
         // The other open buffers' part of the clean view.
-        let other_buffer_overlays: Vec<(u16, &[Spanned<Directive>])> = ledger_state
+        let other_buffer_overlays: Vec<(u16, &ParseResult)> = ledger_state
             .and_then(crate::ledger_state::LedgerState::ledger)
             .map(|ledger| clean_buffer_overlays(ledger, &other_buffer_parses))
             .unwrap_or_default();
@@ -2343,16 +2402,19 @@ impl MainLoopState {
 
         let (diagnostics, cross_file) = if is_multi_file {
             let ledger_state = ledger_state.expect("is_multi_file implies a loaded ledger");
-            // The clean view: this buffer is part of it only when it is a
-            // ledger file that parses cleanly.
-            let clean_file_id = current_file_id.filter(|_| current_is_clean);
-            let mut clean_view: Vec<(u16, &[Spanned<Directive>])> =
+            // The clean view: this buffer's clean-view parse, if it is a
+            // ledger file and has one, plus the other buffers'.
+            let mut clean_view: Vec<(u16, &ParseResult)> =
                 Vec::with_capacity(1 + other_buffer_overlays.len());
-            if let Some(fid) = clean_file_id {
-                clean_view.push((fid, result.directives.as_slice()));
+            if let (Some(fid), Some(clean)) = (current_file_id, current_clean.as_deref()) {
+                clean_view.push((fid, clean));
             }
             clean_view.extend_from_slice(&other_buffer_overlays);
 
+            // This buffer is a target of the clean view's validation only
+            // when its current text parses cleanly: then the clean view IS
+            // its own view.
+            let clean_file_id = current_file_id.filter(|_| current_is_clean);
             let (current_from_multi, cross) = self.multi_file_diagnostics(
                 ledger_state,
                 current_canonical_path.as_deref(),
@@ -2365,10 +2427,12 @@ impl MainLoopState {
                 // Clean: its own view IS the clean view, so its diagnostics
                 // came from the one validation above.
                 Some(_) if current_is_clean => current_from_multi,
-                // Broken: a second validation, of its own view.
+                // Broken: a second validation, of its own view, in which its
+                // current text replaces its clean-view parse.
                 Some(fid) => {
                     let mut own_view = clean_view;
-                    own_view.push((fid, result.directives.as_slice()));
+                    own_view.retain(|(f, _)| *f != fid);
+                    own_view.push((fid, &*result));
                     let target = crate::handlers::diagnostics::FileDiagTarget {
                         file_id: fid,
                         source: text,
@@ -2376,8 +2440,6 @@ impl MainLoopState {
                     };
                     crate::handlers::diagnostics::ledger_diagnostics_multi(
                         ledger_state,
-                        Some(fid),
-                        &result,
                         &own_view,
                         &[target],
                         self.position_encoding,
@@ -2395,7 +2457,7 @@ impl MainLoopState {
                     Some(ledger_state),
                     None,
                     current_canonical_path.as_deref(),
-                    &other_buffer_overlays,
+                    &view_directives(&other_buffer_overlays),
                     self.position_encoding,
                 ),
             };
@@ -2409,7 +2471,7 @@ impl MainLoopState {
                 ledger_state,
                 current_file_id,
                 current_canonical_path.as_deref(),
-                &other_buffer_overlays,
+                &view_directives(&other_buffer_overlays),
                 self.position_encoding,
             );
             (diagnostics, Vec::new())
@@ -2424,7 +2486,7 @@ impl MainLoopState {
         );
 
         // Cache under the path, send to the URI the client gave us.
-        if let Ok(path) = uri_to_path(uri) {
+        if let Some(path) = path {
             self.diagnostics.insert(path, diagnostics.clone());
         }
         self.send_diagnostics_to_uri(uri, diagnostics);
@@ -2435,8 +2497,9 @@ impl MainLoopState {
 
     /// Republish the unopened files of a multi-file ledger from the clean
     /// view (see [`Self::publish_diagnostics`]), with no buffer being
-    /// published. For `didClose`: the closed buffer's unsaved text, if it was
-    /// in the clean view, no longer is, and the file is now unopened itself.
+    /// published. For a `didClose` that leaves no other ledger buffer open:
+    /// the closed buffer's unsaved text, if it was in the clean view, no
+    /// longer is, and the file is now unopened itself.
     fn publish_unopened_diagnostics(&mut self) {
         let parses = self.open_buffer_parses(None);
         let ledger_guard = self.ledger_state.read();
@@ -2454,8 +2517,9 @@ impl MainLoopState {
         self.publish_cross_file_diagnostics(cross);
     }
 
-    /// Fresh parses of every open buffer except `skip`, keyed by canonical
-    /// path, through the VFS's parse cache. Taken before the ledger-state read
+    /// The clean-view parse of every open buffer except `skip` (see
+    /// [`crate::vfs::Document::clean_view_parse`]; a buffer with none is
+    /// left out), keyed by canonical path, through the VFS's parse cache. Taken before the ledger-state read
     /// lock so the VFS write lock (needed by the cache-aware iterator) is
     /// released before the `file_id` lookups. The `Arc`s own the directives
     /// handed to validation as overlays.
@@ -2464,8 +2528,8 @@ impl MainLoopState {
         skip: Option<&std::path::Path>,
     ) -> Vec<(PathBuf, Arc<ParseResult>)> {
         let mut vfs = self.vfs.write();
-        vfs.iter_with_parse()
-            .filter_map(|(path, _text, parsed)| {
+        vfs.iter_clean_view_parses()
+            .filter_map(|(path, parsed)| {
                 let canonical = path.canonicalize().ok()?;
                 if Some(canonical.as_path()) == skip {
                     return None;
@@ -2498,7 +2562,7 @@ impl MainLoopState {
         current_file_id: Option<u16>,
         current_parse: &ParseResult,
         current_source: &str,
-        overlay: &[(u16, &[Spanned<Directive>])],
+        overlay: &[(u16, &ParseResult)],
     ) -> (
         Vec<lsp_types::Diagnostic>,
         Vec<(AbsPathBuf, Vec<lsp_types::Diagnostic>)>,
@@ -2591,8 +2655,6 @@ impl MainLoopState {
 
         let mut per_file = crate::handlers::diagnostics::ledger_diagnostics_multi(
             ledger_state,
-            current_file_id,
-            current_parse,
             overlay,
             &targets,
             self.position_encoding,
@@ -3804,8 +3866,8 @@ mod tests {
     /// and with the `open`s a typed `"` swallowed, it reports exactly what
     /// `check` reports for main on that text.
     ///
-    /// The unopened file is validated against main as loaded, not the broken
-    /// buffer (#1813): its diagnostics stay its own on every pass, where
+    /// The unopened file is validated against main's last clean text (here
+    /// the text as loaded), not the broken buffer (#1813): its diagnostics stay its own on every pass, where
     /// validating it against the broken text would put E1001s on it on one
     /// keystroke and take them away on the next.
     #[test]
@@ -3919,8 +3981,8 @@ mod tests {
     /// A broken buffer changes nothing published for other files, whichever
     /// buffer is edited (#1813). Main is broken by a typed `"` that swallows
     /// the `open`s b uses; editing another, clean, open buffer (c) republishes
-    /// b against main as loaded, not against the broken buffer. Closing main
-    /// republishes b from disk.
+    /// b against main's last clean text (here the text as loaded), not
+    /// against the broken buffer. Closing main republishes b from disk.
     #[test]
     fn editing_a_clean_buffer_while_another_is_broken_does_not_flap() {
         let main_text = format!("include \"c.beancount\"\n{MAIN_ON_DISK}");
@@ -3952,7 +4014,7 @@ mod tests {
         assert_eq!(
             last_published_for(&published, &b),
             b_own(),
-            "b is validated against main as loaded, not its broken buffer: {published:?}"
+            "b is validated against main's last clean text, not its broken buffer: {published:?}"
         );
 
         close_doc(&mut state, &main);
@@ -4097,5 +4159,266 @@ mod tests {
             Some(vec![("E1001".to_string(), 2)]),
             "{published:?}"
         );
+    }
+
+    /// What the client shows for `path` after `published`: the last set
+    /// sent, or `before` if none was. The cross-file publisher sends an
+    /// unopened file's set only when it is non-empty or clears a non-empty
+    /// one, so a file that stays clean is not sent anything.
+    fn shown_for(
+        published: &[(String, Vec<(String, u32)>)],
+        path: &std::path::Path,
+        before: Vec<(String, u32)>,
+    ) -> Vec<(String, u32)> {
+        last_published_for(published, path).unwrap_or(before)
+    }
+
+    /// Review round 3 of #2949: while a buffer is broken, the clean view
+    /// keeps its LAST CLEAN text, not the ledger as loaded. Main's unsaved
+    /// clean edit opens `Assets:Q`, which clears b's own error; typing an
+    /// unterminated `"` at the end (it swallows nothing) must not undo that
+    /// edit for b, and closing the quote leaves b clean too.
+    #[test]
+    fn a_broken_buffer_keeps_its_last_clean_text_in_the_clean_view() {
+        let (_tmp, main, b) = ledger_dir(MAIN_ON_DISK);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, MAIN_ON_DISK);
+        let published = drain_published(&receiver);
+        assert_eq!(last_published_for(&published, &b), b_own(), "{published:?}");
+
+        let with_q = format!("{MAIN_ON_DISK}2024-01-01 open Assets:Q\n");
+        change_doc(&mut state, &main, 2, &with_q);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            Some(vec![]),
+            "the buffer's open clears b's error: {published:?}"
+        );
+
+        change_doc(
+            &mut state,
+            &main,
+            3,
+            &format!("{with_q}2024-01-06 * \"typing"),
+        );
+        let published = drain_published(&receiver);
+        let main_codes = last_published_for(&published, &main).expect("main published");
+        assert!(
+            main_codes.iter().any(|(c, _)| c.starts_with('P')),
+            "main is broken: {main_codes:?}"
+        );
+        assert_eq!(
+            shown_for(&published, &b, vec![]),
+            vec![],
+            "b is validated against main's last clean text, not as loaded: {published:?}"
+        );
+
+        change_doc(
+            &mut state,
+            &main,
+            4,
+            &format!("{with_q}2024-01-06 * \"typing\"\n"),
+        );
+        let published = drain_published(&receiver);
+        assert_eq!(last_published_for(&published, &main), Some(vec![]));
+        assert_eq!(shown_for(&published, &b, vec![]), vec![], "{published:?}");
+    }
+
+    /// A ledger whose main includes `b` (which uses two accounts it never
+    /// opens, so each is an E1001 on its line 0 unless `auto_accounts` is
+    /// declared) and `c`; main and c are open.
+    fn plugin_ledger() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        let c = dir.join("c.beancount");
+        std::fs::write(&main, PLUGIN_MAIN_ON_DISK).expect("write main");
+        std::fs::write(
+            &b,
+            "2024-01-02 * \"x\"\n  Assets:New  10 USD\n  Equity:New  -10 USD\n",
+        )
+        .expect("write b");
+        std::fs::write(&c, "2024-01-01 open Assets:C\n").expect("write c");
+        (tmp, main, b, c)
+    }
+
+    const PLUGIN_MAIN_ON_DISK: &str = "include \"b.beancount\"\ninclude \"c.beancount\"\n";
+
+    fn b_unopened_twice() -> Option<Vec<(String, u32)>> {
+        Some(vec![("E1001".to_string(), 0), ("E1001".to_string(), 0)])
+    }
+
+    /// Review round 3 of #2949: the clean view's plugins are those of every
+    /// buffer in it, not only of the buffer being published. Main's unsaved
+    /// `plugin "auto_accounts"` opens b's accounts whichever open buffer's
+    /// pass publishes b, and until main itself is closed.
+    #[test]
+    fn the_clean_view_takes_every_clean_buffers_plugins() {
+        let (_tmp, main, b, c) = plugin_ledger();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, PLUGIN_MAIN_ON_DISK);
+        open_doc(&mut state, &c, "2024-01-01 open Assets:C\n");
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_unopened_twice(),
+            "{published:?}"
+        );
+
+        change_doc(
+            &mut state,
+            &main,
+            2,
+            &format!("plugin \"auto_accounts\"\n{PLUGIN_MAIN_ON_DISK}"),
+        );
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            Some(vec![]),
+            "main's unsaved plugin opens b's accounts: {published:?}"
+        );
+
+        change_doc(
+            &mut state,
+            &c,
+            2,
+            "2024-01-01 open Assets:C\n2024-01-01 open Assets:D\n",
+        );
+        let published = drain_published(&receiver);
+        assert_eq!(
+            shown_for(&published, &b, vec![]),
+            vec![],
+            "editing c publishes b with main's plugin too: {published:?}"
+        );
+
+        close_doc(&mut state, &c);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            shown_for(&published, &b, vec![]),
+            vec![],
+            "closing c keeps main's plugin: {published:?}"
+        );
+
+        close_doc(&mut state, &main);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_unopened_twice(),
+            "closing main unsaved drops its plugin: {published:?}"
+        );
+    }
+
+    /// One revalidation publishes the unopened file once per open buffer,
+    /// and every one of those publishes must say the same thing: the clean
+    /// view does not depend on which buffer's pass computed it. b is
+    /// unbalanced here, so it has an error with or without main's plugin and
+    /// every pass sends it.
+    #[test]
+    fn a_revalidation_publishes_each_file_the_same_way_every_time() {
+        let (_tmp, main, b, c) = plugin_ledger();
+        std::fs::write(
+            &b,
+            "2024-01-02 * \"x\"\n  Assets:New  10 USD\n  Equity:New  -9 USD\n",
+        )
+        .expect("write b");
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, PLUGIN_MAIN_ON_DISK);
+        open_doc(&mut state, &c, "2024-01-01 open Assets:C\n");
+        change_doc(
+            &mut state,
+            &main,
+            2,
+            &format!("plugin \"auto_accounts\"\n{PLUGIN_MAIN_ON_DISK}"),
+        );
+        drain_published(&receiver);
+
+        state.revalidate_open_documents();
+        let published = drain_published(&receiver);
+        let b_uri = crate::path_to_uri(&b).expect("file URI");
+        let for_b: Vec<&Vec<(String, u32)>> = published
+            .iter()
+            .filter(|(u, _)| u.as_str() == b_uri.as_str()) // ratchet-allow: uri-string-eq comparing what was sent on the wire
+            .map(|(_, codes)| codes)
+            .collect();
+        assert!(
+            for_b.len() >= 2,
+            "b is published by both buffers' passes: {published:?}"
+        );
+        assert!(
+            for_b.iter().all(|codes| *codes == for_b[0]),
+            "every publish of b agrees: {published:?}"
+        );
+        assert!(
+            !for_b[0].iter().any(|(code, _)| code == "E1001"),
+            "with main's plugin: {published:?}"
+        );
+    }
+
+    /// Closing a buffer republishes the OTHER open ledger buffers too: b's
+    /// buffer was validated against main's unsaved `open Assets:Q`, and once
+    /// main is closed unsaved, b's own error is back without b being edited.
+    #[test]
+    fn closing_a_buffer_republishes_the_other_open_buffers() {
+        let (_tmp, main, b) = ledger_dir(MAIN_ON_DISK);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, MAIN_ON_DISK);
+        open_doc(&mut state, &b, B_TEXT);
+        change_doc(
+            &mut state,
+            &main,
+            2,
+            &format!("{MAIN_ON_DISK}2024-01-01 open Assets:Q\n"),
+        );
+        change_doc(&mut state, &b, 2, B_TEXT);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            Some(vec![]),
+            "{published:?}"
+        );
+
+        close_doc(&mut state, &main);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_own(),
+            "the open buffer b is republished without main's unsaved text: {published:?}"
+        );
+    }
+
+    /// The clean view costs nothing extra: a pass for a clean buffer is ONE
+    /// whole-ledger validation, other buffers open or not; only a broken
+    /// buffer costs a second one, for its own view, whether or not it has a
+    /// last clean parse.
+    #[test]
+    fn a_clean_pass_is_one_validation_and_a_broken_one_two() {
+        let main_text = format!("include \"c.beancount\"\n{MAIN_ON_DISK}");
+        let (_tmp, main, _b) = ledger_dir(&main_text);
+        let c = main.with_file_name("c.beancount");
+        std::fs::write(&c, "2024-01-01 open Assets:C\n").expect("write c");
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        let runs =
+            || crate::handlers::diagnostics::LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
+
+        let before = runs();
+        open_doc(&mut state, &main, &main_text);
+        open_doc(&mut state, &c, "2024-01-01 open Assets:C\n");
+        change_doc(&mut state, &main, 2, &format!("{main_text}; edit\n"));
+        assert_eq!(runs() - before, 3, "three clean passes");
+
+        let before = runs();
+        change_doc(&mut state, &main, 3, &format!("{main_text}garbage\n"));
+        assert_eq!(runs() - before, 2, "broken with a last clean parse");
+
+        let before = runs();
+        open_doc(&mut state, &c, "garbage\n");
+        assert_eq!(runs() - before, 2, "broken without one");
+        drain_published(&receiver);
     }
 }

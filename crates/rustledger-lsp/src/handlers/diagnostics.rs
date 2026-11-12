@@ -1179,6 +1179,37 @@ pub(crate) struct FileDiagTarget<'a> {
     pub parse: &'a ParseResult,
 }
 
+/// The plugins of a view (see [`ledger_diagnostics_multi`]): `stored`, with
+/// every file in `view` declaring its parse's plugins instead of its stored
+/// ones. A replaced file's plugins take the place of its first stored one, so
+/// declaration order is kept; those of a file that had none are appended.
+fn view_plugins(stored: &[Plugin], view: &[(u16, &ParseResult)]) -> Vec<Plugin> {
+    let fresh_for = |fid: usize| {
+        view.iter()
+            .find(|(f, _)| usize::from(*f) == fid)
+            .map(|(_, parsed)| parse_result_to_plugins(&parsed.plugins, fid))
+    };
+    let mut emitted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(stored.len());
+    for plugin in stored {
+        match fresh_for(plugin.file_id) {
+            Some(fresh) => {
+                if emitted.insert(plugin.file_id) {
+                    merged.extend(fresh);
+                }
+            }
+            None => merged.push(plugin.clone()),
+        }
+    }
+    for (fid, parsed) in view {
+        let fid = usize::from(*fid);
+        if emitted.insert(fid) {
+            merged.extend(parse_result_to_plugins(&parsed.plugins, fid));
+        }
+    }
+    merged
+}
+
 /// Compute diagnostics for MANY ledger files from a SINGLE whole-ledger
 /// book + validate — the fix for #1799.
 ///
@@ -1198,21 +1229,19 @@ pub(crate) struct FileDiagTarget<'a> {
 /// main file) option warnings, and per-file import-review hints. The result is
 /// aligned 1:1 with `targets`.
 ///
-/// `overlay` is the fresh parse of the open buffers to validate with, applied
-/// to the ledger snapshot so unsaved edits are reflected; which buffers belong
-/// in it is the caller's rule (`MainLoopState::publish_diagnostics`).
-/// `primary_parse` / `primary_file_id` identify the file being edited, whose
-/// fresh plugin declarations replace the ledger's for that file (mirrors the
-/// single-file path); unopened files are not edited, so their ledger plugins
-/// are already current.
+/// `view` is the parse to validate each overlaid file with, applied to the
+/// ledger snapshot so unsaved edits are reflected; which parse belongs in it
+/// for which file is the caller's rule (`MainLoopState::publish_diagnostics`).
+/// A file in `view` contributes BOTH its directives and its plugin
+/// declarations, which replace the ledger's for that file; every other file
+/// keeps what the ledger loaded. So the result depends on the view alone, not
+/// on which of its files is being published (#2949).
 ///
 /// Requires a loaded ledger; falls back to parse-only diagnostics otherwise
 /// (the caller only uses this path for multi-file ledgers).
 pub(crate) fn ledger_diagnostics_multi(
     ledger_state: &LedgerState,
-    primary_file_id: Option<u16>,
-    primary_parse: &ParseResult,
-    overlay: &[(u16, &[Spanned<Directive>])],
+    view: &[(u16, &ParseResult)],
     targets: &[FileDiagTarget<'_>],
     encoding: PositionEncoding,
 ) -> Vec<Vec<Diagnostic>> {
@@ -1224,28 +1253,17 @@ pub(crate) fn ledger_diagnostics_multi(
     };
 
     // Plugin set for the shared validation and the per-file plugin NOTES
-    // (E8006). Start from the ledger's stored plugins, and replace the
-    // primary (edited) file's plugins with its fresh parse, parse error or
-    // not: a buffer's own diagnostics are what `rledger check` reports for its
-    // text, plugins included (#2949). The caller passes a primary only when
-    // its parse belongs in this validation: a buffer with a parse error is
-    // left out of the view the OTHER files are validated against (#1813), so
-    // what it recovered (an unterminated `plugin "auto_acc` swallows the next
-    // line into the plugin name) never reaches them. See
-    // `MainLoopState::publish_diagnostics`.
-    let merged_plugins: Vec<Plugin> = match primary_file_id {
-        Some(fid) => {
-            let primary_fid = fid as usize;
-            ledger
-                .plugins
-                .iter()
-                .filter(|p| p.file_id != primary_fid)
-                .cloned()
-                .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
-                .collect()
-        }
-        None => ledger.plugins.clone(),
-    };
+    // (E8006): the ledger's stored plugins, with each file in the view
+    // declaring the plugins of ITS parse instead. Which parse that is per file
+    // (and so whether a broken buffer's recovered plugin lines, such as an
+    // unterminated `plugin "auto_acc` swallowing the next line, ever reach
+    // another file, #1813) is the caller's rule, the same one as for the
+    // directives. See `MainLoopState::publish_diagnostics`.
+    let merged_plugins = view_plugins(&ledger.plugins, view);
+    let overlay: Vec<(u16, &[Spanned<Directive>])> = view
+        .iter()
+        .map(|(fid, parsed)| (*fid, parsed.directives.as_slice()))
+        .collect();
     let plugin_ctx = if merged_plugins.is_empty() {
         None
     } else {
@@ -1267,7 +1285,7 @@ pub(crate) fn ledger_diagnostics_multi(
         // Raw, not processed, as in `all_diagnostics` (#2654).
         let full_directives_raw = ledger_state.raw_directives();
         let booked_directives: Vec<Spanned<Directive>> =
-            if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
+            if let Some(owned) = build_live_directive_overlay(&overlay, full_directives_raw) {
                 owned
             } else if let Some(full) = full_directives_raw {
                 full.to_vec()
@@ -1352,6 +1370,35 @@ pub(crate) fn ledger_diagnostics_multi(
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// A view's plugins: each file in the view declares its parse's plugins
+    /// in place of its stored ones, at the position of its first stored one;
+    /// files outside the view keep theirs; a view file that had none stored
+    /// has its plugins appended.
+    #[test]
+    fn test_view_plugins_replaces_each_view_files_plugins_in_place() {
+        let stored = parse_result_to_plugins(&parse("plugin \"a\"\nplugin \"b\"\n").plugins, 0)
+            .into_iter()
+            .chain(parse_result_to_plugins(&parse("plugin \"x\"\n").plugins, 1))
+            .collect::<Vec<_>>();
+        let main = parse("plugin \"m\"\n");
+        let c = parse("plugin \"c\"\n");
+        let names = |plugins: Vec<Plugin>| {
+            plugins
+                .into_iter()
+                .map(|p| (p.name, p.file_id))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(view_plugins(&stored, &[])),
+            [("a".into(), 0), ("b".into(), 0), ("x".into(), 1)]
+        );
+        assert_eq!(
+            names(view_plugins(&stored, &[(2, &c), (0, &main)])),
+            [("m".into(), 0), ("x".into(), 1), ("c".into(), 2)]
+        );
+    }
 
     /// #1648: the multi-file path must apply the ledger's `inferred_tolerance_default`,
     /// not just `name_*` — otherwise the LSP reports residual errors `check` does not.
@@ -2934,14 +2981,7 @@ plugin "auto_accounts"
             })
             .collect();
 
-        let per_file = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &parses[0],
-            &[],
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let per_file = ledger_diagnostics_multi(&ls, &[], &targets, PositionEncoding::Utf16);
 
         let severity_of = |code: &str| {
             per_file
@@ -3025,14 +3065,7 @@ plugin "auto_accounts"
         // Measure validation runs on THIS thread across the call (thread-local
         // counter, so parallel tests don't interfere).
         let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
-        let per_file = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &parses[0],
-            &[],
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let per_file = ledger_diagnostics_multi(&ls, &[], &targets, PositionEncoding::Utf16);
         let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
 
         assert_eq!(
@@ -3069,14 +3102,7 @@ plugin "auto_accounts"
             })
             .collect();
         let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
-        let _ = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &bad_parse,
-            &[],
-            &bad_targets,
-            PositionEncoding::Utf16,
-        );
+        let _ = ledger_diagnostics_multi(&ls, &[], &bad_targets, PositionEncoding::Utf16);
         let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
         assert_eq!(
             after - before,
@@ -3121,12 +3147,9 @@ plugin "auto_accounts"
             source: main_source,
             parse: &main_parse,
         }];
-        let overlay = [(0u16, main_parse.directives.as_slice())];
         let per_file = ledger_diagnostics_multi(
             &ls,
-            Some(0),
-            &main_parse,
-            &overlay,
+            &[(0u16, &main_parse)],
             &targets,
             PositionEncoding::Utf16,
         );
@@ -3454,14 +3477,9 @@ plugin "auto_accounts"
     type Located = (String, String, u32);
 
     /// `(code, file, line)` of every diagnostic the multi-file path gives
-    /// for the journal `files[0]` includes, with the files at `open` open
-    /// and the one at `primary` the current buffer; and the same of what
-    /// the loader (`rledger check`) reports.
-    fn multi_file_vs_check(
-        files: &[(&str, &str)],
-        primary: usize,
-        open: &[usize],
-    ) -> (Vec<Located>, Vec<Located>) {
+    /// for the journal `files[0]` includes, with the files at `open` open;
+    /// and the same of what the loader (`rledger check`) reports.
+    fn multi_file_vs_check(files: &[(&str, &str)], open: &[usize]) -> (Vec<Located>, Vec<Located>) {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in files {
             std::fs::write(dir.path().join(name), text).unwrap();
@@ -3501,18 +3519,10 @@ plugin "auto_accounts"
                 parse,
             })
             .collect();
-        let overlay: Vec<(u16, &[Spanned<Directive>])> = open
-            .iter()
-            .map(|&i| (sources[i].0, parses[i].directives.as_slice()))
-            .collect();
-        let per_file = ledger_diagnostics_multi(
-            &state,
-            Some(sources[primary].0),
-            &parses[primary],
-            &overlay,
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let overlay: Vec<(u16, &ParseResult)> =
+            open.iter().map(|&i| (sources[i].0, &parses[i])).collect();
+        let per_file =
+            ledger_diagnostics_multi(&state, &overlay, &targets, PositionEncoding::Utf16);
         let mut lsp: Vec<Located> = per_file
             .iter()
             .enumerate()
@@ -3547,7 +3557,7 @@ plugin "auto_accounts"
                  Expenses:Yyyyyyyyyyyy\n",
             ),
         ];
-        let (lsp, check) = multi_file_vs_check(&files, 0, &[0, 1]);
+        let (lsp, check) = multi_file_vs_check(&files, &[0, 1]);
         assert_eq!(lsp, check);
     }
 
@@ -3569,7 +3579,7 @@ plugin "auto_accounts"
                 "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD}\n  Assets:Cash\n",
             ),
         ];
-        let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
+        let (lsp, check) = multi_file_vs_check(&files, &[0]);
         assert!(!check.is_empty(), "check refuses the sale");
         assert_eq!(lsp, check);
     }
@@ -3956,9 +3966,7 @@ plugin "auto_accounts"
         }];
         let _ = ledger_diagnostics_multi(
             &state,
-            Some(main_fid),
-            &main_parse,
-            &[(main_fid, main_parse.directives.as_slice())],
+            &[(main_fid, &main_parse)],
             &targets,
             PositionEncoding::Utf16,
         );

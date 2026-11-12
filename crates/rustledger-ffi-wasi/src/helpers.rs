@@ -563,8 +563,8 @@ fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
     ledger.query_refusal().map(|refusal| {
         debug_assert!(refusal.blocks_queries());
         // Not "parse" on the wire, though options are read at parse time:
-        // a parse-phase error there stops semantic validation, and the
-        // ledger parsed.
+        // the ledger parsed, and a "parse" error here would be counted in
+        // `validate`'s `parse-error-count` as a syntax error.
         ledger_error_to_ffi(&refusal).validate_phase()
     })
 }
@@ -573,9 +573,11 @@ fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
 /// canonical `process::load` pipeline) into the FFI wire [`Error`], preserving
 /// the message and source line. The wire `Error` distinguishes only two phases:
 /// `"parse"`-phase errors keep the default `"parse"`; every other phase
-/// (`"validate"`, `"plugin"`) maps to `"validate"`. The `ledger.validate`/
-/// `query` handlers gate semantic validation on parse-phase errors only, so
-/// non-parse diagnostics must not be reported as `"parse"`.
+/// (`"validate"`, `"plugin"`) maps to `"validate"`. No phase stops semantic
+/// validation any more (#2949), but `ledger.validate` counts `"parse"` errors
+/// as its `parse-error-count`, so non-parse diagnostics must not be reported
+/// as `"parse"`. (Whether an error blocks queries is carried separately, in
+/// [`LoadResult::error_blocks_queries`].)
 fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     let mut err = Error::new(e.message.clone());
     if let Some(loc) = &e.location {

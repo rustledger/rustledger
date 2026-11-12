@@ -20,6 +20,12 @@ pub struct Document {
     version: i32,
     /// Cached parse result (lazily computed, invalidated on change).
     parse_cache: Option<Arc<ParseResult>>,
+    /// The latest parse of this buffer that had no parse error, if it has had
+    /// one since it was opened. Kept across edits (unlike `parse_cache`) and
+    /// dropped with the document on close: it is what the buffer contributes
+    /// to the view other files are validated against while its current text
+    /// is broken (see `MainLoopState::publish_diagnostics`).
+    last_clean_parse: Option<Arc<ParseResult>>,
 }
 
 impl Document {
@@ -29,6 +35,7 @@ impl Document {
             content: Rope::from_str(&content),
             version,
             parse_cache: None,
+            last_clean_parse: None,
         }
     }
 
@@ -46,9 +53,25 @@ impl Document {
     pub fn parse_result(&mut self) -> Arc<ParseResult> {
         if self.parse_cache.is_none() {
             let text = self.content.to_string();
-            self.parse_cache = Some(Arc::new(parse(&text)));
+            let parsed = Arc::new(parse(&text));
+            if parsed.errors.is_empty() {
+                self.last_clean_parse = Some(Arc::clone(&parsed));
+            }
+            self.parse_cache = Some(parsed);
         }
         self.parse_cache.clone().unwrap()
+    }
+
+    /// What this buffer contributes to the clean view: its current parse if
+    /// that has no error, else the latest one that had none, else `None` (the
+    /// buffer has not parsed cleanly since it was opened).
+    pub fn clean_view_parse(&mut self) -> Option<Arc<ParseResult>> {
+        let current = self.parse_result();
+        if current.errors.is_empty() {
+            Some(current)
+        } else {
+            self.last_clean_parse.clone()
+        }
     }
 
     /// Invalidate the parse cache (called on content change).
@@ -129,6 +152,14 @@ impl Vfs {
         self.documents.iter().map(|(path, doc)| (path, doc.text()))
     }
 
+    /// Every open document that has a clean-view parse (see
+    /// `Document::clean_view_parse`), with that parse.
+    pub fn iter_clean_view_parses(&mut self) -> impl Iterator<Item = (&PathBuf, Arc<ParseResult>)> {
+        self.documents
+            .iter_mut()
+            .filter_map(|(path, doc)| Some((path, doc.clean_view_parse()?)))
+    }
+
     /// Iterate over all open documents with parse results.
     pub fn iter_with_parse(
         &mut self,
@@ -161,5 +192,40 @@ mod tests {
     fn test_document_text() {
         let doc = Document::new("hello world".to_string(), 1);
         assert_eq!(doc.text(), "hello world");
+    }
+
+    #[test]
+    fn test_clean_view_parse_keeps_the_last_clean_parse_until_close() {
+        let mut vfs = Vfs::new();
+        let path = PathBuf::from("/test.beancount");
+        let clean_view = |vfs: &mut Vfs| {
+            vfs.get_mut(&path)
+                .and_then(Document::clean_view_parse)
+                .map(|p| p.directives.len())
+        };
+
+        // Broken since open: nothing to contribute.
+        vfs.open(path.clone(), "garbage\n".to_string(), 1);
+        assert_eq!(clean_view(&mut vfs), None);
+
+        vfs.update(&path, "2024-01-01 open Assets:A\n".to_string(), 2);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // Broken again: the last clean parse stands in for it.
+        vfs.update(&path, "2024-01-01 open Assets:A\ngarbage\n".to_string(), 3);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // A newer clean parse replaces it.
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n".to_string(),
+            4,
+        );
+        assert_eq!(clean_view(&mut vfs), Some(2));
+
+        // Closing drops it with the document.
+        vfs.close(&path);
+        vfs.open(path.clone(), "garbage\n".to_string(), 5);
+        assert_eq!(clean_view(&mut vfs), None);
     }
 }

@@ -736,7 +736,9 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     is no longer scanned, so the `document` entries found under it are
 ///     gone. A v69 blob of a ledger whose include sets an existing
 ///     `documents` root would keep serving those entries with no `E7009`.
-///     (v70 and v72 were held by #2931 and never released.)
+///     (v70 and v72 were held by #2931 and never released: it changes the
+///     parser's output only for an input with a parse error, which no cache
+///     blob is saved for, so it needs no loader version.)
 ///
 /// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An invalid
 ///     token after a lone header string moves it to no other field:
@@ -747,20 +749,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     convention that a parser output change bumps both caches, which
 ///     `rustledger-wasm` pins.
 ///
-/// v74: PARSER OUTPUT changed, no archived layout moved (#2931, for #2928).
-///     A mid-file BOM in the middle of a line starts an invalid token that
-///     runs to the next blank, as in beancount, so a `"` after it opens no
-///     string and a `#!` or `#+` after it is no token of its own; only a BOM
-///     that starts its line keeps its own extent. An older blob would keep
-///     serving such a file with its old errors and values (the narration a
-///     quote after a BOM opened).
-///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 74;
+pub const CACHE_VERSION: u32 = 73;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1643,9 +1637,7 @@ mod tests {
         // archived encoding moves, so the arrays still hold.
         // v73 (#2932) keeps a header string in its own field; no `CostNumber`
         // encoding moves, so the arrays still hold.
-        // v74 (#2931) runs a mid-line BOM to the next blank; no archived
-        // encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 74;
+        const FIXTURE_VERSION: u32 = 73;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1802,9 +1794,7 @@ mod tests {
         // archived layout moves, so the hash below is unchanged.
         // v73 (#2932) keeps a header string in its own field; the hash below
         // is unchanged.
-        // v74 (#2931) runs a mid-line BOM to the next blank; the hash below
-        // is unchanged.
-        const FIXTURE_VERSION: u32 = 74;
+        const FIXTURE_VERSION: u32 = 73;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

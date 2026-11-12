@@ -744,7 +744,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     string and a `#!` or `#+` after it is no token of its own; only a BOM
 ///     that starts its line keeps its own extent. An older blob would keep
 ///     serving such a file with its old errors and values (the narration a
-///     quote after a BOM opened). (v73 and v74 are held by open PRs.)
+///     quote after a BOM opened). (v73 is held by #2944.)
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that

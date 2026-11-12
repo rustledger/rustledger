@@ -536,11 +536,18 @@ impl LineFacts<'_> {
     /// one invalid token to beancount) rledger counts the line exactly as
     /// beancount does: its count moves by the line's whole difference.
     fn inner_boms_are_the_difference(&self) -> bool {
-        rledger_counts(&ordinary_inner_boms(self.input, self.roles, &self.span))
-            .get(&self.line)
-            .copied()
-            .unwrap_or(0)
-            == self.bc
+        // The in-span check cannot change the result on counts rledger
+        // produced: with no inner BOM the rewrite changes nothing, so the
+        // line counts `rl`, and the only caller asks with `rl < bc`. It
+        // keeps made-up counts from passing on an empty rewrite, as
+        // `test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic`
+        // pins.
+        self.roles.inner.iter().any(|i| self.span.contains(i))
+            && rledger_counts(&ordinary_inner_boms(self.input, self.roles, &self.span))
+                .get(&self.line)
+                .copied()
+                .unwrap_or(0)
+                == self.bc
     }
 }
 
@@ -667,6 +674,7 @@ fn cause(
     // difference (`foo` then `<BOM>assets:A <BOM>`). Otherwise asked after
     // the line's own causes, as before.
     let recovery = || {
+        // `r <= b` is `r < b` here: the only caller skips `b == r`.
         if r <= b || l == 0 {
             None
         } else if indented(text) && strip_boms(line(header)).starts_with('*') {
@@ -721,6 +729,9 @@ fn cause(
         } else if let Some(c) = glued_asked
             .then(|| {
                 [
+                    // The order of the first two cannot change the result:
+                    // both cannot hold, since `GLUED` alone takes the whole
+                    // difference and `HASH_BANG`'s share is never zero.
                     (GLUED, &[GLUED][..]),
                     (GLUED_HASH_BANG, &[GLUED, HASH_BANG][..]),
                     (GLUED_CONSTRUCT, &[GLUED, CONSTRUCT][..]),
@@ -768,9 +779,11 @@ fn cause(
             // does since #2928.
             "brace-hash-before-tag"
         } else if r < b
-            // The BOM check cannot change the result: without a BOM before
-            // it, beancount ignores a skipped line start (`b == 0`), so
-            // `r < b` already fails.
+            // The BOM check is needed: beancount's error for the line
+            // before can land on a skipped line start (an `unexpected EOL`,
+            // or a string left open on the line before), so `r < b` holds
+            // on a BOM-free `;c` too (`2024-01-02 open` then `;c`). Pinned
+            // by `test_cause_line_start_bom_before_comment_needs_a_bom`.
             && text.starts_with(BOM)
             && skipped_line_start(strip_boms(text))
             && !facts.roles.account_at(facts.span.start)
@@ -805,9 +818,9 @@ fn cause(
             // does.
             "bom-account-under-line-diagnostic"
         } else if r < b
-            && ["poptag", "popmeta"]
-                .iter()
-                .any(|p| strip_boms(text).starts_with(p))
+            // No BOM is stripped first: a BOM-led `<BOM>poptag` is one
+            // invalid token to beancount, which reports no pop for it.
+            && ["poptag", "popmeta"].iter().any(|p| text.starts_with(p))
         {
             // A pop of a tag or key not pushed (its push failed): beancount
             // reports it, rledger does not.
@@ -1634,31 +1647,52 @@ fn regressed_rows(
 /// The two `open` lines of a made-up input, so its own line is line 3.
 const MADE_UP_HEAD: &str = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n";
 
-/// Counts for line 3 only: beancount `b`, rledger `r`, main `m`, and
+/// Counts for line `l` only: beancount `b`, rledger `r`, main `m`, and
 /// rledger's `P0026`s `boms`. Nothing else is set: no analog or standalone
 /// count, no later grammar errors, no BOM roles.
-fn line3_counts(b: usize, r: usize, m: usize, boms: usize) -> Counts {
-    let line3 = |n: usize| BTreeMap::from([(3, n)]);
+fn line_counts(l: usize, b: usize, r: usize, m: usize, boms: usize) -> Counts {
+    let on_line = |n: usize| BTreeMap::from([(l, n)]);
     Counts {
-        bc: line3(b),
-        rl: line3(r),
-        main: line3(m),
+        bc: on_line(b),
+        rl: on_line(r),
+        main: on_line(m),
         analog_bc: BTreeMap::new(),
         analog_main: BTreeMap::new(),
         hash_bang_bc: BTreeMap::new(),
         bc_alone: BTreeMap::new(),
-        rl_bom: line3(boms),
+        rl_bom: on_line(boms),
         rl_account: BTreeMap::new(),
         roles: BomRoles::default(),
         later_grammar: BTreeMap::new(),
     }
 }
 
+/// Counts for line 3 only, as `line_counts` sets them.
+fn line3_counts(b: usize, r: usize, m: usize, boms: usize) -> Counts {
+    line_counts(3, b, r, m, boms)
+}
+
+/// `cause` of line `l` of the made-up input whose lines from line 3 on are
+/// `rest`.
+fn made_up_cause(rest: &str, l: usize, counts: &Counts) -> Option<&'static str> {
+    let input = format!("{MADE_UP_HEAD}{rest}\n");
+    let lines: Vec<&str> = input.split('\n').collect();
+    cause(&lines, l, counts, &input, "made-up row, in no data file")
+}
+
 /// `cause` of line 3 of the made-up input whose line 3 is `text`.
 fn line3_cause(text: &str, counts: &Counts) -> Option<&'static str> {
-    let input = format!("{MADE_UP_HEAD}{text}\n");
-    let lines: Vec<&str> = input.split('\n').collect();
-    cause(&lines, 3, counts, &input, "made-up row, in no data file")
+    made_up_cause(text, 3, counts)
+}
+
+/// One table row's input and counts, found by its input after the head.
+fn table_row(tail: &str) -> (String, Counts) {
+    let row = DATA
+        .lines()
+        .find(|row| row.split('\t').next().and_then(|s| s.strip_prefix(HEAD)) == Some(tail))
+        .unwrap_or_else(|| panic!("no table row for {tail:?}"));
+    let (_, input, counts) = row_counts(row);
+    (input, counts)
 }
 
 /// `counts` with beancount's lexer reading a BOM-led account where line 3,
@@ -1708,11 +1742,7 @@ fn test_cause_listed_exception_needs_its_reason_counts() {
         .into_iter()
         .next()
         .expect("at least one listed exception");
-    let row = DATA
-        .lines()
-        .find(|row| row.split('\t').next().and_then(|s| s.strip_prefix(HEAD)) == Some(tail))
-        .expect("the exception's row in the table");
-    let (_, input, mut counts) = row_counts(row);
+    let (input, mut counts) = table_row(tail);
     let lines: Vec<&str> = input.split('\n').collect();
     let get = |m: &BTreeMap<usize, usize>| m.get(&l).copied().unwrap_or(0);
     let (r, b, m) = reason_counts(reason);
@@ -1735,7 +1765,8 @@ fn test_cause_listed_exception_needs_its_reason_counts() {
 /// The glued-BOM causes need a BOM-led account on the line: with none,
 /// rledger counting one more error than its parse of the line gives (one
 /// error going on a rewrite that changes nothing) is not a glued BOM. rledger
-/// counts `2024-01-02 open Assets:A <BOM>q` 1, with one `P0026`.
+/// counts `2024-01-02 open Assets:A <BOM>q` 1, with one `P0026`. The other
+/// counts, and the account role, are made up to reach the rule.
 #[test]
 fn test_cause_bom_glued_to_account_needs_an_account_on_the_line() {
     let text = "2024-01-02 open Assets:A \u{FEFF}q";
@@ -1749,7 +1780,8 @@ fn test_cause_bom_glued_to_account_needs_an_account_on_the_line() {
 
 /// `bom-glued-to-account-in-error-line` needs a BOM-led account on the line,
 /// as the glued cause does. rledger counts `2024-01-02 open Assets:A q` 1,
-/// with no `P0026`.
+/// with no `P0026`. The other counts (one `P0026`), and the account role,
+/// are made up to reach the rule.
 #[test]
 fn test_cause_glued_in_error_line_needs_an_account_on_the_line() {
     let text = "2024-01-02 open Assets:A q";
@@ -1765,7 +1797,9 @@ fn test_cause_glued_in_error_line_needs_an_account_on_the_line() {
 /// beyond beancount's, never fewer: here its rewrite gains a `P0026`
 /// (`boms_after - boms == b - r`) and keeps a non-BOM error, which it
 /// would otherwise take for the mirror image. rledger counts
-/// `2024-01-02 open Assets:A <BOM>q r` 2, with one `P0026`.
+/// `2024-01-02 open Assets:A <BOM>q r` 2, with one `P0026`. The counts
+/// (rledger 0, no `P0026`), and the account role, are made up to reach the
+/// rule.
 #[test]
 fn test_cause_glued_in_error_line_needs_more_errors_than_beancount() {
     let text = "2024-01-02 open Assets:A \u{FEFF}q r";
@@ -1774,24 +1808,69 @@ fn test_cause_glued_in_error_line_needs_more_errors_than_beancount() {
 }
 
 /// `inner-bom-under-line-error` explains one error fewer than beancount's,
-/// where a `P0026` stands for the line's first error: not one more, and not
-/// on a line with no `P0026`. rledger counts `2024-01-02 * "x" <BOM>q` 1.
+/// where a `P0026` stands for the line's first error and the line has a BOM
+/// inside one of beancount's invalid tokens: on its own table row
+/// (`$n0 x1<BOM>y`, beancount 2, rledger 1 with one `P0026`, main 1, the BOM
+/// inside `x1<BOM>y`), and not with no inner BOM, with no `P0026`, or with
+/// rledger counting more than beancount.
 #[test]
 fn test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic() {
-    let text = "2024-01-02 * \"x\" \u{FEFF}q";
+    let tail = "$n0 x1<BOM>y\\n";
+    let (input, counts) = table_row(tail);
+    let lines: Vec<&str> = input.split('\n').collect();
+    let get = |m: &BTreeMap<usize, usize>| m.get(&3).copied().unwrap_or(0);
     assert_eq!(
-        line3_cause(text, &line3_counts(1, 0, 1, 1)),
+        (
+            get(&counts.bc),
+            get(&counts.rl),
+            get(&counts.main),
+            get(&counts.rl_bom)
+        ),
+        (2, 1, 1, 1)
+    );
+    assert!(
+        counts
+            .roles
+            .inner
+            .iter()
+            .any(|i| line_span(&input, 3).contains(i)),
+        "the row's BOM is inside an invalid token"
+    );
+    let cause_with = |change: &dyn Fn(&mut Counts)| {
+        let mut counts = table_row(tail).1;
+        change(&mut counts);
+        cause(&lines, 3, &counts, &input, tail)
+    };
+    assert_eq!(
+        cause(&lines, 3, &counts, &input, tail),
         Some("inner-bom-under-line-error")
     );
     assert_eq!(
-        line3_cause(text, &line3_counts(1, 2, 1, 1)),
+        cause_with(&|c| c.roles.inner.clear()),
         None,
-        "rledger counts more than beancount"
+        "no BOM inside an invalid token on the line"
+    );
+    // Made-up counts rledger cannot produce (it counts this line 1, not 0):
+    // with no inner BOM the rewrite changes nothing and the line counts 1,
+    // beancount's count here, so only the in-span check turns it away.
+    assert_eq!(
+        line3_cause("2024-01-02 * \"x\" \u{FEFF}q", &line3_counts(1, 0, 1, 1)),
+        None,
+        "no BOM inside an invalid token on the line, on made-up counts"
     );
     assert_eq!(
-        line3_cause(text, &line3_counts(1, 0, 1, 0)),
+        cause_with(&|c| {
+            c.rl_bom.remove(&3);
+        }),
         None,
         "no `P0026` on the line to stand for its first error"
+    );
+    assert_eq!(
+        cause_with(&|c| {
+            c.rl.insert(3, 3);
+        }),
+        None,
+        "rledger counts more than beancount"
     );
 }
 
@@ -1824,6 +1903,56 @@ fn test_cause_line_start_bom_before_comment_needs_fewer_errors() {
         line3_cause(text, &line3_counts(0, 1, 0, 1)),
         None,
         "rledger counts more than beancount"
+    );
+}
+
+/// `line-start-bom-before-comment` needs a BOM at the line's start:
+/// beancount's `unexpected EOL` for `2024-01-02 open` lands on the skipped
+/// line start after it, so a BOM-free `;c` there also counts fewer errors
+/// than beancount, a difference main has too. Real counts (bean-check 3.2.3,
+/// `parse_error_lines`): with no BOM, beancount 1 and rledger 0 on line 4
+/// (rledger reports the open on line 3); with `<BOM>;c`, beancount 2 (the
+/// EOL and the invalid token) and rledger 1 (its `P0026`). Main's counts
+/// are set to rledger's (this PR changes no BOM-free line).
+#[test]
+fn test_cause_line_start_bom_before_comment_needs_a_bom() {
+    let with_open = |b: usize, r: usize, boms: usize| {
+        let mut counts = line_counts(4, b, r, r, boms);
+        counts.rl.insert(3, 1);
+        counts.main.insert(3, 1);
+        counts
+    };
+    assert_eq!(
+        made_up_cause("2024-01-02 open\n;c", 4, &with_open(1, 0, 0)),
+        Some("bom-free-line-as-on-main")
+    );
+    assert_eq!(
+        made_up_cause("2024-01-02 open\n\u{FEFF};c", 4, &with_open(2, 1, 1)),
+        Some("line-start-bom-before-comment")
+    );
+}
+
+/// `indented-line-after-error` counts a line of the block whose first
+/// non-blank is a BOM as one beancount could not read, even where beancount
+/// reports no error on it (a BOM-led account, which its lexer admits):
+/// `block_err` looks past the indentation for the BOM. The counts are made
+/// up to reach the rule: beancount counts nothing on the block, rledger 1 on
+/// line 5 and main 0.
+#[test]
+fn test_cause_indented_line_after_error_sees_an_indented_bom() {
+    let rest = "2024-01-02 * \"x\"\n  \u{FEFF}Assets:A 1 USD\n  Assets:B";
+    assert_eq!(
+        made_up_cause(rest, 5, &line_counts(5, 0, 1, 0, 0)),
+        Some("indented-line-after-error")
+    );
+    assert_eq!(
+        made_up_cause(
+            &rest.replace("\u{FEFF}", ""),
+            5,
+            &line_counts(5, 0, 1, 0, 0)
+        ),
+        None,
+        "no BOM and no beancount error in the block"
     );
 }
 

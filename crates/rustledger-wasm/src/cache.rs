@@ -469,7 +469,7 @@ use crate::types::{Error, LedgerOptions};
 /// in beancount, so a quote after it opens no string; an older blob would
 /// keep serving such a file with its old errors and values. (v93 and v95
 /// were never released: #2931 held them before #2920 took v94 and #2947 took
-/// v97; v101 to v103 are held by open PRs.)
+/// v97; v101 is held by #2952 and v102 by #2944.)
 pub const CACHE_VERSION: u32 = 100;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

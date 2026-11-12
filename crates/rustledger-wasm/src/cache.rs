@@ -467,15 +467,25 @@ use crate::types::{Error, LedgerOptions};
 /// lone header string moves it to no other field, so `* "p" <bad>` keeps
 /// payee `p` where `p` was the narration; an older blob would keep serving
 /// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
+/// v103: loader v73, unchanged. Both payloads move (#2949): a source with a
+/// parse error is booked and validated over the entries that did parse, as
+/// `rledger check` validates it, so a `ParsedLedger` archives those
+/// directives and their validation errors where it archived none, and a
+/// `Ledger` archives each parse error with its code and line where it
+/// archived one line-less `parse errors in <path>`. An older blob would keep
+/// serving the old errors: a `ParsedLedger` with no directives and no
+/// validation errors for a source with a parse error, and a `Ledger` with one
+/// line-less parse error per file. (v101 was never released; v104 is held by
+/// #2931.)
 /// v105: loader v73, unchanged. ARCHIVED LAYOUT moved (#2946): the
 /// `ParsedLedger` payload gained `query_option_errors` and the `Ledger` payload
 /// `query_errors`, what a query lists, in which a rejected `booking_method`'s
 /// E7002 is the refusal that says why the query does not answer
-/// (`Ledger::query_option_errors`, as the FFI lists it). A v102 blob holds
+/// (`Ledger::query_option_errors`, as the FFI lists it). A v103 blob holds
 /// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
 /// also carries its parse and validation errors at character columns now,
 /// where a byte column read high after a BOM or a multi-byte character.
-/// (v103 is held by #2952, v104 by #2931.)
+/// (v104 is held by #2931.)
 pub const CACHE_VERSION: u32 = 105;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

@@ -330,6 +330,37 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
             },
         ],
     },
+    // A parse error in a single file: the source-text surfaces (`load`,
+    // `validate`) run it too. The entries that did parse are still validated
+    // (#2949), so the balance after the bad line fails, as `check` reports.
+    CheckParityCase {
+        name: "parse-error-single-file",
+        files: &[(
+            "main.beancount",
+            "2024-01-01 open Assets:A\n\
+             2024-01-03 open\n\
+             2024-01-05 balance Assets:A 1 USD\n",
+        )],
+        entry: "main.beancount",
+        diagnostics: &[
+            ExpectedDiagnostic {
+                code: "P0012",
+                severity: "error",
+                file: Some("main.beancount"),
+                line: Some(2),
+                column: Some(1),
+                message: "parse error: unexpected input",
+            },
+            ExpectedDiagnostic {
+                code: "E2001",
+                severity: "error",
+                file: Some("main.beancount"),
+                line: Some(3),
+                column: Some(1),
+                message: "Balance failed for Assets:A: expected 1 USD, got 0 USD",
+            },
+        ],
+    },
     // A BOM before line 1: three bytes, one character, so a finding there is
     // at column 2, as `check` counts it. Every other case's columns are 1, so
     // a surface that set the column to 1 (or counted bytes, 4) passed them

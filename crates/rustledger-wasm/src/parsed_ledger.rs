@@ -726,13 +726,21 @@ impl Ledger {
         self.errors.iter().map(|e| e.message.clone()).collect()
     }
 
+    /// The errors `getErrors` answers with.
+    #[cfg(test)]
+    pub(crate) fn error_list(&self) -> &[Error] {
+        &self.errors
+    }
+
     /// [`Ledger::from_files`] once the files are a map: the load, as the CLI
     /// runs it. Plain Rust, so native tests build a `Ledger` too.
     pub(crate) fn from_file_map(
         file_map: HashMap<String, String>,
         entry_point: &str,
     ) -> Result<Self, String> {
-        use rustledger_loader::{FileSystem, LoadOptions, Loader, VirtualFileSystem, process};
+        use rustledger_loader::{
+            FileSystem, LoadError, LoadOptions, Loader, VirtualFileSystem, process,
+        };
 
         let vfs = VirtualFileSystem::from_files(file_map);
 
@@ -744,7 +752,7 @@ impl Ledger {
 
         let mut loader = Loader::new().with_filesystem(Box::new(vfs));
 
-        let load_result = match loader.load(Path::new(entry_point)) {
+        let mut load_result = match loader.load(Path::new(entry_point)) {
             Ok(result) => result,
             Err(e) => {
                 return Ok(Self {
@@ -778,6 +786,16 @@ impl Ledger {
             rustledger_query::executor::SummaryAccounts::from_options(&load_result.options);
         let tolerance_multiplier = load_result.options.inferred_tolerance_multiplier;
 
+        // The parse errors, reported one by one with their code and line, as
+        // `rledger check` and `validateMultiFile` report them, rather than
+        // folded by `process` into one line-less `parse errors in <path>`
+        // (`LoadResult::take_parse_errors`). `process` validates whatever
+        // parsed (#2949).
+        let parse_failures = load_result.take_parse_errors();
+        let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
+        let parse_errors =
+            crate::api::load_errors_to_errors(&parse_failures, &load_result.source_map);
+
         let load_options = LoadOptions {
             validate: true,
             ..Default::default()
@@ -799,7 +817,7 @@ impl Ledger {
                 // rejected `booking_method` (#2911; its E7002 is among the
                 // option errors below); every other error is reported beside
                 // the rows. Read before the fields move out.
-                let query_refused = ledger.blocks_queries();
+                let query_refused = parse_blocks_queries || ledger.blocks_queries();
                 // The option diagnostics as a query lists them, through the
                 // canonical, read before the fields move out.
                 let query_option_errors: Vec<Error> = ledger
@@ -819,7 +837,11 @@ impl Ledger {
                 // cache payload so a restored ledger pads alike.
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
-                let mut errors = crate::helpers::reported_ledger_errors(ledger.errors);
+                let mut errors = parse_errors;
+                errors.extend(crate::helpers::reported_ledger_errors(ledger.errors));
+                // What a query lists: the parse errors too, so built after
+                // they are in `errors`, then the option diagnostics as a
+                // query lists them.
                 let query_errors = errors.iter().cloned().chain(query_option_errors).collect();
                 errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
@@ -857,10 +879,15 @@ impl Ledger {
                 booking_method,
                 summary_accounts,
                 tolerance_multiplier,
-                query_errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                query_errors: parse_errors
+                    .iter()
+                    .cloned()
+                    .chain([Error::new(format!("Processing error: {e}"))])
                     .chain(option_errors.iter().cloned())
                     .collect(),
-                errors: std::iter::once(Error::new(format!("Processing error: {e}")))
+                errors: parse_errors
+                    .into_iter()
+                    .chain([Error::new(format!("Processing error: {e}"))])
                     .chain(option_errors)
                     .collect(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
@@ -1799,8 +1826,9 @@ mod cache_round_trip_tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn every_directive_and_value_type_survives_the_cache_round_trip() {
         for (name, src) in CASES {
-            // A parse error empties `ParsedLedger`'s directives, so a fixture
-            // that failed to parse by accident would cover nothing.
+            // A fixture that failed to parse by accident would cover less than
+            // it claims. One with a parse error still loads what parsed, as
+            // `rledger check` does (#2949), so it archives directives too.
             let parsed = ParsedLedger::new(src);
             assert_eq!(
                 parsed.parse_errors.is_empty(),
@@ -1810,7 +1838,7 @@ mod cache_round_trip_tests {
             );
             assert_eq!(
                 parsed.directives.is_empty(),
-                *name == "empty" || *name == "parse error",
+                *name == "empty",
                 "{name}: the fixture must load directives"
             );
             assert_round_trips(name, src);

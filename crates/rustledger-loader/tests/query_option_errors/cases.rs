@@ -15,7 +15,8 @@
 //   restored from cache too).
 //
 // Each surface must list exactly `errors`, in order: code, message, file and
-// line. WASM's free `query` listed the plain E7002 where the refusal belongs,
+// line, the parse errors a query lists before them (`parse_errors`) too.
+// WASM's free `query` listed the plain E7002 where the refusal belongs,
 // `queryMultiFile` the refusal alone and no other option diagnostic, and
 // `ParsedLedger.query` and `Ledger.query` the plain E7002 (review of #2946).
 
@@ -48,6 +49,10 @@ pub struct QueryOptionCase {
     pub files: &'static [(&'static str, &'static str)],
     /// Whether the query answers (has rows) or refuses.
     pub answers: bool,
+    /// The parse errors a query lists, before `errors`: they are not
+    /// option diagnostics, so the canonical's side leaves them out
+    /// ([`Self::expected_option_errors`]).
+    pub parse_errors: &'static [QueryError],
     /// Exactly what every query surface lists, in order.
     pub errors: &'static [QueryError],
 }
@@ -65,16 +70,39 @@ impl QueryOptionCase {
         self.files[0].1
     }
 
-    /// `errors` as `(code, message, file, line)` rows, the entry file named
-    /// `entry_as` (`None` where a surface names no file) and named
-    /// `main_in_message` in the messages.
+    /// What a query surface lists, `parse_errors` then `errors`, as
+    /// `(code, message, file, line)` rows, the entry file named `entry_as`
+    /// (`None` where a surface names no file) and named `main_in_message` in
+    /// the messages.
     pub fn expected(
         &self,
         entry_as: Option<&str>,
         main_in_message: &str,
     ) -> Vec<(String, String, Option<String>, Option<u32>)> {
-        self.errors
-            .iter()
+        Self::rows(
+            self.parse_errors.iter().chain(self.errors),
+            entry_as,
+            main_in_message,
+        )
+    }
+
+    /// `errors` alone, as [`Self::expected`] gives them: what the canonical
+    /// `Ledger::query_option_errors` lists.
+    pub fn expected_option_errors(
+        &self,
+        entry_as: Option<&str>,
+        main_in_message: &str,
+    ) -> Vec<(String, String, Option<String>, Option<u32>)> {
+        Self::rows(self.errors, entry_as, main_in_message)
+    }
+
+    fn rows<'a>(
+        errors: impl IntoIterator<Item = &'a QueryError>,
+        entry_as: Option<&str>,
+        main_in_message: &str,
+    ) -> Vec<(String, String, Option<String>, Option<u32>)> {
+        errors
+            .into_iter()
             .map(|e| {
                 (
                     e.code.to_string(),
@@ -120,6 +148,7 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
             ),
         )],
         answers: false,
+        parse_errors: &[],
         errors: &[QueryError {
             code: "E7002",
             message: REFUSAL,
@@ -145,6 +174,7 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
             ("inc.beancount", "option \"booking_method\" \"fifo\"\n"),
         ],
         answers: true,
+        parse_errors: &[],
         errors: &[QueryError {
             code: "E7002",
             message: INVALID_FIFO,
@@ -170,6 +200,7 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
             ("inc.beancount", "option \"booking_method\" \"fifo\"\n"),
         ],
         answers: false,
+        parse_errors: &[],
         errors: &[
             QueryError {
                 code: "E7002",
@@ -184,5 +215,35 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
                 line: 1,
             },
         ],
+    },    // A refused `booking_method` in a source that also fails to parse. The
+    // load goes on past the parse error (#2949), so a query lists the parse
+    // error first and then the refusal, as on a source that parses. Not run
+    // through WASM `queryMultiFile`, which refuses on a parse error before a
+    // `Ledger` exists and lists no option diagnostic (issue #2960).
+    QueryOptionCase {
+        name: "refused-booking-method-with-parse-error",
+        files: &[(
+            MAIN,
+            concat!(
+                "option \"booking_method\" \"fifo\"\n",
+                "2024-01-01 open Assets:Cash\n",
+                "2024-01-01 open Income:Salary\n",
+                "2024-01-03 open\n",
+                "2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+            ),
+        )],
+        answers: false,
+        parse_errors: &[QueryError {
+            code: "P0012",
+            message: "parse error: unexpected input",
+            file: MAIN,
+            line: 4,
+        }],
+        errors: &[QueryError {
+            code: "E7002",
+            message: REFUSAL,
+            file: MAIN,
+            line: 1,
+        }],
     },
 ];

@@ -1,5 +1,5 @@
 //! The validating loader, the pipeline `rledger check` runs, gives each
-//! surface-agreement case its findings (#2937), and records the transactions
+//! surface-agreement case its findings (#2937, #2949), and records the transactions
 //! booking refused (`Ledger::booking_refused`), which the WASM single-source
 //! surfaces read to validate as it does. The other surfaces' drift-guard
 //! tests run the same cases (`surface_agreement/cases.rs`).
@@ -9,7 +9,7 @@
 include!("surface_agreement/cases.rs");
 
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, load};
+use rustledger_loader::{LoadError, LoadOptions, load, load_raw};
 
 #[test]
 fn test_validating_load_gives_each_case_its_findings() {
@@ -26,10 +26,33 @@ fn test_validating_load_gives_each_case_its_findings() {
             case.closes_nonempty,
             "{context}"
         );
+        // The parse errors as `check` reports them: one by one, from the raw
+        // load, before `process`, which folds a file's parse errors into the
+        // one `LOAD` error left out below. Validation runs over what parsed,
+        // so the other findings are there beside them (#2949).
+        let raw = load_raw(&path).expect("load_raw");
+        let index = rustledger_loader::LineIndex::new(case.source);
+        let parse_errors: Vec<(String, usize, String)> = raw
+            .errors
+            .iter()
+            .flat_map(|e| match e {
+                LoadError::ParseErrors { errors, .. } => errors.as_slice(),
+                _ => &[],
+            })
+            .map(|e| {
+                (
+                    format!("P{:04}", e.kind_code()),
+                    index.line_col(e.span.start).0,
+                    e.message(),
+                )
+            })
+            .collect();
+        let folded = format!("parse errors in {}", path.display());
         let mut got: Vec<(&str, usize, &str)> = ledger
             .errors
             .iter()
             .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+            .filter(|e| !(e.code == "LOAD" && e.message == folded))
             .map(|e| {
                 (
                     e.code.as_str(),
@@ -37,6 +60,11 @@ fn test_validating_load_gives_each_case_its_findings() {
                     e.message.as_str(),
                 )
             })
+            .chain(
+                parse_errors
+                    .iter()
+                    .map(|(code, line, message)| (code.as_str(), *line, message.as_str())),
+            )
             .collect();
         got.sort_unstable();
         let mut want: Vec<&Finding> = case.findings.iter().collect();

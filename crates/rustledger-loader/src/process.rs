@@ -329,11 +329,12 @@ impl Ledger {
     /// A surface that reports a load (`rledger check`, the FFI's `load` and
     /// `info()`) lists the plain [`option_warnings_to_errors`].
     ///
-    /// Not yet on a source that fails to parse: WASM's parse-error paths
-    /// (`load_and_book` and `query_with_filesystem` in `rustledger-wasm`,
-    /// which point back here) return before a `Ledger` exists, and list the
-    /// plain option diagnostics or none, where the FFI lists this. Revisit
-    /// when those paths can reach this rule (#2960).
+    /// A source that fails to parse is loaded too (#2949), so this holds
+    /// there as well, with one exception: WASM's `queryMultiFile`
+    /// (`query_with_filesystem` in `rustledger-wasm`, which points back here)
+    /// refuses on a parse error before a `Ledger` exists and lists no option
+    /// diagnostic, where the FFI's `query-file` lists this. Revisit when that
+    /// path can reach this rule (#2960).
     #[must_use]
     pub fn query_option_errors(&self) -> Vec<LedgerError> {
         let mut errors = option_warnings_to_errors(&self.options.warnings);

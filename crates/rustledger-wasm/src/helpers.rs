@@ -4,7 +4,7 @@ use std::path::Path;
 use wasm_bindgen::prelude::*;
 
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+use rustledger_loader::{LoadError, LoadOptions, Loader, VirtualFileSystem, process};
 use rustledger_parser::{ParseResult as ParserResult, parse as parse_beancount};
 
 use crate::types::{Error, LedgerOptions, Severity};
@@ -35,14 +35,17 @@ pub fn parse_error_to_wasm(
 
 /// Every parse error of `source` as [`parse_error_to_wasm`] reports it. The
 /// line index is built only when there is an error to locate.
-pub fn parse_errors_to_wasm(errors: &[rustledger_parser::ParseError], source: &str) -> Vec<Error> {
-    if errors.is_empty() {
-        return Vec::new();
-    }
-    let index = rustledger_loader::LineIndex::new(source);
+pub fn parse_errors_to_wasm<'e>(
+    errors: impl IntoIterator<Item = &'e rustledger_parser::ParseError>,
+    source: &str,
+) -> Vec<Error> {
+    let mut index = None;
     errors
-        .iter()
-        .map(|e| parse_error_to_wasm(e, &index, None))
+        .into_iter()
+        .map(|e| {
+            let index = index.get_or_insert_with(|| rustledger_loader::LineIndex::new(source));
+            parse_error_to_wasm(e, index, None)
+        })
         .collect()
 }
 
@@ -148,7 +151,8 @@ pub struct ProcessedLedger {
     /// query surface shares with the FFI's): `option_errors` with a rejected
     /// `booking_method`'s E7002 replaced by the refusal that says why the
     /// query does not answer (#2911, #2929). `option_errors` itself where the
-    /// source did not load, as no option refuses then.
+    /// source did not load (a load or processing failure; a parse error no
+    /// longer stops the load, #2949), as no option refuses then.
     pub query_option_errors: Vec<Error>,
     /// Whether a query over the source refuses: it failed to parse, a
     /// transaction failed to book
@@ -208,33 +212,10 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    // If there are parse errors, return early without processing
-    if !parse_result.errors.is_empty() {
-        let errors = parse_errors_to_wasm(&parse_result.errors, source);
-
-        let options = extract_options(&parse_result.options);
-        let option_errors = validate_option_tuples(&parse_result.options, &lookup);
-        // No `Ledger` exists on this path, so a query lists the plain option
-        // diagnostics here, not `Ledger::query_option_errors` as the FFI does
-        // over a source that fails to parse. A known divergence, noted on
-        // that function too (in `rustledger-loader/src/process.rs`); revisit
-        // when this path can reach it (#2960).
-
-        return ProcessedLedger {
-            directives: Vec::new(),
-            directive_spans: Vec::new(),
-            source_map: rustledger_loader::SourceMap::new(),
-            booking_refused: Vec::new(),
-            options,
-            errors,
-            query_option_errors: option_errors.clone(),
-            option_errors,
-            // A parse error refuses a query (#1908).
-            query_blocked: true,
-            parse_result,
-            lookup,
-        };
-    }
+    // A parse error does not stop the load: the loader keeps every entry that
+    // did parse, and `process` books them (and `run_validation` validates
+    // them), as `rledger check` and bean-check do (#2949). This used to return
+    // here with no directives, so one syntax error hid every other finding.
 
     // Use Loader with a single-file VFS to produce a LoadResult
     let mut vfs = VirtualFileSystem::new();
@@ -243,7 +224,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     vfs.add_file("<string>", source);
     let mut loader = Loader::new().with_filesystem(Box::new(vfs));
 
-    let raw = match loader.load(Path::new("<string>")) {
+    let mut raw = match loader.load(Path::new("<string>")) {
         Ok(raw) => raw,
         Err(e) => {
             let options = extract_options(&parse_result.options);
@@ -272,6 +253,19 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // entry point built on this function (#2299).
     let option_errors = without_files(option_warnings_to_errors(&raw.options.warnings));
 
+    // The parse errors, reported one by one with their code, line and span
+    // (`parse_errors_to_wasm`, so at character columns), and kept out of `process`
+    // (`LoadResult::take_parse_errors`).
+    let parse_failures = raw.take_parse_errors();
+    let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
+    let parse_errors = parse_errors_to_wasm(
+        parse_failures.iter().flat_map(|e| match e {
+            LoadError::ParseErrors { errors, .. } => errors.as_slice(),
+            _ => &[],
+        }),
+        source,
+    );
+
     // Run the shared processing pipeline:
     // sort → synth-plugins → book → regular-plugins → finalize
     // Skip validation here — callers that need it will call run_validation()
@@ -287,7 +281,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             // The whole query rule (`Ledger::blocks_queries`), read before the
             // fields move out: a blocking error, or a rejected
             // `booking_method` (#2911), whose E7002 is in `option_errors`.
-            let query_blocked = ledger.blocks_queries();
+            let query_blocked = parse_blocks_queries || ledger.blocks_queries();
             // The option diagnostics as a query lists them, through the
             // canonical (`Ledger::query_option_errors`), as the FFI lists them:
             // the rejected `booking_method`'s E7002 is the refusal.
@@ -306,7 +300,8 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
-            let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
+            let mut errors = parse_errors;
+            errors.extend(ledger.errors.into_iter().map(Error::from));
 
             ProcessedLedger {
                 directives,
@@ -322,19 +317,23 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 lookup,
             }
         }
-        Err(e) => ProcessedLedger {
-            directives: Vec::new(),
-            directive_spans: Vec::new(),
-            source_map: rustledger_loader::SourceMap::new(),
-            booking_refused: Vec::new(),
-            options,
-            errors: vec![Error::new(format!("Processing error: {e}"))],
-            query_option_errors: option_errors.clone(),
-            option_errors,
-            query_blocked: true,
-            parse_result,
-            lookup,
-        },
+        Err(e) => {
+            let mut errors = parse_errors;
+            errors.push(Error::new(format!("Processing error: {e}")));
+            ProcessedLedger {
+                directives: Vec::new(),
+                directive_spans: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
+                booking_refused: Vec::new(),
+                options,
+                errors,
+                query_option_errors: option_errors.clone(),
+                option_errors,
+                query_blocked: true,
+                parse_result,
+                lookup,
+            }
+        }
     }
 }
 
@@ -371,9 +370,10 @@ pub fn reported_ledger_errors(errors: Vec<rustledger_loader::LedgerError>) -> Ve
 /// for it, as `process` does. This used to return nothing on any
 /// severity-error in `load.errors`, so a STRICT ledger with an ambiguous
 /// reduction reported its booking error and not the `Balance failed` that
-/// follows it, which `check` and bean-check both report (#2937). A source
-/// that failed to parse or load has no directives here, so nothing is
-/// validated for it.
+/// follows it, which `check` and bean-check both report (#2937). A parse
+/// error does not stop it either: the entries that parsed are validated, as
+/// `check` and bean-check validate them (#2949). A source that failed to load
+/// at all has no directives here, so nothing is validated for it.
 ///
 /// Advisory-only diagnostics
 /// ([`rustledger_validate::ErrorCode::is_advisory_only`]: E1004, closing an

@@ -137,9 +137,12 @@ pub fn load_source(source: &str) -> LoadResult {
         ..Default::default()
     };
     // The parse errors are taken out before `process`, to be reported one by
-    // one with their code and line, as `rledger check` reports them
+    // one with their code, line and column, as `rledger check` reports them
     // (`take_parse_errors`, `parse_errors_to_ledger_errors`); left in,
     // `process` reports them as one line-less `parse errors in <string>`.
+    // The entries that did parse are loaded, and validated by
+    // `ledger.validate` / `ledger.load`, as `check` and bean-check validate
+    // them (#2949).
     let mut parse_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
     let ledger = match rustledger_loader::Loader::new()
         .with_filesystem(Box::new(vfs))
@@ -154,8 +157,8 @@ pub fn load_source(source: &str) -> LoadResult {
             // Fatal load/process failure is unexpected for an in-memory source,
             // but surface it rather than panicking. Tag it `validate` (not the
             // default `parse`): a fatal process/plugin failure must not be
-            // wrongly classified as a parse error, which would make the
-            // `ledger.validate`/`query` handlers suppress validation entirely.
+            // wrongly classified as a parse error, which `validate` would count
+            // in its `parse-error-count`.
             return LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
@@ -666,8 +669,9 @@ fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
 /// A query refusal ([`rustledger_loader::Ledger::query_refusal`]) as a wire
 /// error, for [`query_refusal_error`] and [`query_option_errors`] alike.
 ///
-/// Not "parse" on the wire, though options are read at parse time: a
-/// parse-phase error there stops semantic validation, and the ledger parsed.
+/// Not "parse" on the wire, though options are read at parse time: the
+/// ledger parsed, and a "parse" error here would be counted in `validate`'s
+/// `parse-error-count` as a syntax error.
 fn refusal_to_ffi(refusal: &rustledger_loader::LedgerError) -> Error {
     ledger_error_to_ffi(refusal).validate_phase()
 }
@@ -691,9 +695,11 @@ fn parse_errors_of(raw: &mut rustledger_loader::LoadResult) -> Vec<rustledger_lo
 /// the message, code and source file and line. The wire `Error` distinguishes
 /// only two phases:
 /// `"parse"`-phase errors keep the default `"parse"`; every other phase
-/// (`"validate"`, `"plugin"`) maps to `"validate"`. The `ledger.validate`/
-/// `query` handlers gate semantic validation on parse-phase errors only, so
-/// non-parse diagnostics must not be reported as `"parse"`.
+/// (`"validate"`, `"plugin"`) maps to `"validate"`. No phase stops semantic
+/// validation any more (#2949), but `ledger.validate` counts `"parse"` errors
+/// as its `parse-error-count`, so non-parse diagnostics must not be reported
+/// as `"parse"`. (Whether an error blocks queries is carried separately, in
+/// [`LoadResult::error_blocks_queries`].)
 fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     let mut err = Error::new(e.message.clone());
     if !e.code.is_empty() {
@@ -704,11 +710,10 @@ fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
         err.column = Some(loc.column as u32);
         err.file = Some(loc.file.display().to_string());
     }
-    // The wire `Error` distinguishes only "parse" vs "validate". The
-    // `ledger.validate`/`query` handlers gate semantic validation on
-    // *parse*-phase errors only, so anything that is not a parse error
-    // (booking → "validate", plugin/synth → "plugin") must NOT be reported as
-    // "parse", or it would wrongly suppress validation.
+    // The wire `Error` distinguishes only "parse" vs "validate". Anything
+    // that is not a parse error (booking → "validate", plugin/synth →
+    // "plugin") must NOT be reported as "parse", or `validate` would count it
+    // as one.
     if e.phase != "parse" {
         err = err.validate_phase();
     }

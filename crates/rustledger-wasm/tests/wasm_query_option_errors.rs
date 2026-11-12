@@ -8,6 +8,8 @@
 //! E7002 is listed as the refusal that says why, once. The free `query`,
 //! `ParsedLedger.query` and `Ledger.query` listed the plain E7002 instead,
 //! and `queryMultiFile` listed the refusal and no other option diagnostic.
+//! `queryMultiFile` does not run the case with a parse error: it refuses on
+//! one before a `Ledger` exists and lists no option diagnostic (issue #2960).
 //!
 //! Node-targeting (no `run_in_browser`), so CI's `wasm-pack test --node` step
 //! runs it.
@@ -85,9 +87,21 @@ fn wasm_query_surfaces_list_the_shared_option_errors() {
         }
 
         let want = case.expected(Some(MAIN), MAIN);
-        let result =
-            rustledger_wasm::query_multi_file(files(case), MAIN, QUERY).expect("queryMultiFile");
-        check(case, "queryMultiFile", &result, &want);
+        // Not over a parse error: `queryMultiFile` refuses on one before a
+        // `Ledger` exists, and lists no option diagnostic (issue #2960).
+        if case.parse_errors.is_empty() {
+            let result = rustledger_wasm::query_multi_file(files(case), MAIN, QUERY)
+                .expect("queryMultiFile");
+            check(case, "queryMultiFile", &result, &want);
+        }
+        // The multi-file surfaces prefix a parse error's message with its
+        // file (`load_errors_to_errors`, as `validateMultiFile` reports it),
+        // where `rledger check` and the FFI do not.
+        let mut want = want;
+        for row in want.iter_mut().take(case.parse_errors.len()) {
+            let file = row.2.clone().unwrap_or_default();
+            row.1 = format!("{file}: {}", row.1);
+        }
         let ledger = rustledger_wasm::Ledger::from_files(files(case), MAIN).expect("fromFiles");
         check(
             case,

@@ -32,7 +32,14 @@ fn test_query_option_errors_lists_the_shared_cases() {
                 )
             })
             .collect();
-        assert_eq!(got, case.expected(Some(MAIN), MAIN), "{}", case.name);
+        // The option diagnostics alone: a case's parse errors are listed by
+        // the query surfaces, not by this rule.
+        assert_eq!(
+            got,
+            case.expected_option_errors(Some(MAIN), MAIN),
+            "{}",
+            case.name
+        );
         assert_eq!(ledger.blocks_queries(), !case.answers, "{}", case.name);
     }
 }

@@ -266,6 +266,10 @@ pub fn run_with_writer<W: io::Write>(
                         rustledger_plugin::escape_untrusted_line(&file)
                     )
                 });
+                // A message quotes the ledger's option keys and values, and a
+                // terminal reads this line, so it is escaped as
+                // `Diagnostic::to_line` escapes the sink's (#2538).
+                let message = rustledger_plugin::escape_untrusted_text(message);
                 let _ = writeln!(err, "{location}{code}: {message}");
             }
             let _ = writeln!(err);

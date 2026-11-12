@@ -363,8 +363,28 @@ fn semantic_validation_errors(
         validation_options = validation_options.with_document_base(dir);
     }
     let session = rustledger_validate::ValidationSession::new(validation_options);
-    let (session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
-    let (session, late) = session.run_late_spanned(&loaded.spanned_directives, today);
+    let (mut session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
+    // A transaction booking refused is set aside as the validating loader
+    // sets it aside (`Ledger::booking_refused`): Early saw it as written, Late
+    // does not, and the session reports the account errors Early held for it.
+    // Late over it counted its unbooked postings into the balances, so a
+    // balance after a refused STRICT reduction reported a different
+    // accumulated amount from `rledger check` and bean-check (#2937).
+    let booked: std::borrow::Cow<'_, [rustledger_core::Spanned<Directive>]> =
+        if loaded.booking_refused.is_empty() {
+            std::borrow::Cow::Borrowed(&loaded.spanned_directives)
+        } else {
+            let mut booked = Vec::with_capacity(loaded.spanned_directives.len());
+            for (index, directive) in loaded.spanned_directives.iter().enumerate() {
+                if loaded.booking_refused.binary_search(&index).is_ok() {
+                    session.note_refused_by_booking(directive);
+                } else {
+                    booked.push(directive.clone());
+                }
+            }
+            std::borrow::Cow::Owned(booked)
+        };
+    let (session, late) = session.run_late_spanned(&booked, today);
     verrs.extend(late);
     // Capture the per-balance computed results (#1663) before `finalize` consumes
     // the session.
@@ -387,11 +407,11 @@ fn semantic_validation_errors(
     };
     let errors = verrs
         .into_iter()
+        // Advisory-only diagnostics (E1004, closing an account with a
+        // balance) are not reported, as `rledger check` and bean-check do not
+        // report them; `rledger lint closed-nonempty` does (#2937).
+        .filter(|err| !err.code.is_advisory_only())
         .filter(|err| !is_dup_of_booking(&err.message))
-        // As `rledger check` and the file load report them: an advisory-only
-        // code (E1004, closing an account with a balance, which bean-check
-        // does not flag) is left out, by the canonical predicate.
-        .filter(|err| !rustledger_validate::is_advisory_only_code(err.code.code()))
         .map(|err| {
             let mut e = ffi::Error::new(&err.message).validate_phase();
             // Preserve severity, like the loader path already does. Every
@@ -5495,5 +5515,70 @@ mod check_parity {
             by_ledger,
             "session.from-file"
         );
+    }
+}
+
+/// The FFI side of the drift guard for which findings every diagnostic
+/// surface reports (#2937): `validate`, `load`, `validate-file` and
+/// `load-file` report exactly what `rledger check`, WASM and the LSP report on
+/// the same ledgers, matched on code, line and message.
+#[cfg(test)]
+mod surface_agreement {
+    include!("../../rustledger-loader/tests/surface_agreement/cases.rs");
+
+    use super::wit;
+
+    fn check(case: &SurfaceCase, surface: &str, errors: &[wit::Error]) {
+        let mut got: Vec<(u32, Option<&str>, &str)> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.line.unwrap_or_default(),
+                    e.code.as_deref(),
+                    e.message.as_str(),
+                )
+            })
+            .collect();
+        got.sort_unstable();
+        let mut want: Vec<&Finding> = case.findings.iter().collect();
+        want.sort_by_key(|f| f.line);
+        let context = format!("{} via {surface}: {got:?}", case.name);
+        assert_eq!(got.len(), want.len(), "{context}");
+        for ((line, code, message), finding) in got.iter().zip(&want) {
+            assert_eq!(*line, finding.line, "{context}");
+            assert_eq!(*code, Some(finding.code), "{context}");
+            assert!(message.starts_with(finding.message), "{context}");
+        }
+    }
+
+    #[test]
+    fn validate_and_load_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let validated = super::validate(case.source);
+            check(case, "validate", &validated.errors);
+            assert_eq!(validated.valid, case.findings.is_empty(), "{}", case.name);
+            for expand_pads in [false, true] {
+                let loaded = super::load(case.source, "ledger.beancount", expand_pads);
+                check(case, "load", &loaded.errors);
+            }
+        }
+    }
+
+    /// The file surfaces validate through the canonical pipeline (#2935), so
+    /// they too must leave out the advisory-only `E1004` and set a refused
+    /// transaction aside (#2937).
+    #[test]
+    fn validate_file_and_load_file_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("ledger.beancount");
+            std::fs::write(&path, case.source).expect("write");
+            let path = path.to_str().expect("utf-8 path");
+            let validated = super::validate_file(path);
+            check(case, "validate-file", &validated.errors);
+            assert_eq!(validated.valid, case.findings.is_empty(), "{}", case.name);
+            let loaded = super::load_file(path, false, &[], false);
+            check(case, "load-file", &loaded.errors);
+        }
     }
 }

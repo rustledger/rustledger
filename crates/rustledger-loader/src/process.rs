@@ -258,6 +258,17 @@ pub struct Ledger {
     ///
     /// Feeds `#balances.discrepancy` (#2180).
     pub balance_discrepancies: Vec<BalanceDiscrepancy>,
+    /// The transactions booking refused, as indices into [`Self::directives`]
+    /// (ascending). Each is there as written, unbooked, beside the booking
+    /// failure that refused it ([`LedgerError::is_booking_failure`]).
+    ///
+    /// A validating load leaves these out of Late validation and reports the
+    /// account errors Early held for them (#2686); nothing else about a
+    /// booking failure stops validation. A surface that validates the
+    /// finalized stream itself (WASM `validateSource` and `ParsedLedger`)
+    /// reads this to set the same transactions aside, rather than skipping
+    /// validation on a booking error, which `rledger check` does not (#2937).
+    pub booking_refused: Vec<usize>,
 }
 
 impl Ledger {
@@ -834,7 +845,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     let (late_validated, balance_discrepancies) =
         regular_applied.late_validate(&raw.source_map, &mut errors);
 
-    let finalized = late_validated.finalize(failed);
+    let (finalized, booking_refused) = late_validated.finalize(failed);
 
     // The text's last consumer was the pipeline above: every error location
     // is resolved by now. Drop it here when the caller asked for the memory
@@ -854,6 +865,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         booking_method: effective_booking_method,
         capital_gains,
         balance_discrepancies,
+        booking_refused,
     })
 }
 
@@ -1219,13 +1231,35 @@ impl crate::Directives<crate::LateValidated> {
     /// Re-sorts to restore canonical display order — `booked`
     /// retained order during plugin transformation; the sort
     /// restores the failed entries' positions.
+    ///
+    /// Also returns where the failed entries landed: their indices in the
+    /// finalized stream, ascending ([`Ledger::booking_refused`]).
     pub(crate) fn finalize(
         mut self,
         failed: crate::phase::FailedBookings,
-    ) -> crate::Directives<crate::Finalized> {
+    ) -> (crate::Directives<crate::Finalized>, Vec<usize>) {
         let mut v = std::mem::take(self.as_vec_mut());
-        v.extend(failed.into_inner());
-        v.sort_by_key(canonical_sort_key);
+        let failed = failed.into_inner();
+        let mut refused = Vec::new();
+        if failed.is_empty() {
+            v.sort_by_key(canonical_sort_key);
+        } else {
+            // Tag each entry with whether booking refused it, so the sort
+            // carries the tag along: the same stable sort on the same key as
+            // the untagged branch, so the order is the same.
+            let mut tagged: Vec<(Spanned<Directive>, bool)> = v
+                .into_iter()
+                .map(|d| (d, false))
+                .chain(failed.into_iter().map(|d| (d, true)))
+                .collect();
+            tagged.sort_by_key(|(d, _)| canonical_sort_key(d));
+            refused = tagged
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (_, refused))| refused.then_some(i))
+                .collect();
+            v = tagged.into_iter().map(|(d, _)| d).collect();
+        }
 
         // Normalize `@@` total prices to per-unit (`@`) as the final pipeline
         // step. This runs AFTER Late validation, so exact totals still survived
@@ -1245,7 +1279,7 @@ impl crate::Directives<crate::LateValidated> {
             }
         }
 
-        crate::Directives::new_unchecked(v)
+        (crate::Directives::new_unchecked(v), refused)
     }
 }
 

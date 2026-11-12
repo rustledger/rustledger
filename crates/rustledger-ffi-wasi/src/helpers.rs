@@ -35,6 +35,10 @@ impl LineLookup {
 pub struct LoadResult {
     pub directives: Vec<Directive>,
     pub spanned_directives: Vec<Spanned<Directive>>,
+    /// The transactions booking refused, as indices into `spanned_directives`
+    /// ([`rustledger_loader::Ledger::booking_refused`]): a semantic validation
+    /// of this load sets them aside, as `rledger check` does (#2937).
+    pub booking_refused: Vec<usize>,
     /// The files `spanned_directives` index into: the source, named
     /// `<string>` as beancount's `load_string` names it, so a query's
     /// `filename` / `lineno` / `location` columns resolve (#2825).
@@ -155,6 +159,7 @@ pub fn load_source(source: &str) -> LoadResult {
             return LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
+                booking_refused: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 directive_lines: Vec::new(),
                 line_lookup: lookup,
@@ -274,6 +279,7 @@ pub fn load_source(source: &str) -> LoadResult {
 
     LoadResult {
         directives,
+        booking_refused: ledger.booking_refused,
         spanned_directives: ledger.directives,
         source_map: ledger.source_map,
         directive_lines,

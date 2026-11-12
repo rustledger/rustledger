@@ -13,6 +13,8 @@ publish = false
 # so these pins can't drift from the root Cargo.toml.
 wasmtime = { workspace = true, features = ["component-model"] }
 anyhow = "1"
+# The lock around it: library code uses parking_lot, never std::sync (#1076).
+parking_lot.workspace = true
 
 [dev-dependencies]
 wasmtime-wasi.workspace = true

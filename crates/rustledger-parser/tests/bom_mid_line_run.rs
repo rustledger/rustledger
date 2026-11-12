@@ -750,19 +750,20 @@ fn test_parse_bom_alone_at_eof_after_directive_is_one_error() {
 /// blank before it and with LF or CRLF line endings: one error, as in
 /// bean-check 3.2.3. A posting's trailing-tokens check, whose error starts
 /// where the amount ends, right at the glued token, and a balance's
-/// malformed-amount check reported a second one. The price or cost after
-/// the token is dropped (issue #2954), as it is with the blank.
+/// malformed-amount check reported a second one. The price or cost the
+/// token stands in front of is dropped (issue #2954), as it is with the
+/// blank; a price after a dropped cost (`{{4 USD}} @@ 5 USD`) is kept.
 #[test]
 fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
     for end in ["\n", "\r\n"] {
         for gap in ["", " "] {
-            for tail in [
-                "@ 2 USD",
-                "@@ 2 USD",
-                "{2 USD}",
-                "{{2 USD}}",
-                "{{4 USD}} @@ 5 USD",
-                "~ 2 USD",
+            for (tail, price_kept) in [
+                ("@ 2 USD", false),
+                ("@@ 2 USD", false),
+                ("{2 USD}", false),
+                ("{{2 USD}}", false),
+                ("{{4 USD}} @@ 5 USD", true),
+                ("~ 2 USD", false),
             ] {
                 let src = format!(
                     "{HEAD}2024-01-02 * \"x\"{end}  Assets:A  1 HOOL{gap}{BOM}{tail}{end}  \
@@ -780,7 +781,7 @@ fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
                     })
                     .expect("the transaction is kept");
                 assert!(
-                    posting.value.price.is_none() && posting.value.cost.is_none(),
+                    posting.value.cost.is_none() && posting.value.price.is_some() == price_kept,
                     "{src:?}: {posting:?}"
                 );
             }

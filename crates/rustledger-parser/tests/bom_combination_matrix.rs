@@ -1666,7 +1666,7 @@ fn line3_cause(text: &str, counts: &Counts) -> Option<&'static str> {
 /// line's count).
 fn with_account_role(mut counts: Counts, text: &str) -> Counts {
     let at = MADE_UP_HEAD.len() + text.find("Assets:A").expect("an `Assets:A` on the line");
-    counts.roles.accounts = vec![at..at + "Assets:A".len()];
+    counts.roles.accounts.push(at..at + "Assets:A".len());
     counts
 }
 

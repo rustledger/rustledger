@@ -462,16 +462,22 @@ use crate::types::{Error, LedgerOptions};
 /// converter accepts. The loader also ignores a `documents` option in an
 /// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
 /// no location and the old codes, and a `Ledger` with such an option as
-/// valid. (v98 is held by #2944.)
-/// v101: loader v71, unchanged. Both payloads move (#2949): a source with a
+/// valid. (v98 was never released.)
+/// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// lone header string moves it to no other field, so `* "p" <bad>` keeps
+/// payee `p` where `p` was the narration; an older blob would keep serving
+/// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
+/// v103: loader v73, unchanged. Both payloads move (#2949): a source with a
 /// parse error is booked and validated over the entries that did parse, as
 /// `rledger check` validates it, so a `ParsedLedger` archives those
 /// directives and their validation errors where it archived none, and a
 /// `Ledger` archives each parse error with its code and line where it
 /// archived one line-less `parse errors in <path>`. An older blob would keep
-/// serving the old errors. (Held by open PRs when this was written: v100 by
-/// #2931, v102 by #2944.)
-pub const CACHE_VERSION: u32 = 101;
+/// serving the old errors: a `ParsedLedger` with no directives and no
+/// validation errors for a source with a parse error, and a `Ledger` with one
+/// line-less parse error per file. (v101 was never released; v104 is held by
+/// #2931.)
+pub const CACHE_VERSION: u32 = 103;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -503,7 +509,7 @@ pub const CACHE_VERSION: u32 = 101;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 71;
+const LOADER_CACHE_VERSION_PIN: u32 = 73;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

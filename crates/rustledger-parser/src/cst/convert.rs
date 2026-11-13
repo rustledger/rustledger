@@ -480,6 +480,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
     drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset, &grammar_failures);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
+    name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -9420,10 +9421,9 @@ fn invalid_runs(rest: &str) -> (Vec<std::ops::Range<usize>>, bool) {
                 after_lone_capital = false;
                 continue;
             }
-            Token::Comment(_)
-            | Token::PercentComment(_)
-            | Token::Shebang(_)
-            | Token::EmacsDirective(_) => {
+            // `rest` starts with a blank, so a `#!` or `#+` in it is mid-line and
+            // lexes as a `#` and the token after it (#2928), never as a comment.
+            Token::Comment(_) | Token::PercentComment(_) => {
                 comment = true;
                 break;
             }
@@ -10156,6 +10156,79 @@ fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bo
                 "invalid token '{word}' (booleans are written TRUE or FALSE)"
             ));
         }
+    }
+}
+
+/// Name a mid-line `#!` or `#+` in the error its line gets (#2928).
+///
+/// Only at column 0 does beancount skip a `#` line; anywhere else, indented
+/// too, `#!` and `#+` are a `#` and a `!` or `+`, which its grammar has no
+/// place for, so the lexer reads them as those tokens. The line's error is
+/// then the generic `unexpected input`, at the line's start for an indented
+/// line, which does not name the comment the writer most likely meant (an org-mode
+/// `  #+STARTUP` line, a `#!` note after a posting). This rewrites that error,
+/// the first on the line at or before the `#`, to point at the `#!` / `#+`
+/// and say that only `;` starts a comment there. A defect already reported at
+/// the `#` (a directive header's or a posting's) is widened to the two
+/// characters and given the same hint. Only the message and span move: every
+/// error is still there, on its line, so the counts stay beancount's.
+///
+/// Shared by both parse paths, keyed on the source text and the error list;
+/// the markers are found by the lexer itself, so a `#!` in a string or a
+/// comment is none.
+fn name_mid_line_hash_comments(errors: &mut [crate::ParseError], stripped: &str, bom_offset: u32) {
+    use crate::logos_lexer::{Token, TokenIter};
+    if !stripped.contains("#!") && !stripped.contains("#+") {
+        return;
+    }
+    let bom = bom_offset as usize;
+    let mut markers = Vec::new();
+    let mut prev_hash: Option<usize> = None;
+    for (token, span) in TokenIter::new(stripped, true) {
+        if let Some(at) = prev_hash.take()
+            && span.start == at + 1
+            && matches!(token, Token::Pending | Token::Plus)
+        {
+            markers.push(at);
+        }
+        if matches!(token, Token::Hash) {
+            prev_hash = Some(span.start);
+        }
+    }
+    for at in markers {
+        let marker = &stripped[at..at + 2];
+        let line_start = stripped[..at].rfind('\n').map_or(0, |i| i + 1);
+        let Some(e) = errors.iter_mut().find(|e| {
+            e.span
+                .start
+                .checked_sub(bom)
+                .is_some_and(|s| (line_start..=at).contains(&s))
+        }) else {
+            continue;
+        };
+        let crate::ParseErrorKind::SyntaxError(msg) = &e.kind else {
+            continue;
+        };
+        let hint = format!(
+            "only `;` starts a comment that is indented or in the middle of a line; \
+             `{marker}` starts one only at the beginning of a line"
+        );
+        let message = if msg == "unexpected input" {
+            format!("unexpected {marker:?}: {hint}")
+        } else if e.span.start == at + bom
+            && let Some(rest) = msg.strip_prefix("unexpected \"#\"")
+        {
+            let rest = rest.replace("`#` starts one", &format!("`{marker}` starts one"));
+            if rest.contains("starts a comment") {
+                format!("unexpected {marker:?}{rest}")
+            } else {
+                format!("unexpected {marker:?}{rest}: {hint}")
+            }
+        } else {
+            continue;
+        };
+        e.kind = crate::ParseErrorKind::SyntaxError(message);
+        e.span = Span::new(at + bom, at + 2 + bom);
     }
 }
 

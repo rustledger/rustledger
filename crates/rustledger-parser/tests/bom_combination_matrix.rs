@@ -154,31 +154,32 @@ fn hash_bang_analog(src: &str) -> String {
 }
 
 /// `src` as main read it before #2928 made a mid-line `#!` / `#+` a `#` and
-/// the token after it: each `#!` or `#+` past its line's start (and past the
-/// BOMs that start the line, which the lexer steps over there) and the rest
-/// of its line cut off, since main lexed them as a comment to the end of the
-/// line. A `\r` that ends the line is kept.
+/// the token after it: each such `#` (the lexer's own `#` followed right away
+/// by its `!` or `+`, so never one inside a string or a comment, nor a
+/// column-0 `#!` / `#+` line, which is still a comment) and the rest of its
+/// line cut off, since main lexed them as a comment to the end of the line.
+/// A `\r` that ends the line is kept.
 fn hash_bang_cut(src: &str) -> String {
+    use rustledger_parser::logos_lexer::{Token, tokenize_lossless};
+    let tokens = tokenize_lossless(src);
     let mut out = String::with_capacity(src.len());
-    for line in src.split_inclusive('\n') {
-        let (content, newline) = line.strip_suffix('\n').map_or((line, ""), |c| (c, "\n"));
-        let (content, cr) = content
-            .strip_suffix('\r')
-            .map_or((content, ""), |c| (c, "\r"));
-        let start = content.len() - content.trim_start_matches(BOM).len();
-        let cut = ["#!", "#+"]
-            .iter()
-            .filter_map(|m| {
-                content
-                    .match_indices(m)
-                    .map(|(i, _)| i)
-                    .find(|&i| i > start)
-            })
-            .min();
-        out.push_str(cut.map_or(content, |i| &content[..i]));
-        out.push_str(cr);
-        out.push_str(newline);
+    let mut at = 0;
+    for pair in tokens.windows(2) {
+        let ((hash, h), (next, n)) = (&pair[0], &pair[1]);
+        let marker = matches!(hash, Token::Hash)
+            && n.start == h.start + 1
+            && matches!(next, Token::Pending | Token::Plus);
+        if !marker || h.start < at {
+            continue;
+        }
+        out.push_str(&src[at..h.start]);
+        let line_end = src[h.start..].find('\n').map_or(src.len(), |i| h.start + i);
+        if src[h.start..line_end].ends_with('\r') {
+            out.push('\r');
+        }
+        at = line_end;
     }
+    out.push_str(&src[at..]);
     out
 }
 
@@ -1395,13 +1396,18 @@ fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
 
 /// Whether main's count for the line is exactly what rledger counts with
 /// each mid-line `#!` / `#+` and the rest of its line cut off
-/// (`hash_bang_cut`), as main read them before #2928: a comment to the end
-/// of the line. Such a line is further from beancount than main only because
-/// rledger now reads what main skipped, and the line holds or follows such a
-/// `#!` / `#+`, so the cut moves the count.
+/// (`hash_bang_cut`), as main read them before #2928 (a comment to the end
+/// of the line), and the cut moves this line's count: the whole of what the
+/// line counts beyond main is what rledger now reads past such a `#!` / `#+`
+/// (on the line, or on a line before it whose recovery it changes).
+///
+/// It accepts a line whatever its cause: it says why main was closer, not
+/// why rledger differs from beancount, which the line's cause in the known
+/// list still says.
 fn main_read_less(w: &Worse) -> bool {
     let cut = hash_bang_cut(&w.input);
-    cut != w.input && rledger_counts(&cut).get(&w.line).copied().unwrap_or(0) == w.main
+    let cut_count = rledger_counts(&cut).get(&w.line).copied().unwrap_or(0);
+    cut != w.input && cut_count == w.main && cut_count != w.rl
 }
 
 /// Whether an accepted further-than-main line holds for its cause.
@@ -2938,14 +2944,21 @@ fn test_hash_bang_analog_rewrites_only_past_a_lines_start() {
 /// `hash_bang_cut` cuts a line at its first `#!` or `#+` past its start, as
 /// main read them (a comment to the end of the line, before #2928), keeping
 /// the line ending (a CRLF's `\r` too): one at a line's start, or right after
-/// the BOMs that start it, stays, as main and the lexer read it there.
+/// the BOMs that start it, stays, as main and the lexer read it there (a
+/// comment that takes the rest of its line), and so does one in a string or
+/// a `;` comment.
 #[test]
 fn test_hash_bang_cut_cuts_only_past_a_lines_start() {
     assert_eq!(
         hash_bang_cut("#!a\nx #+b #!c\r\n  #!d\n\u{FEFF}#!e #+f\ny\n"),
-        "#!a\nx \r\n  \n\u{FEFF}#!e \ny\n"
+        "#!a\nx \r\n  \n\u{FEFF}#!e #+f\ny\n"
     );
     assert_eq!(hash_bang_cut("x #!y"), "x ");
+    // Not inside a string, nor inside a `;` comment.
+    assert_eq!(
+        hash_bang_cut("x \"a#!b\" #!c\ny ; #!d\n"),
+        "x \"a#!b\" \ny ; #!d\n"
+    );
 }
 
 /// `is_blank` takes a space or a tab, nothing else (not a `\r`, nor any

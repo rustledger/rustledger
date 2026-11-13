@@ -116,3 +116,103 @@ fn test_parse_hash_bang_in_a_string_or_comment_or_at_column_0_is_left_alone() {
         assert!(parse_both(src).errors.is_empty(), "{src:?}");
     }
 }
+
+/// The errors, sorted by where they start, as every consumer reads them.
+fn assert_sorted(src: &str, result: &ParseResult) {
+    let starts: Vec<usize> = result.errors.iter().map(|e| e.span.start).collect();
+    let mut sorted = starts.clone();
+    sorted.sort_unstable();
+    assert_eq!(starts, sorted, "{src:?}: {:?}", result.errors);
+}
+
+/// A marker after another bad token on its line: the earlier token's error
+/// stays its own, over that token, and no error before the `#` is renamed.
+/// Only a marker that leads its line stands for the line's error. (bean-check
+/// 3.2.3 reports `$x` and `y` here, as rledger does.)
+#[test]
+fn test_parse_hash_bang_after_another_bad_token_leaves_its_error_alone() {
+    for (src, bad) in [
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 * \"p\"\n  Assets:A  1 USD $x #+y\n  Assets:B\n",
+            "$x",
+        ),
+        ("2024-01-01 open Assets:A $x #+y\n", "$x"),
+        ("2024-01-02 *\n  $x #+y\n", "$x"),
+        ("2024-01-01 open Assets:A\n  $z #!x\n", "$z"),
+    ] {
+        let result = parse_both(src);
+        assert_sorted(src, &result);
+        let at = src.find(bad).expect("the bad token");
+        let e = result
+            .errors
+            .iter()
+            .find(|e| e.span.start <= at && e.span.end > at)
+            .unwrap_or_else(|| panic!("{src:?}: no error over {bad}: {:?}", result.errors));
+        assert!(!e.message().contains("starts a comment"), "{src:?}: {e:?}");
+        // Nothing before the `#` was moved onto the marker.
+        let marker = src.find("#+").or_else(|| src.find("#!")).expect("a marker");
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|e| e.span.start != marker || e.message().contains(&src[marker..marker + 2])),
+            "{src:?}: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// A stray `\r` before a `#!` keeps its own error (#2774), at the `\r`.
+#[test]
+fn test_parse_stray_cr_before_hash_bang_keeps_its_error() {
+    let src = "2024-01-02 *\n  Assets:A  1 USD\r#!x\n  Assets:B\n";
+    let result = parse_both(src);
+    assert_sorted(src, &result);
+    let at = src.find('\r').expect("the stray CR");
+    assert!(
+        result.errors.iter().any(|e| e.span.start == at),
+        "{:?}",
+        result.errors
+    );
+}
+
+/// A `#!` inside a string is no marker: the invalid token after the string
+/// keeps its own error and message.
+#[test]
+fn test_parse_hash_bang_in_a_string_renames_no_error() {
+    for src in [
+        "2024-01-01 open Assets:A\n  kk: \"a #!x\" $y\n",
+        "2024-01-02 * \"a #!x\" $y\n  Assets:A  1 USD\n  Assets:B\n",
+    ] {
+        let result = parse_both(src);
+        assert_sorted(src, &result);
+        let at = src.find("$y").expect("the bad token");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.span.start == at && !e.message().contains("starts a comment")),
+            "{src:?}: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|e| !e.message().contains("starts a comment")),
+            "{src:?}: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// After the file's leading BOM, which the parser strips, the span is in the
+/// file's own bytes: the `#+` of `<BOM>  #+x` is bytes 5..7.
+#[test]
+fn test_parse_hash_bang_span_after_the_leading_bom() {
+    let src = "\u{FEFF}  #+x\n";
+    let result = parse_both(src);
+    let e = &result.errors[0];
+    assert_eq!((e.span.start, e.span.end), (5, 7), "{:?}", result.errors);
+    assert_eq!(e.message(), hint("#+"));
+}

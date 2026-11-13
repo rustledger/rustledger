@@ -10166,12 +10166,15 @@ fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bo
 /// place for, so the lexer reads them as those tokens. The line's error is
 /// then the generic `unexpected input`, at the line's start for an indented
 /// line, which does not name the comment the writer most likely meant (an org-mode
-/// `  #+STARTUP` line, a `#!` note after a posting). This rewrites that error,
-/// the first on the line at or before the `#`, to point at the `#!` / `#+`
-/// and say that only `;` starts a comment there. A defect already reported at
-/// the `#` (a directive header's or a posting's) is widened to the two
-/// characters and given the same hint. Only the message and span move: every
-/// error is still there, on its line, so the counts stay beancount's.
+/// `  #+STARTUP` line, a `#!` note after a posting). Where the marker leads
+/// its line, this rewrites that error, the first on the line at or before the
+/// `#` (only blanks lie between, so the list stays sorted), to point at the
+/// `#!` / `#+` and say that only `;` starts a comment there. A defect
+/// already reported at the `#` itself (a directive header's or a
+/// posting's) is widened to the two characters and given the same hint;
+/// after another token, an error before the `#` is that token's and is left
+/// alone. Only the message and span move: every error is still there, on its
+/// line, so the counts stay beancount's.
 ///
 /// Shared by both parse paths, keyed on the source text and the error list;
 /// the markers are found by the lexer itself, so a `#!` in a string or a
@@ -10198,11 +10201,21 @@ fn name_mid_line_hash_comments(errors: &mut [crate::ParseError], stripped: &str,
     for at in markers {
         let marker = &stripped[at..at + 2];
         let line_start = stripped[..at].rfind('\n').map_or(0, |i| i + 1);
+        // Only a marker that leads its line (after its indentation) stands
+        // for the line's whole error. After another token, an error before
+        // the `#` is that token's (`$x #+y`, a stray `\r`), and only one the
+        // line reports at the `#` itself is the marker's.
+        let leads = stripped[line_start..at]
+            .trim_start_matches([' ', '\t'])
+            .is_empty();
         let Some(e) = errors.iter_mut().find(|e| {
-            e.span
-                .start
-                .checked_sub(bom)
-                .is_some_and(|s| (line_start..=at).contains(&s))
+            e.span.start.checked_sub(bom).is_some_and(|s| {
+                if leads {
+                    (line_start..=at).contains(&s)
+                } else {
+                    s == at
+                }
+            })
         }) else {
             continue;
         };

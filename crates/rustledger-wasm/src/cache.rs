@@ -486,7 +486,13 @@ use crate::types::{Error, LedgerOptions};
 /// also carries its parse and validation errors at character columns now,
 /// where a byte column read high after a BOM or a multi-byte character.
 /// (v104 is held by #2931.)
-pub const CACHE_VERSION: u32 = 105;
+/// v107: loader v73, unchanged -- parsed directives did not move. Booking
+/// did (#2958): on an AVERAGE account holding lots of both signs, a sale
+/// whose stated cost the pool accepts as its average reduces the pool, where
+/// it was booked as a new lot on its own side when a lot there cost the
+/// same. `ParsedLedger` and `Ledger` archive booked directives, so a v105
+/// blob would keep serving that new lot. (v106 is held by #2931.)
+pub const CACHE_VERSION: u32 = 107;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

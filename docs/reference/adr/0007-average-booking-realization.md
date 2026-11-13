@@ -204,6 +204,27 @@ sale written with its units elided, which booking's lot matching never sees
 too. A booked AVERAGE sale carries the pool's undated cost, so the validator
 and BQL replays never trip it.
 
+## Amendment: a claim the pool accepts names the pool (#2958)
+
+On an account holding both a long and a short, a posting whose cost names a
+lot of its own side and no lot of the other side adds to its own side (#2384).
+Under AVERAGE "no lot of the other side" was still read lot by lot, but an
+AVERAGE sale reduces a pool and its cost is a claim about that pool's average
+(#2603), not a lot filter. The two readings met on a booked sale: holding a
+short at 101 beside longs at 100 and 102, `-1 X {}` sold from the longs and
+booked as `-1 X {101 USD}`, their average. Asked again of the inventory, as a
+consumer does for a posting with no recorded booking decision, that cost
+matched the short and neither long, and the sale read as a second short.
+
+So under AVERAGE a cost also names the other side when that side's pool accepts
+it as a claim (`average_claim_mismatch`, the rule booking refuses a claim by,
+now in `rustledger-core` so both ask the same rule). The claim must carry no
+date or label (the pool has neither, as above) and the pool must be held in the
+claim's cost currency. A booked sale then reads as the reduction it was, and a
+sale written `-1 X {101 USD}` books the way `-1 X {}` does: from the pool, not
+as a new short beside it. A cost the pool rejects that names an own-side lot
+still adds to that side.
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

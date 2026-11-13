@@ -385,6 +385,11 @@ Both reject a cost that matches no lot on either side (`-5 X {101 USD}` while
 holding only `10 X {100 USD}`), so a mistyped cost still fails, and so does a
 posting that names only a lot date or label.
 
+Under AVERAGE booking, which Python beancount does not implement, a sale's
+cost is a claim about the pool it sells from, so a cost that pool accepts as
+its average reduces the pool even when a lot on the posting's own side costs
+the same (ADR 0007, issue #2958).
+
 Pinned by `crates/rustledger-loader/tests/mixed_sign_holdings_test.rs` and the
 core test `a_cost_matching_only_its_own_side_is_an_augmentation` (issue
 #2384).

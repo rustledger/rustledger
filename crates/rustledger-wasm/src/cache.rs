@@ -454,7 +454,8 @@ use crate::types::{Error, LedgerOptions};
 /// advisory-only, as in `rledger check`), and a `ParsedLedger` validates
 /// after a booking error, setting the refused transaction aside, so it
 /// reports the `Balance failed` that follows one. An older blob would keep
-/// serving the old errors. (v95 is held by #2931; v96 was never released.)
+/// serving the old errors. (v95 was held by #2931 and never released; v96
+/// was never released.)
 /// v99: loader v71 (#2925). Both payloads' option diagnostics move: each
 /// carries its option's line, and a `Ledger`'s its file too, and an invalid
 /// option in an included file is its converter's error (`E7002`, `E7008`,
@@ -466,7 +467,7 @@ use crate::types::{Error, LedgerOptions};
 /// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
 /// lone header string moves it to no other field, so `* "p" <bad>` keeps
 /// payee `p` where `p` was the narration; an older blob would keep serving
-/// the shifted fields. (v100 is held by #2931 and v101 by #2952.)
+/// the shifted fields. (v100 was held by #2931 and never released.)
 /// v103: loader v73, unchanged. Both payloads move (#2949): a source with a
 /// parse error is booked and validated over the entries that did parse, as
 /// `rledger check` validates it, so a `ParsedLedger` archives those
@@ -475,8 +476,8 @@ use crate::types::{Error, LedgerOptions};
 /// archived one line-less `parse errors in <path>`. An older blob would keep
 /// serving the old errors: a `ParsedLedger` with no directives and no
 /// validation errors for a source with a parse error, and a `Ledger` with one
-/// line-less parse error per file. (v101 was never released; v104 is held by
-/// #2931.)
+/// line-less parse error per file. (v101 was never released; v104 was held by
+/// #2931 and never released.)
 /// v105: loader v73, unchanged. ARCHIVED LAYOUT moved (#2946): the
 /// `ParsedLedger` payload gained `query_option_errors` and the `Ledger` payload
 /// `query_errors`, what a query lists, in which a rejected `booking_method`'s
@@ -485,30 +486,38 @@ use crate::types::{Error, LedgerOptions};
 /// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
 /// also carries its parse and validation errors at character columns now,
 /// where a byte column read high after a BOM or a multi-byte character.
-/// (v104 is held by #2931.)
+/// (v104 was held by #2931 and never released.)
 /// v107: loader v73, unchanged. A `Ledger`'s error list moves (#2959): an
 /// include cycle's `LOAD` error carries the file and line of the `include`
 /// that closed it, where it had no location. An older blob would keep
-/// serving it with none. (v106 is held by #2931.)
+/// serving it with none. (v106 was held by #2931 and never released.)
 /// v108: loader v73, unchanged -- parsed directives did not move. Booking
 /// did (#2958): on an AVERAGE account holding lots of both signs, a sale or
 /// a cover whose stated cost the pool accepts as its average reduces the
 /// pool, where it was booked as a new lot on its own side when a lot there
 /// cost the same. `ParsedLedger` and `Ledger` archive booked directives, so an older
-/// blob would keep serving that new lot. (v106 is held by #2931.)
+/// blob would keep serving that new lot. (v106 was held by #2931 and never released.)
 /// v109: loader v73, unchanged. Both payloads' error lists move (#2961,
 /// #2964): a `Ledger`'s parse errors carry the parser's message with no
 /// `<path>: ` prefix, and a loader error (a validation finding, a booking
 /// error, an include's `LOAD` error) carries its end and its hint, on a
 /// `Ledger` and, for its booking errors, on a `ParsedLedger`. An older blob
 /// would keep serving the prefixed messages, the null ends and no hint.
-/// (v106 is held by #2931.)
+/// (v106 was held by #2931 and never released.)
+/// v110: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
+/// BOM in the middle of a line starts an invalid token that runs to the next
+/// blank, as in beancount, so a quote after it opens no string. Every input
+/// that changes has a parse error, so the loader's cache, saved only for an
+/// error-free load, holds none of them; both payloads here archive a source
+/// with parse errors, and an older blob would keep serving such a file with
+/// its old errors and values. (v104 and v106 were held by #2931 and never
+/// released; v108 was taken by #2970 and v109 by #2971.)
 /// v111: loader v73, unchanged. A `ParsedLedger`'s validation findings move
 /// (#2972): each carries the message, phase and hint the loader gives it, as
 /// `rledger check` reports them, so a finding's advisory note is folded into
 /// its message rather than given as its hint, and its context (a failing
 /// balance's `difference: 1, tolerance: 0`) is no longer its hint. An older
-/// blob would keep serving those hints. (v110 is held by #2931.)
+/// blob would keep serving those hints. (v110 was taken by #2931.)
 pub const CACHE_VERSION: u32 = 111;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

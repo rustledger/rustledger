@@ -4141,6 +4141,30 @@ plugin "auto_accounts"
         assert_eq!(late_prices(), 1, "ledger_diagnostics_multi");
     }
 
+    /// A BOM-led invalid token where a directive's argument belongs is one
+    /// `P0026`, and its range is the token's (#2928), not the whole
+    /// directive: the squiggle sits on the BOM, where "Remove BOM" is offered.
+    #[test]
+    fn test_parse_errors_to_diagnostics_bom_led_argument_ranges_over_the_token() {
+        let source = "2024-01-01 commodity USD\n2024-01-02 price USD 1 \u{FEFF}EUR\n  src: \"x\"\n";
+        let result = parse(source);
+        let diagnostics = parse_errors_to_diagnostics(&result, source, PositionEncoding::Utf16);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let d = &diagnostics[0];
+        assert_eq!(
+            d.code,
+            Some(lsp_types::NumberOrString::String("P0026".to_string()))
+        );
+        // `<BOM>EUR` on line 1: the BOM is one UTF-16 unit, at column 23.
+        assert_eq!(
+            d.range,
+            Range {
+                start: Position::new(1, 23),
+                end: Position::new(1, 27),
+            }
+        );
+    }
+
     /// Drift guard (#2925): every option diagnostic is published in the file
     /// its option is in, on its line, exactly where the loader locates it,
     /// which is what `rledger check` prints. An included file's go on that

@@ -736,7 +736,9 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     is no longer scanned, so the `document` entries found under it are
 ///     gone. A v69 blob of a ledger whose include sets an existing
 ///     `documents` root would keep serving those entries with no `E7009`.
-///     (v70 is held by #2931 and v73 by #2944; v72 is left free.)
+///     (v70 and v72 were held by #2931 and never released: it changes the
+///     parser's output only for an input with a parse error, which no cache
+///     blob is saved for, so it needs no loader version.)
 ///
 /// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An invalid
 ///     token after a lone header string moves it to no other field:

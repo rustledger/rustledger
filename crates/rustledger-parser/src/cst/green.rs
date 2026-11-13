@@ -1332,9 +1332,8 @@ fn emit_error_node_line(
     }
     let Some(ls) = line_start else { return };
     let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
-    let line_text = stripped.get(ls..end).unwrap_or("");
     let stray_bom = has_stray_bom(invalid, stripped);
-    let primary = classify_recovery_error(line_text, stray_bom, span);
+    let primary = classify_recovery_error(stripped, ls..end, invalid, stray_bom, span);
     let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
     out.push(primary);
     if !primary_is_bom && stray_bom {
@@ -1343,7 +1342,14 @@ fn emit_error_node_line(
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
         );
     }
-    super::convert::report_invalid_tokens_of_error_line(ls, invalid, stripped, bom_offset, out);
+    super::convert::report_invalid_tokens_of_error_line(
+        ls,
+        invalid,
+        stripped,
+        bom_offset,
+        !primary_is_bom && stray_bom,
+        out,
+    );
 }
 
 /// `error_node_check` on green: each `ERROR_NODE` line that is neither a section

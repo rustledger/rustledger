@@ -2515,8 +2515,9 @@ impl MainLoopState {
                 }
                 // Not part of the ledger (e.g. a scratch file while a
                 // multi-file ledger is loaded): it validates as a ledger of
-                // its own text, as `rledger check` on it does, with nothing
-                // from the ledger or the other buffers (#2955). The unopened
+                // its own text alone, with nothing from the ledger or the
+                // other buffers, and without following its own `include`s,
+                // which `rledger check` on it would load (#2955). The unopened
                 // files' diagnostics above are still republished, not
                 // cleared.
                 None => all_diagnostics(
@@ -3822,6 +3823,18 @@ mod tests {
     fn drain_published(
         receiver: &crossbeam_channel::Receiver<lsp_server::Message>,
     ) -> Vec<(String, Vec<(String, u32)>)> {
+        codes_only(&drain_published_with_messages(receiver))
+    }
+
+    /// One `textDocument/publishDiagnostics` as sent: its URI and each
+    /// diagnostic's `(code, 0-based line, message)`.
+    type Published = (String, Vec<(String, u32, String)>);
+
+    /// Every `textDocument/publishDiagnostics` sent so far, as
+    /// `(uri, [(code, 0-based line, message)])`.
+    fn drain_published_with_messages(
+        receiver: &crossbeam_channel::Receiver<lsp_server::Message>,
+    ) -> Vec<Published> {
         let mut published = Vec::new();
         while let Ok(msg) = receiver.try_recv() {
             if let lsp_server::Message::Notification(n) = msg
@@ -3829,19 +3842,19 @@ mod tests {
             {
                 let p: lsp_types::PublishDiagnosticsParams =
                     serde_json::from_value(n.params).expect("publishDiagnostics params");
-                let codes = p
+                let diags = p
                     .diagnostics
-                    .iter()
+                    .into_iter()
                     .map(|d| {
                         let code = match &d.code {
                             Some(lsp_types::NumberOrString::String(s)) => s.clone(),
                             Some(lsp_types::NumberOrString::Number(n)) => n.to_string(),
                             None => String::new(),
                         };
-                        (code, d.range.start.line)
+                        (code, d.range.start.line, d.message)
                     })
                     .collect();
-                published.push((p.uri.as_str().to_string(), codes));
+                published.push((p.uri.as_str().to_string(), diags));
             }
         }
         published
@@ -4853,34 +4866,55 @@ mod tests {
         found
     }
 
-    /// The diagnostics last published for `path`, as `(code, 0-based line,
-    /// message)`, sorted, with the codes in `codes` only.
+    /// The diagnostics last published for `path` in `published` (from
+    /// [`drain_published_with_messages`]), as `(code, 0-based line,
+    /// message)`, sorted, with the codes in `codes` only. Panics if nothing
+    /// was published for it.
+    ///
+    /// Read off the wire, as the client sees them, rather than off
+    /// `MainLoopState::diagnostics`: that cache keys an open buffer by its
+    /// URI's path and an unopened file by the loader's canonical path, which
+    /// are different strings on Windows (`C:\x` against `\\?\C:\x`), while
+    /// both reach the client under the one URI.
     fn published_located(
-        state: &MainLoopState,
+        published: &[Published],
         path: &std::path::Path,
         codes: &[&str],
     ) -> Vec<(String, u32, String)> {
-        let key = crate::AbsPathBuf::new(path.to_path_buf()).expect("absolute path");
-        let mut found: Vec<(String, u32, String)> = state
-            .diagnostics
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .filter_map(|d| {
-                let Some(lsp_types::NumberOrString::String(code)) = &d.code else {
-                    return None;
-                };
-                codes
-                    .contains(&code.as_str())
-                    .then(|| (code.clone(), d.range.start.line, d.message.clone()))
-            })
+        let uri = crate::path_to_uri(path).expect("file URI");
+        let diags = published
+            .iter()
+            .rev()
+            .find(|(u, _)| u.as_str() == uri.as_str()) // ratchet-allow: uri-string-eq comparing what was sent on the wire
+            .map(|(_, diags)| diags)
+            .unwrap_or_else(|| panic!("nothing published for {}: {published:?}", uri.as_str()));
+        let mut found: Vec<(String, u32, String)> = diags
+            .iter()
+            .filter(|(code, ..)| codes.contains(&code.as_str()))
+            .cloned()
             .collect();
         found.sort();
         found
     }
 
+    /// The codes of `published` (from [`drain_published_with_messages`]), as
+    /// [`drain_published`] returns them.
+    fn codes_only(published: &[Published]) -> Vec<(String, Vec<(String, u32)>)> {
+        published
+            .iter()
+            .map(|(uri, diags)| {
+                let codes = diags
+                    .iter()
+                    .map(|(code, line, _)| (code.clone(), *line))
+                    .collect();
+                (uri.clone(), codes)
+            })
+            .collect()
+    }
+
     /// #2955: a buffer outside the ledger is validated as a ledger of its own
-    /// text, as `rledger check` on it validates it, whatever else is open.
+    /// text alone, whatever else is open; for a file that includes nothing,
+    /// as here, that is what `rledger check` on it reports.
     /// It used to get the ledger's errors (b's E1001, at b's byte offset
     /// mapped onto its own text) once a ledger buffer was open, and nothing
     /// when none was.
@@ -4981,8 +5015,9 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let mut state = MainLoopState::new(sender, Some(main.clone()));
         open_doc(&mut state, &main, main_text);
-        let published = drain_published(&receiver);
-        assert_eq!(published_located(&state, &b, &["PLUGIN"]), check);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), check);
         assert_eq!(
             last_published_for(&published, &main),
             Some(vec![]),
@@ -4990,8 +5025,9 @@ mod tests {
         );
 
         open_doc(&mut state, &b, b_text);
-        let published = drain_published(&receiver);
-        assert_eq!(published_located(&state, &b, &["PLUGIN"]), check);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), check);
         assert_eq!(
             last_published_for(&published, &main),
             None,
@@ -5001,8 +5037,8 @@ mod tests {
         // Fixed: the error goes away.
         let fixed = b_text.replace("101 USD", "100 USD");
         change_doc(&mut state, &b, 2, &fixed);
-        drain_published(&receiver);
-        assert_eq!(published_located(&state, &b, &["PLUGIN"]), []);
+        let located = drain_published_with_messages(&receiver);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), []);
     }
 
     /// #2959: a missing include is published at its `include` line with
@@ -5036,13 +5072,14 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let mut state = MainLoopState::new(sender, Some(main.clone()));
         open_doc(&mut state, &main, main_text);
-        let published = drain_published(&receiver);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
         assert_eq!(
             last_published_for(&published, &main).map(sorted),
             Some(vec![("E2001".to_string(), 3), ("LOAD".to_string(), 0)]),
             "{published:?}"
         );
-        assert_eq!(published_located(&state, &main, &["LOAD"]), check_load);
+        assert_eq!(published_located(&located, &main, &["LOAD"]), check_load);
 
         std::fs::write(&missing, "2024-01-01 open Assets:M\n").expect("create missing");
         state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
@@ -5096,8 +5133,9 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let mut state = MainLoopState::new(sender, Some(main.clone()));
         open_doc(&mut state, &main, main_text);
-        let published = drain_published(&receiver);
-        assert_eq!(published_located(&state, &b, &["LOAD"]), check);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["LOAD"]), check);
         assert_eq!(
             last_published_for(&published, &main),
             Some(vec![]),

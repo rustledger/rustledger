@@ -598,6 +598,14 @@ pub(crate) fn run_ledger_validation(
     }
     // Each plugin error with the file its location names, so it is published
     // where `check` reports it (#2957).
+    //
+    // Its line is the one the loader's `build_wrappers` gave the plugin, from
+    // `ctx.source_map`. In a loaded ledger that is the ledger's map, the text
+    // of each file as last loaded from disk, not the live buffer, so in a
+    // buffer with unsaved edits that add or remove lines the line drifts off
+    // its entry until the ledger next reloads. Load errors' `include` lines
+    // (`LedgerState::load_errors`) come from the same loaded text and drift
+    // the same way (see `ledger_error_to_diagnostic`).
     let plugin_errors_out = match plugin_ctx {
         Some(ctx) if plugins_ok => plugin_errors
             .into_iter()
@@ -1041,7 +1049,9 @@ fn build_live_directive_overlay(
 /// The ledger is used only for a buffer that is one of its files, that is,
 /// with a `current_file_id`. A buffer outside it (a scratch file opened
 /// while a ledger is loaded) is validated as a single-file ledger of its own
-/// text, as `rledger check <that file>` validates it, whatever else is open:
+/// text alone, whatever else is open. Its `include`s are not followed, so it
+/// agrees with `rledger check <that file>` only for a file that includes
+/// nothing, since `check` loads what it includes.
 /// `ledger_state` and `other_buffer_overlays` are ignored for it (#2955).
 /// Validating the ledger for it instead mapped every other file's errors, by
 /// their byte offsets, onto the scratch buffer's lines, and ran the scratch

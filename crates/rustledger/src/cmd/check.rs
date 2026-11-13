@@ -469,10 +469,16 @@ pub fn run_with_writer<W: Write>(
                     let (file, line, column, end_line, end_column) = include_site
                         .as_ref()
                         .and_then(|site| {
-                            let src = load_result.source_map.get(site.file_id as usize)?;
-                            let (sl, sc) = src.line_col(site.span.start);
-                            let (el, ec) = src.line_col(site.span.end);
-                            Some((site.file.display().to_string(), sl, sc, el, ec))
+                            let map = &load_result.source_map;
+                            let start = map.locate(site.file_id, site.span.start)?;
+                            let end = map.locate(site.file_id, site.span.end)?;
+                            Some((
+                                site.file.display().to_string(),
+                                start.line,
+                                start.column,
+                                end.line,
+                                end.column,
+                            ))
                         })
                         .unwrap_or_else(|| {
                             (cycle.first().cloned().unwrap_or_default(), 1, 1, 1, 1)

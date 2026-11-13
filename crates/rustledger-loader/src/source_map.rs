@@ -438,12 +438,19 @@ impl DetachedLines {
     }
 
     /// The lines of `text`, built now, for a file whose text is not the
-    /// map's (an editor buffer with unsaved edits).
+    /// map's (an editor buffer with unsaved edits). The text is kept too, so
+    /// [`Self::text`] reads the buffer as it is.
     pub(crate) fn of_text(text: &str) -> Self {
         Self {
-            text: SourceText::from(""),
+            text: SourceText::from(text),
             starts: std::sync::OnceLock::from(line_starts_of(text)),
         }
+    }
+
+    /// Bytes `range` of the file's text, or `None` when the text was dropped
+    /// ([`SourceMap::drop_text`]) or `range` is not a slice of it.
+    pub(crate) fn text(&self, range: std::ops::Range<usize>) -> Option<&str> {
+        self.text.get(range)
     }
 }
 

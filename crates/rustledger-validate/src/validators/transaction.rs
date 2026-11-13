@@ -147,10 +147,42 @@ pub fn validate_transaction_late(
 
     // Compute tolerances and check transaction balance.
     let tolerances = calculate_tolerances(txn, &state.options);
+    let before = errors.len();
     validate_transaction_balance(txn, &tolerances, errors);
+    if errors.len() > before && kept_under_error_recovery(&state.options, location) {
+        errors.truncate(before);
+    }
 
     // Update inventories with booking validation
     update_inventories(state, txn, errors);
+}
+
+/// Whether the transaction at `location` holds an invalid token, read from
+/// its source text by the parser's own rule
+/// ([`rustledger_parser::transaction_holds_invalid_token`]).
+///
+/// Such a transaction is kept under error recovery (#2932) with what recovery
+/// could read of it, so a posting's price or cost after the invalid token is
+/// gone (`1 HOOL <BOM>{2 USD}` keeps `1 HOOL`). beancount's grammar never
+/// builds it, so it checks no balance there; a residual here would be an
+/// artifact of the recovery, not a finding about the ledger, beside the parse
+/// error already reported for the token (#2954). The balance check asks this
+/// only once it has found a residual, so a ledger that balances never reads
+/// its source here. `false` without a location or without the text
+/// ([`crate::SourceLines::with_text`]), where the residual is reported as
+/// before.
+fn kept_under_error_recovery(
+    options: &crate::ValidationOptions,
+    location: Option<(rustledger_parser::Span, u16)>,
+) -> bool {
+    let Some((span, file_id)) = location else {
+        return false;
+    };
+    options
+        .source_lines
+        .as_ref()
+        .and_then(|lines| lines.text(file_id, span.start..span.end))
+        .is_some_and(|text| rustledger_parser::transaction_holds_invalid_token(&text))
 }
 
 /// Whether `txn.postings[i]` is the first posting in `txn` to its account.

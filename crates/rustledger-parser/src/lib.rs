@@ -72,6 +72,7 @@ pub mod format {
 pub use cst::{
     BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
     parse_flat, parse_structured, parse_via_cst, parse_via_cst_opts,
+    transaction_holds_invalid_token,
 };
 
 // Rowan types CST consumers need. Flat re-exports at the crate

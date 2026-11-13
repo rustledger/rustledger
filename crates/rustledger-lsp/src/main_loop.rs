@@ -2185,10 +2185,15 @@ impl MainLoopState {
         for change in params.changes {
             tracing::debug!("File {:?}: {:?}", change.uri.as_str(), change.typ);
 
-            // Check if the changed file is part of our journal
+            // Check if the changed file is part of our journal. While the
+            // ledger has a load error, any change may be what fixes it (the
+            // missing include created, say), and that file is not part of
+            // the ledger yet, so reload on it too; otherwise the error stays
+            // published after its cause is gone (#2959).
             if let Ok(path) = uri_to_path(&change.uri) {
                 let ledger_guard = self.ledger_state.read();
-                if ledger_guard.contains_file(&path) {
+                if ledger_guard.contains_file(&path) || ledger_guard.load_errors().next().is_some()
+                {
                     should_reload_journal = true;
                 }
             }
@@ -2509,16 +2514,19 @@ impl MainLoopState {
                     .unwrap_or_default()
                 }
                 // Not part of the ledger (e.g. a scratch file while a
-                // multi-file ledger is loaded): it self-validates via the
-                // single-file path, and the unopened files' diagnostics above
-                // are still republished, not cleared.
+                // multi-file ledger is loaded): it validates as a ledger of
+                // its own text alone, with nothing from the ledger or the
+                // other buffers, and without following its own `include`s,
+                // which `rledger check` on it would load (#2955). The unopened
+                // files' diagnostics above are still republished, not
+                // cleared.
                 None => all_diagnostics(
                     &result,
                     text,
-                    Some(ledger_state),
+                    None,
                     None,
                     current_canonical_path.as_deref(),
-                    &view_directives(&other_buffer_overlays),
+                    &[],
                     self.position_encoding,
                 ),
             };
@@ -3815,6 +3823,18 @@ mod tests {
     fn drain_published(
         receiver: &crossbeam_channel::Receiver<lsp_server::Message>,
     ) -> Vec<(String, Vec<(String, u32)>)> {
+        codes_only(&drain_published_with_messages(receiver))
+    }
+
+    /// One `textDocument/publishDiagnostics` as sent: its URI and each
+    /// diagnostic's `(code, 0-based line, message)`.
+    type Published = (String, Vec<(String, u32, String)>);
+
+    /// Every `textDocument/publishDiagnostics` sent so far, as
+    /// `(uri, [(code, 0-based line, message)])`.
+    fn drain_published_with_messages(
+        receiver: &crossbeam_channel::Receiver<lsp_server::Message>,
+    ) -> Vec<Published> {
         let mut published = Vec::new();
         while let Ok(msg) = receiver.try_recv() {
             if let lsp_server::Message::Notification(n) = msg
@@ -3822,19 +3842,19 @@ mod tests {
             {
                 let p: lsp_types::PublishDiagnosticsParams =
                     serde_json::from_value(n.params).expect("publishDiagnostics params");
-                let codes = p
+                let diags = p
                     .diagnostics
-                    .iter()
+                    .into_iter()
                     .map(|d| {
                         let code = match &d.code {
                             Some(lsp_types::NumberOrString::String(s)) => s.clone(),
                             Some(lsp_types::NumberOrString::Number(n)) => n.to_string(),
                             None => String::new(),
                         };
-                        (code, d.range.start.line)
+                        (code, d.range.start.line, d.message)
                     })
                     .collect();
-                published.push((p.uri.as_str().to_string(), codes));
+                published.push((p.uri.as_str().to_string(), diags));
             }
         }
         published
@@ -4821,5 +4841,314 @@ mod tests {
         open_doc(&mut state, &c, "garbage\n");
         assert_eq!(runs() - before, 2, "broken without one");
         drain_published(&receiver);
+    }
+
+    /// What `rledger check` reports in `target` for the ledger rooted at
+    /// `root` as it is on disk, as `(code, 0-based line, message)`, sorted.
+    fn check_located(
+        root: &std::path::Path,
+        target: &std::path::Path,
+    ) -> Vec<(String, u32, String)> {
+        let ledger = rustledger_loader::load(root, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let mut found: Vec<(String, u32, String)> = ledger
+            .errors
+            .iter()
+            .filter_map(|e| {
+                let loc = e.location.as_ref()?;
+                (loc.file == target).then(|| {
+                    let line = u32::try_from(loc.line).expect("line fits u32") - 1;
+                    (e.code.clone(), line, e.message.clone())
+                })
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The diagnostics last published for `path` in `published` (from
+    /// [`drain_published_with_messages`]), as `(code, 0-based line,
+    /// message)`, sorted, with the codes in `codes` only. Panics if nothing
+    /// was published for it.
+    ///
+    /// Read off the wire, as the client sees them, rather than off
+    /// `MainLoopState::diagnostics`: that cache keys an open buffer by its
+    /// URI's path and an unopened file by the loader's canonical path, which
+    /// are different strings on Windows (`C:\x` against `\\?\C:\x`), while
+    /// both reach the client under the one URI.
+    fn published_located(
+        published: &[Published],
+        path: &std::path::Path,
+        codes: &[&str],
+    ) -> Vec<(String, u32, String)> {
+        let uri = crate::path_to_uri(path).expect("file URI");
+        let diags = published
+            .iter()
+            .rev()
+            .find(|(u, _)| u.as_str() == uri.as_str()) // ratchet-allow: uri-string-eq comparing what was sent on the wire
+            .map(|(_, diags)| diags)
+            .unwrap_or_else(|| panic!("nothing published for {}: {published:?}", uri.as_str()));
+        let mut found: Vec<(String, u32, String)> = diags
+            .iter()
+            .filter(|(code, ..)| codes.contains(&code.as_str()))
+            .cloned()
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The codes of `published` (from [`drain_published_with_messages`]), as
+    /// [`drain_published`] returns them.
+    fn codes_only(published: &[Published]) -> Vec<(String, Vec<(String, u32)>)> {
+        published
+            .iter()
+            .map(|(uri, diags)| {
+                let codes = diags
+                    .iter()
+                    .map(|(code, line, _)| (code.clone(), *line))
+                    .collect();
+                (uri.clone(), codes)
+            })
+            .collect()
+    }
+
+    /// #2955: a buffer outside the ledger is validated as a ledger of its own
+    /// text alone, whatever else is open; for a file that includes nothing,
+    /// as here, that is what `rledger check` on it reports.
+    /// It used to get the ledger's errors (b's E1001, at b's byte offset
+    /// mapped onto its own text) once a ledger buffer was open, and nothing
+    /// when none was.
+    #[test]
+    fn a_buffer_outside_the_ledger_validates_alone() {
+        let (_tmp, main, b) = ledger_dir(MAIN_ON_DISK);
+        let scratch = main.with_file_name("scratch.beancount");
+        let scratch_text = "2024-01-01 open Assets:S\n";
+        std::fs::write(&scratch, scratch_text).expect("write scratch");
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+
+        // No ledger buffer open, then one open: the same answer.
+        open_doc(&mut state, &scratch, scratch_text);
+        let published = drain_published(&receiver);
+        assert_eq!(last_published_for(&published, &scratch), Some(vec![]));
+        close_doc(&mut state, &scratch);
+        open_doc(&mut state, &main, MAIN_ON_DISK);
+        open_doc(&mut state, &scratch, scratch_text);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &scratch),
+            Some(vec![]),
+            "none of the ledger's errors: {published:?}"
+        );
+        assert_eq!(
+            last_published_for(&published, &b),
+            b_own(),
+            "the unopened include is still published: {published:?}"
+        );
+
+        // Its own errors, where `check` on it reports them; its `plugin`
+        // line does not stand in for main's, so b keeps its error.
+        let scratch_text = "plugin \"auto_accounts\"\n2024-01-01 open Assets:S\n\
+                            2024-01-02 * \"x\"\n  Assets:S  1 USD\n  Assets:T  -1 USD\n\
+                            2024-01-03 balance Assets:S 2 USD\n";
+        std::fs::write(&scratch, scratch_text).expect("write scratch");
+        change_doc(&mut state, &scratch, 2, scratch_text);
+        let published = drain_published(&receiver);
+        let check: Vec<(String, u32)> = check_located(&scratch, &scratch)
+            .into_iter()
+            .map(|(code, line, _)| (code, line))
+            .collect();
+        assert_eq!(check, [("E2001".to_string(), 5)], "check's reference");
+        assert_eq!(
+            last_published_for(&published, &scratch).map(sorted),
+            Some(check),
+            "{published:?}"
+        );
+        assert_eq!(
+            shown_for(&published, &b, b_own().unwrap()),
+            b_own().unwrap()
+        );
+
+        // A single-file ledger loaded and open: the same.
+        let (_tmp2, single, _) = ledger_dir("2024-01-01 open Assets:X\n");
+        let other = single.with_file_name("scratch.beancount");
+        std::fs::write(&other, scratch_text).expect("write scratch");
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(single.clone()));
+        open_doc(&mut state, &single, "2024-01-01 open Assets:X\n");
+        open_doc(&mut state, &other, scratch_text);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &other).map(sorted),
+            Some(vec![("E2001".to_string(), 5)]),
+            "{published:?}"
+        );
+    }
+
+    /// #2957: a plugin error is published on the file and line `rledger
+    /// check` reports it at: here an included file nobody has open, and,
+    /// once it is opened, its own publish. It used to be at line 0 of the
+    /// main file, and nothing in b.
+    #[test]
+    fn plugin_errors_are_published_where_check_reports_them() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        let main_text = "plugin \"beancount.plugins.unique_prices\"\ninclude \"b.beancount\"\n";
+        let b_text = "2024-01-01 commodity HOOL\n2024-01-01 commodity USD\n\n\
+                      2024-01-02 price HOOL 100 USD\n2024-01-02 price HOOL 101 USD\n";
+        std::fs::write(&main, main_text).expect("write main");
+        std::fs::write(&b, b_text).expect("write b");
+
+        let check = check_located(&main, &b);
+        assert_eq!(
+            check
+                .iter()
+                .map(|(c, l, _)| (c.as_str(), *l))
+                .collect::<Vec<_>>(),
+            [("PLUGIN", 3)],
+            "check's reference: {check:?}"
+        );
+        assert_eq!(check_located(&main, &main), [], "nothing in main");
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_text);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), check);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![]),
+            "not in main: {published:?}"
+        );
+
+        open_doc(&mut state, &b, b_text);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), check);
+        assert_eq!(
+            last_published_for(&published, &main),
+            None,
+            "main's own publish is not repeated: {published:?}"
+        );
+
+        // Fixed: the error goes away.
+        let fixed = b_text.replace("101 USD", "100 USD");
+        change_doc(&mut state, &b, 2, &fixed);
+        let located = drain_published_with_messages(&receiver);
+        assert_eq!(published_located(&located, &b, &["PLUGIN"]), []);
+    }
+
+    /// #2959: a missing include is published at its `include` line with
+    /// `rledger check`'s message, beside the errors it causes, and cleared
+    /// once the file is created.
+    #[test]
+    fn a_missing_include_is_published_at_its_include_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let missing = dir.join("missing.beancount");
+        let main_text = "include \"missing.beancount\"\n\n2024-01-01 open Assets:A\n\
+                         2024-01-02 balance Assets:A 1 USD\n";
+        std::fs::write(&main, main_text).expect("write main");
+
+        let check = check_located(&main, &main);
+        assert_eq!(
+            check
+                .iter()
+                .map(|(c, l, _)| (c.as_str(), *l))
+                .collect::<Vec<_>>(),
+            [("E2001", 3), ("LOAD", 0)],
+            "check's reference: {check:?}"
+        );
+        let check_load: Vec<_> = check
+            .iter()
+            .filter(|(c, ..)| c == "LOAD")
+            .cloned()
+            .collect();
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_text);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(
+            last_published_for(&published, &main).map(sorted),
+            Some(vec![("E2001".to_string(), 3), ("LOAD".to_string(), 0)]),
+            "{published:?}"
+        );
+        assert_eq!(published_located(&located, &main, &["LOAD"]), check_load);
+
+        std::fs::write(&missing, "2024-01-01 open Assets:M\n").expect("create missing");
+        state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
+            changes: vec![lsp_types::FileEvent {
+                uri: crate::path_to_uri(&missing).expect("file URI"),
+                typ: lsp_types::FileChangeType::CREATED,
+            }],
+        });
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![("E2001".to_string(), 3)]),
+            "the load error is gone once the include resolves: {published:?}"
+        );
+    }
+
+    /// #2959: an include cycle is published at the `include` that closes it,
+    /// in the including file (here an unopened include), with `rledger
+    /// check`'s message; an unreadable include (a directory) likewise. Both
+    /// are cleared once fixed on disk.
+    #[test]
+    fn include_cycles_and_unreadable_includes_are_published_at_their_include() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonical tempdir");
+        let main = dir.join("main.beancount");
+        let b = dir.join("b.beancount");
+        std::fs::create_dir(dir.join("adir.beancount")).expect("mkdir");
+        let main_text = "include \"b.beancount\"\n2024-01-01 open Assets:A\n";
+        let b_cycle = "2024-01-01 open Assets:B\ninclude \"main.beancount\"\n\
+                       include \"adir.beancount\"\n";
+        std::fs::write(&main, main_text).expect("write main");
+        std::fs::write(&b, b_cycle).expect("write b");
+
+        let check = check_located(&main, &b);
+        assert_eq!(
+            check
+                .iter()
+                .map(|(c, l, _)| (c.as_str(), *l))
+                .collect::<Vec<_>>(),
+            [("LOAD", 1), ("LOAD", 2)],
+            "check's reference: {check:?}"
+        );
+        assert!(
+            check
+                .iter()
+                .any(|(_, _, m)| m.contains("Duplicate filename parsed")),
+            "{check:?}"
+        );
+        assert_eq!(check_located(&main, &main), [], "nothing in main");
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, Some(main.clone()));
+        open_doc(&mut state, &main, main_text);
+        let located = drain_published_with_messages(&receiver);
+        let published = codes_only(&located);
+        assert_eq!(published_located(&located, &b, &["LOAD"]), check);
+        assert_eq!(
+            last_published_for(&published, &main),
+            Some(vec![]),
+            "{published:?}"
+        );
+
+        std::fs::write(&b, "2024-01-01 open Assets:B\n").expect("fix b");
+        disk_changed(&mut state, &b);
+        let published = drain_published(&receiver);
+        assert_eq!(
+            last_published_for(&published, &b),
+            Some(vec![]),
+            "cleared once fixed: {published:?}"
+        );
     }
 }

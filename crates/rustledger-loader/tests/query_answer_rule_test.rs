@@ -112,6 +112,7 @@ fn test_load_error_blocks_queries_by_variant() {
     assert!(
         !LoadError::IncludeCycle {
             cycle: vec!["a".to_string(), "a".to_string()],
+            include_site: None,
         }
         .blocks_queries()
     );

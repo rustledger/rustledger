@@ -129,7 +129,7 @@ fn test_load_include_cycle_detection() {
     let result = Loader::new().load(&path);
 
     match result {
-        Err(LoadError::IncludeCycle { cycle }) => {
+        Err(LoadError::IncludeCycle { cycle, .. }) => {
             // The cycle should include both files
             assert!(cycle.len() >= 2, "cycle should have at least 2 entries");
             let cycle_str = cycle.join(" -> ");
@@ -197,6 +197,43 @@ fn test_include_cycle_display_contains_duplicate_filename_issue_765() {
         "IncludeCycle Display should still preserve the cycle path \
          for debuggability. Got: {rendered}"
     );
+}
+
+/// #2959: an include cycle carries the `include` that closed it (in
+/// `cycle_b`, the include of `cycle_a`), and the ledger's `LOAD` error is
+/// located there, as an unreadable include's is, so every surface can show
+/// it on that line.
+#[test]
+fn test_include_cycle_is_located_at_the_include_that_closes_it() {
+    let path = fixtures_path("cycle_a.beancount");
+    let raw = Loader::new().load(&path).expect("a cycle is not fatal");
+    let cycle = raw
+        .errors
+        .iter()
+        .find(|e| matches!(e, LoadError::IncludeCycle { .. }))
+        .expect("a cycle error");
+    let site = cycle.include_site().expect("the cycle's include site");
+    assert_eq!(site.file.file_name(), Some("cycle_b.beancount".as_ref()));
+    let b = raw.source_map.get(site.file_id as usize).expect("cycle_b");
+    assert!(
+        b.source.as_str()[site.span.start..site.span.end]
+            .starts_with("include \"cycle_a.beancount\""),
+        "the include directive"
+    );
+
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+    let load_error = ledger
+        .errors
+        .iter()
+        .find(|e| e.code == "LOAD")
+        .expect("the LOAD error");
+    let location = load_error.location.as_ref().expect("located");
+    assert_eq!(
+        location.file.file_name(),
+        Some("cycle_b.beancount".as_ref())
+    );
+    assert_eq!((location.line, location.column), (2, 1));
+    assert!(load_error.message.contains("Duplicate filename parsed"));
 }
 
 #[test]

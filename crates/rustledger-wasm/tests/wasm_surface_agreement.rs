@@ -20,10 +20,10 @@ fn get_field(obj: &JsValue, field: &str) -> JsValue {
 }
 
 /// `errors` (a JS array of WASM `Error`s) is exactly `case`'s findings: code,
-/// line and message start, in any order. `parse_prefix` is what a surface puts
-/// before a parse error's message: the multi-file surfaces name the file
-/// there (`ledger.beancount: `), the single-source ones nothing.
-fn check(case: &SurfaceCase, surface: &str, errors: &JsValue, parse_prefix: &str) {
+/// line and message start, in any order. A parse error's message is the
+/// parser's on every surface: the multi-file ones prefixed it with the file
+/// (`ledger.beancount: `), which is in its own field (#2961).
+fn check(case: &SurfaceCase, surface: &str, errors: &JsValue) {
     let mut got: Vec<(String, u32, String)> = js_sys::Array::from(errors)
         .iter()
         .map(|e| {
@@ -42,20 +42,9 @@ fn check(case: &SurfaceCase, surface: &str, errors: &JsValue, parse_prefix: &str
     for ((code, line, message), finding) in got.iter().zip(&want) {
         assert_eq!(code, finding.code, "{context}");
         assert_eq!(*line, finding.line, "{context}");
-        let prefix = if finding.code.starts_with('P') {
-            parse_prefix
-        } else {
-            ""
-        };
-        assert!(
-            message.starts_with(&format!("{prefix}{}", finding.message)),
-            "{context}"
-        );
+        assert!(message.starts_with(finding.message), "{context}");
     }
 }
-
-/// What the multi-file surfaces put before a parse error's message.
-const MULTI_FILE_PREFIX: &str = "ledger.beancount: ";
 
 fn files(case: &SurfaceCase) -> JsValue {
     let files = js_sys::Object::new();
@@ -72,7 +61,7 @@ fn files(case: &SurfaceCase) -> JsValue {
 fn wasm_surfaces_report_the_shared_findings() {
     for case in SURFACE_CASES {
         let result = rustledger_wasm::validate_source(case.source).expect("validateSource");
-        check(case, "validateSource", &get_field(&result, "errors"), "");
+        check(case, "validateSource", &get_field(&result, "errors"));
         assert_eq!(
             get_field(&result, "valid").as_bool(),
             Some(case.findings.is_empty()),
@@ -82,19 +71,13 @@ fn wasm_surfaces_report_the_shared_findings() {
 
         let result = rustledger_wasm::validate_multi_file(files(case), "ledger.beancount")
             .expect("validateMultiFile");
-        check(
-            case,
-            "validateMultiFile",
-            &get_field(&result, "errors"),
-            MULTI_FILE_PREFIX,
-        );
+        check(case, "validateMultiFile", &get_field(&result, "errors"));
 
         let parsed = rustledger_wasm::ParsedLedger::new(case.source);
         check(
             case,
             "ParsedLedger",
             &parsed.get_errors().expect("getErrors"),
-            "",
         );
         let restored = rustledger_wasm::ParsedLedger::from_cache(
             &parsed.serialize().expect("serialize"),
@@ -105,24 +88,17 @@ fn wasm_surfaces_report_the_shared_findings() {
             case,
             "ParsedLedger from cache",
             &restored.get_errors().expect("getErrors"),
-            "",
         );
 
         let ledger = rustledger_wasm::Ledger::from_files(files(case), "ledger.beancount")
             .expect("fromFiles");
-        check(
-            case,
-            "Ledger",
-            &ledger.get_errors().expect("getErrors"),
-            MULTI_FILE_PREFIX,
-        );
+        check(case, "Ledger", &ledger.get_errors().expect("getErrors"));
         let restored = rustledger_wasm::Ledger::from_cache(&ledger.serialize().expect("ser"))
             .expect("fromCache");
         check(
             case,
             "Ledger from cache",
             &restored.get_errors().expect("getErrors"),
-            MULTI_FILE_PREFIX,
         );
     }
 }

@@ -330,11 +330,9 @@ impl Ledger {
     /// `info()`) lists the plain [`option_warnings_to_errors`].
     ///
     /// A source that fails to parse is loaded too (#2949), so this holds
-    /// there as well, with one exception: WASM's `queryMultiFile`
-    /// (`query_with_filesystem` in `rustledger-wasm`, which points back here)
-    /// refuses on a parse error before a `Ledger` exists and lists no option
-    /// diagnostic, where the FFI's `query-file` lists this. Revisit when that
-    /// path can reach this rule (#2960).
+    /// there as well, on every query surface: WASM's `queryMultiFile` too,
+    /// which refused on a parse error before a `Ledger` existed and listed no
+    /// option diagnostic (#2960).
     #[must_use]
     pub fn query_option_errors(&self) -> Vec<LedgerError> {
         let mut errors = option_warnings_to_errors(&self.options.warnings);
@@ -1856,18 +1854,17 @@ pub fn plugin_error_to_ledger_error(
 /// the other lacks, or if `check` stops re-reading the file, at which point
 /// it should call this.
 ///
-/// WASM does not call this either: `parse_error_fields` in
-/// `rustledger-wasm/src/helpers.rs` maps the same message, code, phase and
-/// hint once for every WASM surface, because its single-source surfaces
-/// (`parse`, `format`, `validateSource`) build no [`LoadError`] or
-/// [`SourceMap`] to call this with. (The [`LedgerError`] this returns does
-/// carry the end, in `source_span` and `file_id`; WASM's multi-file surfaces
-/// report null ends for validation and other non-parse findings only because
-/// their `From<LedgerError>` conversion does not locate it, issue #2964.) That copy
-/// is deliberate and points back here; its `parse_error_mapping_parity` test
-/// pins the two to agree on message, code, phase, hint, file, line and
-/// column. Revisit if WASM's single-source surfaces come to build a
-/// [`LoadError`] and [`SourceMap`], at which point WASM should call this.
+/// WASM's multi-file surfaces call this (`load_errors_to_errors`, which
+/// locates the end from `source_span` with the load's [`SourceMap`]; #2961,
+/// #2964). Its single-source surfaces (`parse`, `format`, `validateSource`,
+/// `ParsedLedger`) do not: they build no [`LoadError`] or [`SourceMap`] to
+/// call this with, so `parse_error_fields` in `rustledger-wasm/src/helpers.rs`
+/// maps the same message, code, phase and hint for them. That copy is
+/// deliberate and points back here; its `parse_error_mapping_parity` test
+/// pins this, the multi-file and the single-source surfaces to agree on
+/// every field, the end included. Revisit if WASM's single-source surfaces
+/// come to build a [`LoadError`] and [`SourceMap`], at which point they
+/// should call this too.
 #[must_use]
 pub fn parse_errors_to_ledger_errors(
     failure: &LoadError,

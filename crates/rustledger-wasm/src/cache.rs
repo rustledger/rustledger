@@ -490,7 +490,14 @@ use crate::types::{Error, LedgerOptions};
 /// include cycle's `LOAD` error carries the file and line of the `include`
 /// that closed it, where it had no location. An older blob would keep
 /// serving it with none. (v106 is held by #2931.)
-pub const CACHE_VERSION: u32 = 107;
+/// v109: loader v73, unchanged. Both payloads' error lists move (#2961,
+/// #2964): a `Ledger`'s parse errors carry the parser's message with no
+/// `<path>: ` prefix, and a loader error (a validation finding, a booking
+/// error, an include's `LOAD` error) carries its end and its hint, on a
+/// `Ledger` and, for its booking errors, on a `ParsedLedger`. An older blob
+/// would keep serving the prefixed messages, the null ends and no hint.
+/// (v106 is held by #2931 and v108 by #2970.)
+pub const CACHE_VERSION: u32 = 109;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

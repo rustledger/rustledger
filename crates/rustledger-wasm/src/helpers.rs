@@ -33,18 +33,18 @@ pub fn parse_error_to_wasm(
 /// [`parse_error_to_wasm`] and the multi-file
 /// [`crate::api::load_errors_to_errors`] both build on.
 ///
-/// A deliberate copy of the loader's
+/// For the single-source surfaces (`parse`, `format`, `validateSource`,
+/// `ParsedLedger`) only: a deliberate copy of the loader's
 /// [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the FFI),
-/// not a call to it: that wants a `LoadError` and its `SourceMap`, which the
-/// single-source surfaces (`parse`, `format`, `validateSource`) never build.
-/// (A `LedgerError` does carry its end, as `source_span` and `file_id`; only
-/// its `ErrorLocation` is a point. The multi-file surfaces still report null
-/// ends for validation and other non-parse findings, because
-/// `From<LedgerError> for Error` does not compute them, issue #2964.) That function points back here, and
-/// `parse_error_mapping_parity` below pins the two to agree on message, code,
-/// phase, hint, file, line and column. Revisit if the single-source surfaces
-/// come to build a `LoadError` and `SourceMap`, at which point WASM should map
-/// through the loader's function and locate the end from `source_span`.
+/// not a call to it, because that wants a `LoadError` and its `SourceMap`,
+/// which those surfaces never build. The multi-file surfaces have both, so
+/// they call the loader's function and locate the result with
+/// [`ledger_error_to_wasm`] (#2961, #2964). That function points back here,
+/// and `parse_error_mapping_parity` below pins the single-source and
+/// multi-file surfaces and the loader to agree on every field (message,
+/// code, phase, hint, file, line, column, end, severity). Revisit if the
+/// single-source surfaces come to build a `LoadError` and `SourceMap`, at
+/// which point they should map through the loader's function too.
 pub fn parse_error_fields(e: &rustledger_parser::ParseError) -> Error {
     Error::new(e.message())
         .with_code(format!("P{:04}", e.kind_code()))
@@ -74,6 +74,42 @@ fn line_col_u32((line, column): (usize, usize)) -> (u32, u32) {
         u32::try_from(line).unwrap_or(u32::MAX),
         u32::try_from(column).unwrap_or(u32::MAX),
     )
+}
+
+/// A loader [`rustledger_loader::LedgerError`] as the WASM [`Error`], placed
+/// through `source_map` (the load's): every field of `From<LedgerError>`
+/// (message, code, phase, hint, severity, and the start the loader located),
+/// plus the end of `source_span`, located in `file_id` by the loader's
+/// canonical [`rustledger_loader::SourceMap::locate`].
+///
+/// What every surface holding the load's `SourceMap` converts a loader error
+/// with. The multi-file surfaces converted through `From<LedgerError>`
+/// alone, which cannot locate the end, so a validation finding, a booking
+/// error or an include's `LOAD` error had a null end there and an end on
+/// `validateSource` (#2964).
+///
+/// The end stays null where the error has no span or no start, and where
+/// `file_id` is not a source file of the map (a placeholder location, such
+/// as a plugin's `<auto_accounts>`, has a line and no text to end in).
+pub fn ledger_error_to_wasm(
+    e: rustledger_loader::LedgerError,
+    source_map: &rustledger_loader::SourceMap,
+) -> Error {
+    let end = match (e.location.as_ref(), e.source_span, e.file_id) {
+        (Some(_), Some((_, end)), Some(file_id))
+            if source_map.get(usize::from(file_id)).is_some() =>
+        {
+            source_map.locate(file_id, end)
+        }
+        _ => None,
+    };
+    let mut out = Error::from(e);
+    if let Some(end) = end {
+        let (end_line, end_column) = line_col_u32((end.line, end.column));
+        out.end_line = Some(end_line);
+        out.end_column = Some(end_column);
+    }
+    out
 }
 
 /// Convert a [`rustledger_validate::ValidationError`] into the rich WASM
@@ -320,7 +356,12 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .unzip();
 
             let mut errors = parse_errors;
-            errors.extend(ledger.errors.into_iter().map(Error::from));
+            errors.extend(
+                ledger
+                    .errors
+                    .into_iter()
+                    .map(|e| ledger_error_to_wasm(e, &source_map)),
+            );
 
             ProcessedLedger {
                 directives,
@@ -370,13 +411,17 @@ pub fn has_fatal(errors: &[Error]) -> bool {
 /// closing an account with a balance), which `rledger check` and bean-check
 /// do not report either; `rledger lint closed-nonempty` does (#2937). For the
 /// surfaces that validate through the loader (`validateMultiFile`,
-/// `validateWithHost`, `Ledger.fromFiles`); [`run_validation`] leaves them out
-/// the same way.
-pub fn reported_ledger_errors(errors: Vec<rustledger_loader::LedgerError>) -> Vec<Error> {
+/// `validateWithHost`, `Ledger.fromFiles`, `queryMultiFile`);
+/// [`run_validation`] leaves them out the same way. Each is placed through
+/// `source_map`, the load's ([`ledger_error_to_wasm`]).
+pub fn reported_ledger_errors(
+    errors: Vec<rustledger_loader::LedgerError>,
+    source_map: &rustledger_loader::SourceMap,
+) -> Vec<Error> {
     errors
         .into_iter()
         .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
-        .map(Error::from)
+        .map(|e| ledger_error_to_wasm(e, source_map))
         .collect()
 }
 
@@ -1111,16 +1156,24 @@ mod option_diagnostic_tests {
 
 /// The drift guard of [`parse_error_fields`]' deliberate copy of the
 /// loader's [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the
-/// FFI and, inline, `rledger check`): the same parse errors, through the
-/// loader's mapping, the multi-file [`crate::api::load_errors_to_errors`] and
-/// the single-source [`parse_errors_to_wasm`], agree on message, code, phase,
-/// hint, file, line and column. After a BOM and a multi-byte character, so
-/// the columns count characters on every side.
+/// FFI and, inline, `rledger check`), and of the multi-file surfaces against
+/// the single-source ones (#2961, #2964).
+///
+/// The same parse errors, through the loader's mapping, the multi-file
+/// [`crate::api::load_errors_to_errors`] and the single-source
+/// [`parse_errors_to_wasm`], agree on every field: message (with no path
+/// prefix, #2961), code, phase, hint, file, line, column, end and severity.
+/// After a BOM and a multi-byte character, so the columns count characters
+/// on every side. And on the same ledgers, `validateSource`,
+/// `validateMultiFile` and `Ledger.fromFiles` report every finding (parse
+/// errors, booking errors, validation findings) at the same start and end
+/// (#2964: the multi-file surfaces gave a loader finding a null end).
 #[cfg(test)]
 mod parse_error_mapping_parity {
     use super::*;
 
-    /// Message, code, phase, hint, file, line, column.
+    /// Message, code, phase, hint, file, line, column, end line, end column,
+    /// severity.
     type Row = (
         String,
         Option<String>,
@@ -1129,6 +1182,9 @@ mod parse_error_mapping_parity {
         Option<String>,
         Option<u32>,
         Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        String,
     );
 
     const MAIN: &str = "main.beancount";
@@ -1139,15 +1195,30 @@ mod parse_error_mapping_parity {
         2024-01-06 * \u{FEFF}\"ab\"\n";
 
     fn wasm_row(e: Error) -> Row {
-        (e.message, e.code, e.phase, e.hint, e.file, e.line, e.column)
+        (
+            e.message,
+            e.code,
+            e.phase,
+            e.hint,
+            e.file,
+            e.line,
+            e.column,
+            e.end_line,
+            e.end_column,
+            format!("{:?}", e.severity),
+        )
+    }
+
+    fn vfs(source: &str) -> VirtualFileSystem {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(MAIN, source);
+        vfs
     }
 
     #[test]
     fn test_parse_error_mapping_agrees_with_the_loaders() {
-        let mut vfs = VirtualFileSystem::new();
-        vfs.add_file(MAIN, SOURCE);
         let raw = Loader::new()
-            .with_filesystem(Box::new(vfs))
+            .with_filesystem(Box::new(vfs(SOURCE)))
             .load(Path::new(MAIN))
             .expect("loads");
         let failure = raw
@@ -1156,11 +1227,17 @@ mod parse_error_mapping_parity {
             .find(|e| matches!(e, LoadError::ParseErrors { .. }))
             .expect("the source fails to parse");
 
+        // The loader's own fields, the end located from its `source_span`
+        // by the canonical rule.
         let canonical: Vec<Row> =
             rustledger_loader::parse_errors_to_ledger_errors(failure, &raw.source_map)
                 .into_iter()
                 .map(|e| {
                     let location = e.location.expect("located");
+                    let end = raw
+                        .source_map
+                        .locate(e.file_id.expect("file id"), e.source_span.expect("span").1)
+                        .expect("end located");
                     (
                         e.message,
                         Some(e.code),
@@ -1169,6 +1246,9 @@ mod parse_error_mapping_parity {
                         Some(location.file.display().to_string()),
                         u32::try_from(location.line).ok(),
                         u32::try_from(location.column).ok(),
+                        u32::try_from(end.line).ok(),
+                        u32::try_from(end.column).ok(),
+                        format!("{:?}", crate::types::Severity::Error),
                     )
                 })
                 .collect();
@@ -1181,15 +1261,7 @@ mod parse_error_mapping_parity {
         let multi_file: Vec<Row> =
             crate::api::load_errors_to_errors(std::slice::from_ref(failure), &raw.source_map)
                 .into_iter()
-                .map(|mut e| {
-                    // The path prefix of issue #2961.
-                    e.message = e
-                        .message
-                        .strip_prefix("main.beancount: ")
-                        .unwrap_or_else(|| panic!("prefixed: {}", e.message))
-                        .to_string();
-                    wasm_row(e)
-                })
+                .map(wasm_row)
                 .collect();
         assert_eq!(multi_file, canonical, "load_errors_to_errors");
 
@@ -1203,5 +1275,128 @@ mod parse_error_mapping_parity {
             })
             .collect();
         assert_eq!(single_source, canonical, "parse_errors_to_wasm");
+    }
+
+    /// Code, severity, line, column, end line, end column.
+    type Place = (
+        String,
+        String,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+    );
+
+    /// `errors`' places, sorted.
+    fn places(errors: Vec<Error>) -> Vec<Place> {
+        let mut places: Vec<Place> = errors
+            .into_iter()
+            .map(|e| {
+                (
+                    e.code.unwrap_or_default(),
+                    format!("{:?}", e.severity),
+                    e.line,
+                    e.column,
+                    e.end_line,
+                    e.end_column,
+                )
+            })
+            .collect();
+        places.sort();
+        places
+    }
+
+    /// The same ledgers, through `validateSource`, `validateMultiFile` and
+    /// `Ledger.fromFiles`: each finding at the same start and end, so a
+    /// loader finding has its end on the multi-file surfaces too (#2964).
+    /// Parse errors, booking errors and validation findings, after a BOM or
+    /// a multi-byte character.
+    #[test]
+    fn test_multi_file_findings_are_placed_as_validate_source_places_them() {
+        let cases = [
+            // E1001 and E2001 on a balance that runs to the start of line 2.
+            "\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n",
+            // An unbalanced transaction (E3001).
+            "2024-01-01 open Assets:A\n2024-01-01 open Expenses:Ü\n\
+             2024-01-02 * \"ü\"\n  Assets:A  -1 USD\n  Expenses:Ü  2 USD\n",
+            // A booking error (E4003, an ambiguous reduction) and the
+            // balance it leaves failing.
+            "2024-01-01 open Assets:S\n2024-01-01 open Assets:C\n\
+             2024-01-01 * \"buy\"\n  Assets:S  10 HOOL {100 USD}\n  Assets:C\n\
+             2024-01-02 * \"buy\"\n  Assets:S  10 HOOL {110 USD}\n  Assets:C\n\
+             2024-01-03 * \"sell\"\n  Assets:S  -5 HOOL {}\n  Assets:C  500 USD\n\
+             2024-01-04 balance Assets:C 0 USD\n",
+            // A parse error after a multi-byte character, and a finding
+            // after it.
+            "2024-01-03 open Assets:Ü 10\n2024-01-04 balance Assets:X 1 USD\n",
+        ];
+        for source in cases {
+            let load = load_and_book(source);
+            let mut single = load.reported_errors();
+            single.extend(run_validation(&load));
+            let single = places(single);
+            assert!(
+                !single.is_empty() && single.iter().all(|p| p.4.is_some()),
+                "every finding has an end on validateSource: {source:?} {single:?}"
+            );
+
+            let multi =
+                places(crate::api::validate_with_filesystem(Box::new(vfs(source)), MAIN).errors);
+            assert_eq!(multi, single, "validateMultiFile, {source:?}");
+
+            let files = std::collections::HashMap::from([(MAIN.to_string(), source.to_string())]);
+            let ledger = crate::parsed_ledger::Ledger::from_file_map(files, MAIN).expect("loads");
+            assert_eq!(
+                places(ledger.error_list().to_vec()),
+                single,
+                "Ledger.fromFiles, {source:?}"
+            );
+        }
+    }
+
+    /// A loader finding's hint reaches the multi-file surfaces, as `rledger
+    /// check` prints it (`help:`): E8001's documents-folder hint (#2650),
+    /// which they dropped (#2964). The in-memory ledger is a relative path,
+    /// and the document check reads the real disk from the working
+    /// directory, which `cargo test` sets to this crate's: so the document
+    /// the folder holds is a real file (`src/lib.rs`), and none is next to
+    /// the ledger.
+    #[test]
+    fn test_multi_file_surfaces_keep_a_loader_findings_hint() {
+        let main = MAIN.to_string();
+        let source = "option \"documents\" \"src\"\n\
+            2024-01-01 open Assets:A\n\
+            2024-01-02 document Assets:A \"./lib.rs\"\n";
+        let want = Some(
+            "a file with that name is in src/lib.rs; document paths are relative to the file \
+             they are written in, not to the documents folder, so write \"src/lib.rs\""
+                .to_string(),
+        );
+        let e8001 = |errors: &[Error]| -> Vec<(Option<String>, Option<u32>, Option<u32>)> {
+            errors
+                .iter()
+                .filter(|e| e.code.as_deref() == Some("E8001"))
+                .map(|e| (e.hint.clone(), e.line, e.end_line))
+                .collect()
+        };
+
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(&main, source);
+        let result = crate::api::validate_with_filesystem(Box::new(vfs), &main);
+        assert_eq!(
+            e8001(&result.errors),
+            [(want.clone(), Some(3), Some(4))],
+            "validateMultiFile: {:?}",
+            result.errors
+        );
+
+        let files = std::collections::HashMap::from([(main.clone(), source.to_string())]);
+        let ledger = crate::parsed_ledger::Ledger::from_file_map(files, &main).expect("loads");
+        assert_eq!(
+            e8001(ledger.error_list()),
+            [(want, Some(3), Some(4))],
+            "Ledger.fromFiles: {:?}",
+            ledger.error_list()
+        );
     }
 }

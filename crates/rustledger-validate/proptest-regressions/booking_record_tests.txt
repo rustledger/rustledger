@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 43c864734acffb0b7037efffada2a628416e394135cdb98959502c83135ae525 # #2958: AVERAGE, seeds 4@100 and 2@100; [-1 {}, -4 {}, +2 {100}], [+5 {102}, +5 {100}, -3 {}, -1 {101}], [-1 {}]

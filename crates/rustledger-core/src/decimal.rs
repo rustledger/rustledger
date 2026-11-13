@@ -643,6 +643,46 @@ pub fn py_compound_per_unit(per_unit: Decimal, total: Decimal, units: Decimal) -
     py_to_decimal(&q, &cost_total, &n)
 }
 
+/// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
+/// `0.5` for `110`. At 28 decimal places the half unit cannot be written, and
+/// it is one unit in the 28th place instead.
+#[must_use]
+pub fn half_unit_in_last_place(number: Decimal) -> Decimal {
+    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
+}
+
+/// How far a number a spec states may be from the value its author meant.
+///
+/// Half a unit in the last place written, for a number typed to the places
+/// its author chose. A number that fills `Decimal`'s digits was not typed:
+/// it is an expression's result (`{{*, 1604500/66 USD}}`), rounded at every
+/// operation, and how many operations depends on how the expression was
+/// written (`r*S/N` rounds once, `r*a/N + r*b/N` three times). So its last
+/// digit is noise, and it is held to one unit in the place before that: a
+/// correct sum of fractions landed two units out in one of 200 generated
+/// claims, and nothing an author means lives in the 28th digit.
+#[must_use]
+pub fn written_allowance(number: Decimal) -> Decimal {
+    if fills_decimal(number) {
+        // At least 28 digits, so there is a place before the last.
+        Decimal::try_new(1, number.scale().saturating_sub(1)).unwrap_or(Decimal::ONE)
+    } else {
+        half_unit_in_last_place(number)
+    }
+}
+
+/// Whether `number` uses all of `Decimal`'s precision: 28 or 29 significant
+/// digits, which is what a rounded result has (106.666… is
+/// `106.66666666666666666666666667`).
+#[must_use]
+pub fn fills_decimal(number: Decimal) -> bool {
+    number
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .is_some_and(|l| l + 1 >= 28)
+}
+
 #[cfg(test)]
 mod tests {
     /// `with_ideal_scale` must never produce a `Decimal` above
@@ -1007,5 +1047,29 @@ mod tests {
             let exact = checked_exact_sum_python_scale(values.iter().copied()).expect("fits");
             assert_eq!(exact.to_string(), fold.to_string(), "{values:?}");
         }
+    }
+
+    #[test]
+    fn half_unit_in_last_place_is_half_the_last_digit_written() {
+        use super::half_unit_in_last_place as half;
+        let d = |s: &str| s.parse::<Decimal>().unwrap();
+        assert_eq!(half(d("106.67")), d("0.005"));
+        assert_eq!(half(d("110")), d("0.5"));
+        // 28 places: one unit in the 28th, not zero (#2398).
+        let at_limit = d("1") / d("3");
+        assert_eq!(at_limit.scale(), 28);
+        assert_eq!(half(at_limit), Decimal::new(1, 28));
+    }
+
+    #[test]
+    fn a_written_number_that_fills_decimal_is_held_to_the_place_before_its_last() {
+        use super::written_allowance;
+        let d = |s: &str| s.parse::<Decimal>().unwrap();
+        // Typed: half a unit in the last place written.
+        assert_eq!(written_allowance(d("106.67")), d("0.005"));
+        // Computed, 29 digits at scale 26: one unit at scale 25.
+        let computed = d("1600") / d("15");
+        assert_eq!(computed.scale(), 26);
+        assert_eq!(written_allowance(computed), Decimal::new(1, 25));
     }
 }

@@ -490,7 +490,13 @@ use crate::types::{Error, LedgerOptions};
 /// include cycle's `LOAD` error carries the file and line of the `include`
 /// that closed it, where it had no location. An older blob would keep
 /// serving it with none. (v106 is held by #2931.)
-pub const CACHE_VERSION: u32 = 107;
+/// v108: loader v73, unchanged -- parsed directives did not move. Booking
+/// did (#2958): on an AVERAGE account holding lots of both signs, a sale or
+/// a cover whose stated cost the pool accepts as its average reduces the
+/// pool, where it was booked as a new lot on its own side when a lot there
+/// cost the same. `ParsedLedger` and `Ledger` archive booked directives, so an older
+/// blob would keep serving that new lot. (v106 is held by #2931.)
+pub const CACHE_VERSION: u32 = 108;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

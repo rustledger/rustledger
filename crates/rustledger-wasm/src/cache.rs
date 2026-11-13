@@ -487,14 +487,19 @@ use crate::types::{Error, LedgerOptions};
 /// also carries its parse and validation errors at character columns now,
 /// where a byte column read high after a BOM or a multi-byte character.
 /// (v104 was held by #2931 and never released.)
-/// v106: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
+/// v107: loader v73, unchanged. A `Ledger`'s error list moves (#2959): an
+/// include cycle's `LOAD` error carries the file and line of the `include`
+/// that closed it, where it had no location. An older blob would keep
+/// serving it with none. (v106 was held by #2931 and never released.)
+/// v110: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
 /// BOM in the middle of a line starts an invalid token that runs to the next
 /// blank, as in beancount, so a quote after it opens no string. Every input
 /// that changes has a parse error, so the loader's cache, saved only for an
 /// error-free load, holds none of them; both payloads here archive a source
 /// with parse errors, and an older blob would keep serving such a file with
-/// its old errors and values. (v104 was held by #2931 and never released.)
-pub const CACHE_VERSION: u32 = 106;
+/// its old errors and values. (v104 and v106 were held by #2931 and never
+/// released; v108 is held by #2970 and v109 by #2971.)
+pub const CACHE_VERSION: u32 = 110;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

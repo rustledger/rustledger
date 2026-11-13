@@ -10,7 +10,7 @@ one exit rule:
 | Exit | Meaning |
 |------|---------|
 | 0 | It answered, whether or not it found anything |
-| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on`) |
+| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on` or `cross-group --fail-on-findings`) |
 | 2 | It could not answer: a missing file, a file that does not load, or a ledger or configuration it refuses, as `rledger check` exits 2 on a file it cannot read |
 
 ## Usage
@@ -23,6 +23,7 @@ rledger lint <LINT> <FILE>... [OPTIONS]
 |------|-----------------|
 | `transfers` | Likely inter-account transfer pairs; `--apply` links them |
 | `linked-transit` | Explicitly linked transfers through a transit account whose legs do not agree |
+| `cross-group` | Transactions touching more than one configured account group |
 | `closed-nonempty` | Accounts closed while still holding a balance (`check` stays silent on these, as `bean-check` does) |
 | `control-chars` | Control characters in narrations, payees, metadata and comments |
 
@@ -36,6 +37,7 @@ has load errors (a parse error, a missing include) depends on what it reads:
 | Lint | Reads | Load errors | Booking or plugin failure |
 |------|-------|-------------|---------------------------|
 | `linked-transit` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
+| `cross-group` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
 | `closed-nonempty` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
 | `transfers --apply` | The source, as written | Refused before any file is written, exit 2 | Not run |
 | `transfers` (preview) | The source, as written | Answers over what parsed, with a warning | Not run |
@@ -69,6 +71,75 @@ warning: main.beancount: has load errors, so findings may be incomplete: ...
 
 Warnings go to stderr; in `ag-rledger` they are the envelope's `warnings`,
 this one with the code `LOAD_ERRORS`.
+
+## cross-group
+
+Report transactions with postings in two or more user-defined account groups:
+
+```bash
+rledger lint cross-group main.beancount \
+  --group UnitA=Assets:UnitA,Income:UnitA,Expenses:UnitA \
+  --group UnitB=Assets:UnitB,Income:UnitB,Expenses:UnitB \
+  --format json --fail-on-findings
+```
+
+Each `--group` names a group and one or more comma-separated account
+prefixes. Group names use ASCII letters, digits, `_`, or `-`. At least two
+distinct groups are required; repeat a group name to add prefixes. Several
+groups may also be given in one value, separated by `;`
+(`--group "UnitA=Assets:UnitA;UnitB=Assets:UnitB"`); an empty group, as a
+stray `;` leaves, is refused. A prefix matches itself or a descendant
+separated by `:`, not a similarly named sibling. A prefix is an account name
+with a root and at least one component: a bare root such as `Liabilities` is
+refused (name a component, `Liabilities:UnitA`), as are invalid prefixes and
+overlapping prefixes assigned to different groups (one group's prefix nested
+under another's, in either order). A prefix that matches no opened or posted
+account is a warning, with the code `GROUP_PREFIX_NOT_IN_LEDGER` in
+`ag-rledger`.
+
+The report includes the location, date, narration and participating accounts
+for each crossing, and the number of distinct unassigned posting accounts.
+Repeated input paths and included files are deduplicated. It reads the booked
+ledger with plugins and validation; validation diagnostics are warnings, not
+proof that the ledger is valid. A transaction that differs between input
+ledgers in its date, narration or accounts (a file included by two inputs
+whose plugins treat it differently) is refused. A padding entry is compared
+by its date and accounts only: its narration states the padded amount, which
+depends on what each input posted before the `pad`, so the same `pad` read
+through two inputs is one finding, reported with the first input's
+narration.
+
+Padding counts. A `pad` that a `balance` makes move an amount produces a
+padding entry, as `rledger query` shows it, and a padding entry between two
+groups is reported like any other crossing: at the `pad`'s line, with the
+entry's narration (`(Padding inserted for Balance of 5 USD for difference 5
+USD)`). A `pad` that pads several currencies produces one entry, and so one
+finding, per currency. Its source account counts toward the unassigned
+accounts when it is in no group.
+
+A plugin can insert transactions that share a source location with another
+(`forecast`'s copies keep the template's, `effective_date`'s keep the
+parent's) or have none. Those cannot be told apart, so when the transactions
+at one such location together touch two or more groups the run is refused
+(exit 2):
+
+```text
+error: main.beancount:4: cannot audit transactions touching groups A, B: several transactions share one source location (a plugin inserted one)
+```
+
+This covers `effective_date` splitting a transaction into two halves in
+different groups, though neither half crosses on its own. Such transactions
+touching at most one group do not affect the answer and are not refused. A
+padding entry whose `pad` a plugin inserted with no location is judged on its
+own, never pooled with another such entry; one whose `balance` alone has no
+location is still reported at its `pad`.
+
+`--fail-on-findings` exits 1 on a crossing; without it findings are advisory.
+Exit 2 means the lint could not answer. This audit detects account-group
+co-occurrence, not a transfer, gateway, legal classification, or settlement.
+It does not prevent edits outside the lint. `ag-rledger lint cross-group`
+accepts the same options; there a run that cannot answer is an envelope with
+`ok: false` and the error, where findings are `ok: true`.
 
 ## linked-transit
 

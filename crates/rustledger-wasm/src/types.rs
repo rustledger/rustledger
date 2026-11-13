@@ -713,17 +713,20 @@ impl From<rustledger_loader::LedgerError> for Error {
             // `LedgerError` already carries code + phase + file location.
             code: (!e.code.is_empty()).then(|| e.code.clone()),
             phase: (!e.phase.is_empty()).then(|| e.phase.clone()),
-            // Drops `e.hint` (e.g. E8001's documents hint): issue #2964.
-            hint: None,
+            // The hint `rledger check` prints as `help:` and in its JSON
+            // `hint`, E8001's documents-folder hint among them (#2650). This
+            // conversion used to drop it (#2964).
+            hint: e.hint,
             file: e
                 .location
                 .as_ref()
                 .map(|loc| loc.file.display().to_string()),
             line: e.location.as_ref().map(|loc| loc.line as u32),
             column: e.location.as_ref().map(|loc| loc.column as u32),
-            // `ErrorLocation` is a single point, so the end stays null, though
-            // `source_span` and `file_id` would locate it given the load's
-            // `SourceMap`, which this conversion lacks: issue #2964.
+            // `ErrorLocation` is a single point, so the end stays null here:
+            // locating it from `source_span` and `file_id` takes the load's
+            // `SourceMap`, which `crate::helpers::ledger_error_to_wasm` (what
+            // every surface holding one calls) adds on top of this (#2964).
             end_line: None,
             end_column: None,
             severity: match e.severity {

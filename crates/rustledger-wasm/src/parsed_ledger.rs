@@ -838,7 +838,10 @@ impl Ledger {
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors = parse_errors;
-                errors.extend(crate::helpers::reported_ledger_errors(ledger.errors));
+                errors.extend(crate::helpers::reported_ledger_errors(
+                    ledger.errors,
+                    &source_map,
+                ));
                 // What a query lists: the parse errors too, so built after
                 // they are in `errors`, then the option diagnostics as a
                 // query lists them.

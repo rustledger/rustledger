@@ -57,7 +57,7 @@ pub struct Args {
     pub format: OutputFormat,
 }
 
-#[derive(Serialize, PartialEq, Eq)]
+#[derive(Serialize)]
 struct Finding {
     file: String,
     line: usize,
@@ -283,13 +283,11 @@ impl<'g> Audit<'g> {
         };
         let accounts: Vec<String> = txn.postings.iter().map(|p| p.account.to_string()).collect();
         if let Some((previous, previous_accounts)) = self.transactions.get(&site.key) {
-            // A padding entry's narration states the padded amount, which
-            // depends on what each input posted before the pad; like a
+            // The file and line follow from the key, and the groups from the
+            // accounts. A padding entry's narration states the padded amount,
+            // which depends on what each input posted before the pad; like a
             // transaction's amounts, it is not compared. Its accounts are.
-            let same = previous.file == finding.file
-                && previous.line == finding.line
-                && previous.date == finding.date
-                && previous.groups == finding.groups
+            let same = previous.date == finding.date
                 && (site.padding || previous.narration == finding.narration)
                 && previous_accounts == &accounts;
             anyhow::ensure!(
@@ -1304,5 +1302,71 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// Audit the same ledger as two inputs, the second with its one
+    /// transaction changed by `edit`: what the second input gives.
+    fn audit_twice_edited(edit: impl Fn(&mut Transaction)) -> (PathBuf, Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            dir.path(),
+            "main.bean",
+            concat!(
+                "2024-01-01 open Assets:UnitA:Cash USD\n",
+                "2024-01-01 open Equity:Other USD\n",
+                "2024-01-01 open Equity:Else USD\n",
+                "2024-01-02 * \"move\"\n",
+                "  Assets:UnitA:Cash -2 USD\n",
+                "  Equity:Other 2 USD\n",
+            ),
+        );
+        let groups = parse_groups(&["A=Assets:UnitA".into(), "B=Assets:UnitB".into()]).unwrap();
+        let mut audit = Audit {
+            classifier: Classifier::new(&groups),
+            transactions: BTreeMap::new(),
+            keep_all: true,
+        };
+        let mut sites = TransactionSites::default();
+        let first = load_booked(&file).unwrap();
+        audit_ledger(&mut audit, &mut sites, &mut 0, &first).unwrap();
+        let mut second = load_booked(&file).unwrap();
+        for directive in &mut second.directives {
+            if let Directive::Transaction(txn) = &mut directive.value {
+                edit(txn);
+            }
+        }
+        let result = audit_ledger(&mut audit, &mut sites, &mut 0, &second);
+        (file, result)
+    }
+
+    /// A transaction read by two inputs is compared on its date, narration
+    /// and accounts, each on its own: a change to any one is refused, even
+    /// when it leaves the groups alone. Unchanged, it is not.
+    #[test]
+    fn test_cross_group_refuses_each_difference_between_inputs() {
+        let (_, unchanged) = audit_twice_edited(|_| {});
+        assert!(unchanged.is_ok(), "{unchanged:?}");
+        let edits: [(&str, Box<dyn Fn(&mut Transaction)>); 3] = [
+            (
+                "date",
+                Box::new(|txn| txn.date = txn.date.tomorrow().unwrap()),
+            ),
+            ("narration", Box::new(|txn| txn.narration = "moved".into())),
+            (
+                "unassigned account",
+                Box::new(|txn| txn.postings[1].value.account = "Equity:Else".into()),
+            ),
+        ];
+        for (what, edit) in edits {
+            let (file, result) = audit_twice_edited(edit);
+            assert_eq!(
+                result.err().map(|e| e.to_string()),
+                Some(format!(
+                    "{}:4: transaction differs between input ledgers",
+                    file.display()
+                )),
+                "{what}"
+            );
+        }
     }
 }

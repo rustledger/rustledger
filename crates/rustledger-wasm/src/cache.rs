@@ -503,7 +503,13 @@ use crate::types::{Error, LedgerOptions};
 /// `Ledger` and, for its booking errors, on a `ParsedLedger`. An older blob
 /// would keep serving the prefixed messages, the null ends and no hint.
 /// (v106 is held by #2931.)
-pub const CACHE_VERSION: u32 = 109;
+/// v111: loader v73, unchanged. A `ParsedLedger`'s validation findings move
+/// (#2972): each carries the message, phase and hint the loader gives it, as
+/// `rledger check` reports them, so a finding's advisory note is folded into
+/// its message rather than given as its hint, and its context (a failing
+/// balance's `difference: 1, tolerance: 0`) is no longer its hint. An older
+/// blob would keep serving those hints. (v110 is held by #2931.)
+pub const CACHE_VERSION: u32 = 111;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -4,6 +4,7 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Breaking
 
+- **WASM's `validateSource` and `ParsedLedger` give a validation finding the message, phase and hint `rledger check` gives it**: they gave a finding's advisory `note`, else its `context`, as its `hint`, so a failing balance (`E2001`) carried the hint `difference: 1, tolerance: 0`, which `rledger check`, the multi-file WASM surfaces and the FFI do not give. A finding's `hint` is now its suggested fix only, as everywhere else; its `context` is not reported, and its `note` is folded into the message (`<message>\n  note: <note>`), as `check` prints it. An invalid account name (`E1005`) is `phase: "parse"`, as `check` reports it, where these surfaces said `validate`. A host that showed `hint` for a balance failure's difference gets `null` there; one that read a note from `hint` reads it from the message. rustfava is unaffected, since it embeds the FFI component, not WASM (issue #2972).
 - **WASM's multi-file surfaces give a parse error's message without a file prefix**: `validateMultiFile`, `validateWithHost`, `parseMultiFile`, `Ledger` (`fromFiles`, `getErrors`, `query`), `queryMultiFile` and `queryWithHost` wrote the file in front of the parser's message (`main.beancount: parse error: ...`), though it is already in the error's `file` field. The message is now the parser's text unchanged, as `rledger check --format json`, the FFI component and `validateSource` give it. A host that matched on the prefixed text must drop the prefix. rustfava is unaffected, since it embeds the FFI component, not WASM; `packages/mcp-server`'s `formatErrors`, which prints `file:line:column: message`, no longer names the file twice (issue #2961).
 
 - **An include cycle is reported at the `include` that closed it, and `LoadError::IncludeCycle` gains an `include_site` field**: the cycle was located on line 1 of the first file of the cycle, or nowhere (issue #2959).
@@ -142,6 +143,8 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 - **`rledger doctor list-options` lists every option the loader knows, with its real type**: it was a hand-written copy that omitted `allow_pipe_separator`, `display_precision`, `filename`, `plugin`, `tolerance_multiplier` and `use_precise_interpolation`, and called `insert_pythonpath` a string. It now lists all of them, with types such as `bool`, `CURRENCY:NUMBER` and `account leaf`, and marks `filename` and `plugin` `(read-only)` (issue #2925).
 
 ### Fixed
+
+- **WASM's single-source surfaces report a validation finding as `rledger check` does**: `validateSource` and `ParsedLedger` convert a finding through the loader's conversion, `validation_error_to_ledger_error`, which `check` uses, rather than a rule of their own, so a balance failure no longer carries a hint the other surfaces do not give; see the breaking entry for WASM validation findings above. WASM cache v111, since a `ParsedLedger` archives its findings; the loader cache is unchanged at v73 (issue #2972).
 
 - **WASM's multi-file surfaces report errors as `rledger check`, the FFI and the single-source surfaces do**:
   - A parse error's message is the parser's, without the file prefix those surfaces put in front of it; see the breaking entry for WASM parse error messages above (issue #2961).

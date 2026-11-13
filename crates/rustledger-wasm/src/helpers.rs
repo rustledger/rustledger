@@ -113,10 +113,17 @@ pub fn ledger_error_to_wasm(
 }
 
 /// Convert a [`rustledger_validate::ValidationError`] into the rich WASM
-/// [`Error`]: stable code (`E####`), `phase: "validate"`, hint (the advisory
-/// note, else context), and the source span when present. When the error has
-/// no span, falls back to `fallback_line` (the directive's date→line) to
-/// preserve the prior location behavior.
+/// [`Error`]: the message, code, phase, hint and severity the loader's
+/// canonical, [`rustledger_loader::validation_error_to_ledger_error`], gives
+/// it (so the ones `rledger check` reports), and the source span when
+/// present. When the error has no span, falls back to `fallback_line` (the
+/// directive's date→line) to preserve the prior location behavior.
+///
+/// The fields are the canonical's, not a copy of its rule: this used to
+/// decide them itself, promoting the advisory `note`, else the `context`,
+/// into `hint` and leaving the note out of the message, so a failing balance
+/// (E2001) carried a hint `check` does not give (#2972).
+/// `test_validation_findings_match_the_loaders` below pins the two to agree.
 ///
 /// The span is located in `source_map` (the load's, holding the source as
 /// file 0) through the loader's canonical, [`rustledger_loader::SourceMap::locate`],
@@ -128,25 +135,19 @@ pub fn validation_error_to_wasm(
     file: Option<String>,
     fallback_line: Option<u32>,
 ) -> Error {
-    // Map the validation code's own severity (Info/Warning/Error) to the WASM
-    // 2-level severity, so advisory codes (FutureDate, SinglePosting, …) surface
-    // as warnings instead of being reported as hard errors — matching `rledger
-    // check`'s error/warning split.
-    let base = if matches!(e.code.severity(), rustledger_validate::Severity::Error) {
-        Error::new(e.message.clone())
-    } else {
-        Error::warning(e.message.clone())
+    // Message, code, phase, hint and severity from the canonical; the place
+    // is decided below, by the single-source rule, so the canonical's own
+    // location (which may name a plugin's placeholder file) is not kept.
+    let mut out = Error {
+        file,
+        line: None,
+        column: None,
+        end_line: None,
+        end_column: None,
+        ..Error::from(rustledger_loader::validation_error_to_ledger_error(
+            e, source_map,
+        ))
     };
-    let mut out = base
-        .with_code(e.code.code())
-        .with_phase("validate")
-        .with_hint(
-            e.hint
-                .clone()
-                .or_else(|| e.note.clone())
-                .or_else(|| e.context.clone()),
-        )
-        .with_file(file);
     // A span is a place in the one source text (file id 0) only; one a
     // plugin's directive carries (a placeholder id) says nothing about it.
     // The FFI component's `semantic_validation_errors`
@@ -1275,6 +1276,177 @@ mod parse_error_mapping_parity {
             })
             .collect();
         assert_eq!(single_source, canonical, "parse_errors_to_wasm");
+    }
+
+    /// A loader error's fields, the end located from its `source_span` where
+    /// `ledger_error_to_wasm` locates one: in a source file of the map, not a
+    /// plugin's placeholder.
+    fn ledger_row(
+        e: rustledger_loader::LedgerError,
+        source_map: &rustledger_loader::SourceMap,
+    ) -> Row {
+        let end = match (e.location.as_ref(), e.source_span, e.file_id) {
+            (Some(_), Some((_, end)), Some(file_id))
+                if source_map.get(usize::from(file_id)).is_some() =>
+            {
+                source_map.locate(file_id, end)
+            }
+            _ => None,
+        };
+        let severity = match e.severity {
+            rustledger_loader::ErrorSeverity::Error => crate::types::Severity::Error,
+            rustledger_loader::ErrorSeverity::Warning => crate::types::Severity::Warning,
+        };
+        let start = e.location.as_ref();
+        (
+            e.message,
+            Some(e.code),
+            Some(e.phase),
+            e.hint,
+            start.map(|l| l.file.display().to_string()),
+            start.and_then(|l| u32::try_from(l.line).ok()),
+            start.and_then(|l| u32::try_from(l.column).ok()),
+            end.as_ref().and_then(|l| u32::try_from(l.line).ok()),
+            end.as_ref().and_then(|l| u32::try_from(l.column).ok()),
+            format!("{severity:?}"),
+        )
+    }
+
+    /// Every validation finding `rledger check` reports on `source`, as the
+    /// loader gives it (`validation_error_to_ledger_error`, through
+    /// `process`).
+    fn loader_findings(source: &str) -> Vec<Row> {
+        let ledger = rustledger_loader::load_with_fs(
+            Path::new(MAIN),
+            &rustledger_loader::LoadOptions::default(),
+            Box::new(vfs(source)),
+        )
+        .expect("loads");
+        let mut rows: Vec<Row> = ledger
+            .errors
+            .into_iter()
+            .filter(rustledger_loader::LedgerError::is_validation_finding)
+            .map(|e| ledger_row(e, &ledger.source_map))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// The validation findings `validateSource` (and `ParsedLedger`) report
+    /// on `source`, named as the loader names the file.
+    fn validate_source_findings(source: &str) -> Vec<Row> {
+        let load = load_and_book(source);
+        let mut rows: Vec<Row> = run_validation(&load)
+            .into_iter()
+            .map(|mut e| {
+                // The single-source surfaces name no file.
+                assert_eq!(e.file, None);
+                e.file = Some(MAIN.to_string());
+                wasm_row(e)
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// `validateSource` and `ParsedLedger` report each validation finding
+    /// with the message, code, phase, hint, line, column, end and severity
+    /// `rledger check` reports (#2972). They promoted a finding's `note`,
+    /// else its `context`, into `hint`, so a failing balance carried its
+    /// `difference: 1, tolerance: 0` as a hint nobody else gives.
+    ///
+    /// End to end, against the loader: a failing balance (a `context` and no
+    /// hint), and a ledger with an unopened account, an unbalanced
+    /// transaction and a failing balance after a multi-byte character.
+    ///
+    /// Then one finding carrying a note, a context and a hint, through both
+    /// conversions. No single-source ledger reaches either: the validator
+    /// gives a `note` only to a directive a plugin synthesized with no
+    /// location at all, which no plugin a single source can run produces
+    /// (each names a file, if only a placeholder like `<check_closing>`), and
+    /// its one hint, E8001's documents-folder hint (#2650), needs the
+    /// `documents` roots resolved against a directory, which a single source
+    /// has none of (`test_multi_file_surfaces_keep_a_loader_findings_hint`
+    /// pins that hint on the multi-file surfaces).
+    #[test]
+    fn test_validation_findings_match_the_loaders() {
+        let balance = "2024-01-01 open Assets:A\n\
+            2024-01-01 open Equity:E\n\
+            2024-01-02 * \"x\"\n  Assets:A  1 USD\n  Equity:E\n\
+            2024-01-03 balance Assets:A 2 USD\n";
+        let several = "2024-01-01 open Assets:A\n2024-01-01 open Expenses:Ü\n\
+            2024-01-02 * \"ü\"\n  Assets:A  -1 USD\n  Expenses:Ü  2 USD\n\
+            2024-01-03 * \"x\"\n  Assets:B  1 USD\n  Expenses:Ü  -1 USD\n\
+            2024-01-04 balance Assets:A 2 USD\n";
+
+        // The exact observable on the loader's side, so a drift on either
+        // side trips it: the context is no hint.
+        assert_eq!(
+            loader_findings(balance),
+            [(
+                "Balance failed for Assets:A: expected 2 USD, got 1 USD".to_string(),
+                Some("E2001".to_string()),
+                Some("validate".to_string()),
+                None,
+                Some(MAIN.to_string()),
+                Some(6),
+                Some(1),
+                Some(7),
+                Some(1),
+                "Error".to_string(),
+            )],
+            "the loader on a failing balance"
+        );
+        assert!(
+            loader_findings(several).len() >= 3,
+            "{:?}",
+            loader_findings(several)
+        );
+
+        for (name, source) in [("balance", balance), ("several", several)] {
+            assert_eq!(
+                validate_source_findings(source),
+                loader_findings(source),
+                "validateSource and the loader disagree on the {name} ledger"
+            );
+        }
+
+        // One finding with a note, a context and a hint, placed on line 6.
+        let load = load_and_book(balance);
+        let mut finding = rustledger_validate::ValidationError::new(
+            rustledger_validate::ErrorCode::BalanceAssertionFailed,
+            "Balance failed",
+            rustledger_core::naive_date(2024, 1, 3).expect("date"),
+        )
+        .with_context("difference: 1, tolerance: 0")
+        .with_note("directive was synthesized by a plugin")
+        .with_hint("assert 1 USD");
+        let start = balance.find("2024-01-03").expect("balance line");
+        finding.span = Some(rustledger_parser::Span::new(start, balance.len()));
+        finding.file_id = Some(0);
+
+        let canonical = ledger_row(
+            rustledger_loader::validation_error_to_ledger_error(&finding, &load.source_map),
+            &load.source_map,
+        );
+        let mut wasm = validation_error_to_wasm(&finding, &load.source_map, None, None);
+        wasm.file = canonical.4.clone();
+        assert_eq!(wasm_row(wasm), canonical, "one finding, both conversions");
+        assert_eq!(
+            (
+                canonical.0.as_str(),
+                canonical.3.as_deref(),
+                canonical.5,
+                canonical.7
+            ),
+            (
+                "Balance failed\n  note: directive was synthesized by a plugin",
+                Some("assert 1 USD"),
+                Some(6),
+                Some(7)
+            ),
+            "the note is in the message, the hint is the hint, the context is nowhere"
+        );
     }
 
     /// Code, severity, line, column, end line, end column.

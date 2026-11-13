@@ -496,3 +496,50 @@ fn sales_beside_a_short_priced_at_the_pool_average_agree_everywhere_2958() {
     assert_eq!(stated, (Decimal::from(9), Decimal::from(-1)));
     assert_eq!(stated, elided);
 }
+
+/// The mirror of [`short_beside_longs_2958`]: sells the seed pool out, then
+/// opens a long of 1 at 101 and shorts of 5 at 102 and 5 at 100, so under
+/// AVERAGE the account holds a long at 101 beside shorts that average
+/// exactly 101.
+fn long_beside_shorts_2958() -> Vec<Leg> {
+    vec![
+        Leg::SellAny { units: 6 },
+        Leg::Buy {
+            units: 1,
+            cost: 101,
+        },
+        Leg::SellAt {
+            units: 5,
+            cost: 102,
+        },
+        Leg::SellAt {
+            units: 5,
+            cost: 100,
+        },
+    ]
+}
+
+/// The rule holds for a cover as it does for a sale (#2958): a buy stating
+/// the shorts' average covers them, rather than opening a second long beside
+/// the one that happens to cost the same.
+#[test]
+fn an_average_cover_priced_like_a_long_beside_it_agrees_everywhere_2958() {
+    let txns = vec![
+        long_beside_shorts_2958(),
+        vec![Leg::Buy {
+            units: 1,
+            cost: 101,
+        }],
+    ];
+    for m in ALL_METHODS {
+        for account in [None, Some(BookingMethod::Average)] {
+            check(m, account, &SEEDS_2958, &txns)
+                .unwrap_or_else(|e| panic!("{m:?} / {account:?}: {e}"));
+        }
+    }
+    // The buy covered the shorts: 9 short left, the one long untouched.
+    assert_eq!(
+        sides_after(BookingMethod::Average, &txns),
+        (Decimal::from(1), Decimal::from(-9))
+    );
+}

@@ -222,8 +222,21 @@ now in `rustledger-core` so both ask the same rule). The claim must carry no
 date or label (the pool has neither, as above) and the pool must be held in the
 claim's cost currency. A booked sale then reads as the reduction it was, and a
 sale written `-1 X {101 USD}` books the way `-1 X {}` does: from the pool, not
-as a new short beside it. A cost the pool rejects that names an own-side lot
+as a new short beside it. A cover reads the same way: holding a long at 101
+beside shorts at 100 and 102, `+1 X {101 USD}` covers the shorts rather than
+opening a second long. A cost the pool rejects that names an own-side lot
 still adds to that side.
+
+Two consequences follow:
+
+- A claim the pool accepts only by rounding (#2603) now beats a lot at exactly
+  that cost. Holding longs of 5 at 100 and 5 at 101.5 (average 100.75) beside
+  a short at exactly 101, `-1 X {101 USD}` sells from the longs, where it used
+  to add to the short.
+- A ledger that used to load can now fail with E4002. Holding 10 longs
+  averaging 101 beside a short at 101, `-11 X {101 USD}` is now an
+  over-reduction of the longs ("requested 11, available 10") where it used to
+  open a new short of 11.
 
 ## Prior art
 

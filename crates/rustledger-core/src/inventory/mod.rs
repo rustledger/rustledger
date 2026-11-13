@@ -2432,8 +2432,11 @@ impl Inventory {
         opposite && !(own && self.adds_to_its_own_side(units, spec, method))
     }
 
-    /// Whether `spec` matches a lot of `units`' own sign and no lot of the
-    /// opposite sign; see [`Self::is_booking_reduction`].
+    /// Whether `spec` matches a lot of `units`' own sign and nothing on the
+    /// opposite side: no lot there and, under `AVERAGE`, not the opposite
+    /// pool either, which a cost names when the pool accepts it as a claim
+    /// about its average ([`Self::average_pool_accepts`], #2958); see
+    /// [`Self::is_booking_reduction`].
     ///
     /// O(lots) of the currency. The caller gates it on the account holding
     /// cost-bearing lots of both signs, the only case it can be `true`.

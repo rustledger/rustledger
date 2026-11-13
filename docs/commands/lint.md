@@ -85,26 +85,54 @@ rledger lint cross-group main.beancount \
 
 Each `--group` names a group and one or more comma-separated account
 prefixes. Group names use ASCII letters, digits, `_`, or `-`. At least two
-distinct groups are required; repeat a group name to
-add prefixes. Multiple group specifications may alternatively be separated
-by semicolons in one value. A prefix matches itself or a descendant separated by `:`, not
-a similarly named sibling. Invalid prefixes or overlapping prefixes assigned
-to different groups are refused. Prefixes that match no opened or posted
-account produce a warning.
+distinct groups are required; repeat a group name to add prefixes. Several
+groups may also be given in one value, separated by `;`
+(`--group "UnitA=Assets:UnitA;UnitB=Assets:UnitB"`); an empty group, as a
+stray `;` leaves, is refused. A prefix matches itself or a descendant
+separated by `:`, not a similarly named sibling. A prefix is an account name
+with a root and at least one component: a bare root such as `Liabilities` is
+refused (name a component, `Liabilities:UnitA`), as are invalid prefixes and
+overlapping prefixes assigned to different groups (one group's prefix nested
+under another's, in either order). A prefix that matches no opened or posted
+account is a warning, with the code `GROUP_PREFIX_NOT_IN_LEDGER` in
+`ag-rledger`.
 
 The report includes the location, date, narration and participating accounts
 for each crossing, and the number of distinct unassigned posting accounts.
 Repeated input paths and included files are deduplicated. It reads the booked
 ledger with plugins and validation; validation diagnostics are warnings, not
-proof that the ledger is valid. Transactions a plugin inserts without a
-distinct source location are refused rather than silently merged. A shared
-source transaction that differs across input ledgers is also refused.
+proof that the ledger is valid. A transaction that differs between input
+ledgers (a file included by two inputs whose plugins treat it differently) is
+refused.
+
+Padding counts. A `pad` that a `balance` makes move an amount produces a
+padding entry, as `rledger query` shows it, and a padding entry between two
+groups is reported like any other crossing: at the `pad`'s line, with the
+entry's narration (`(Padding inserted for Balance of 5 USD for difference 5
+USD)`). A `pad` that pads several currencies produces one entry, and so one
+finding, per currency. Its source account counts toward the unassigned
+accounts when it is in no group.
+
+A plugin can insert transactions that share a source location with another
+(`forecast`'s copies keep the template's, `effective_date`'s keep the
+parent's) or have none. Those cannot be told apart, so when the transactions
+at one such location together touch two or more groups the run is refused
+(exit 2):
+
+```text
+error: main.beancount:4: cannot audit transactions touching groups A, B: several transactions share one source location (a plugin inserted one)
+```
+
+This covers `effective_date` splitting a transaction into two halves in
+different groups, though neither half crosses on its own. Such transactions
+touching at most one group do not affect the answer and are not refused.
 
 `--fail-on-findings` exits 1 on a crossing; without it findings are advisory.
 Exit 2 means the lint could not answer. This audit detects account-group
 co-occurrence, not a transfer, gateway, legal classification, or settlement.
 It does not prevent edits outside the lint. `ag-rledger lint cross-group`
-accepts the same options.
+accepts the same options; there a run that cannot answer is an envelope with
+`ok: false` and the error, where findings are `ok: true`.
 
 ## linked-transit
 

@@ -444,7 +444,10 @@ pub fn run_with_writer<W: Write>(
                 }
                 error_count += 1;
             }
-            LoadError::IncludeCycle { cycle } => {
+            LoadError::IncludeCycle {
+                cycle,
+                include_site,
+            } => {
                 // Delegate to the canonical Display impl on
                 // `LoadError::IncludeCycle` so the wording lives in
                 // exactly one place (the `#[error(...)]` attribute on
@@ -460,12 +463,26 @@ pub fn run_with_writer<W: Write>(
                 // diagnostic must not change the exit code.
                 let shown = rules.keep("E0002");
                 if json_mode && shown {
+                    // At the `include` that closed the cycle, as for an
+                    // unreadable include above and as the loader's `LOAD`
+                    // error (and so the LSP) locates it (#2959).
+                    let (file, line, column, end_line, end_column) = include_site
+                        .as_ref()
+                        .and_then(|site| {
+                            let src = load_result.source_map.get(site.file_id as usize)?;
+                            let (sl, sc) = src.line_col(site.span.start);
+                            let (el, ec) = src.line_col(site.span.end);
+                            Some((site.file.display().to_string(), sl, sc, el, ec))
+                        })
+                        .unwrap_or_else(|| {
+                            (cycle.first().cloned().unwrap_or_default(), 1, 1, 1, 1)
+                        });
                     diagnostics.push(JsonDiagnostic {
-                        file: cycle.first().cloned().unwrap_or_default(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
+                        file,
+                        line,
+                        column,
+                        end_line,
+                        end_column,
                         severity: "error".to_string(),
                         phase: "parse".to_string(),
                         code: "E0002".to_string(),
@@ -1377,6 +1394,32 @@ mod tests {
             code, failure,
             "an unreadable ledger must not report success"
         );
+    }
+
+    /// #2959: JSON places an include cycle on the `include` that closes it,
+    /// in the file that holds it, as the loader's `LOAD` error and the LSP
+    /// do, where it gave line 1 of the first file of the cycle.
+    #[test]
+    fn json_locates_an_include_cycle_at_its_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.beancount");
+        let b = dir.path().join("b.beancount");
+        std::fs::write(&a, "include \"b.beancount\"\n").unwrap();
+        std::fs::write(&b, "2024-01-01 open Assets:B\ninclude \"a.beancount\"\n").unwrap();
+
+        let (_, out) = check_exit(&a, &["--format", "json"]);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        let cycle = v["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .find(|d| d["code"] == "E0002")
+            .expect("the cycle");
+        assert!(
+            cycle["file"].as_str().unwrap().ends_with("b.beancount"),
+            "{cycle}"
+        );
+        assert_eq!((&cycle["line"], &cycle["column"]), (&2.into(), &1.into()));
     }
 
     /// A flag that silently does nothing in one output format is worse than a

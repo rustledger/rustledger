@@ -721,15 +721,11 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         let mut err = LedgerError::error("LOAD", load_err.to_string()).with_phase("parse");
         err.blocking_load = load_err.blocks_queries();
         if let Some(site) = load_err.include_site() {
-            // Prefer the source map for line/col so byte spans stay authoritative.
-            if let Some(file) = raw.source_map.get(site.file_id as usize) {
-                let (line, column) = file.line_col(site.span.start);
+            // Prefer the source map for line/col so byte spans stay
+            // authoritative, located by the rule every surface shares.
+            if let Some(location) = raw.source_map.locate(site.file_id, site.span.start) {
                 err = err
-                    .with_location(ErrorLocation {
-                        file: site.file.clone(),
-                        line,
-                        column,
-                    })
+                    .with_location(location)
                     .with_source_span((site.span.start, site.span.end), site.file_id);
             } else {
                 err = err.with_location(ErrorLocation {

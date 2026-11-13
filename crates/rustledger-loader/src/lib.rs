@@ -178,6 +178,11 @@ pub enum LoadError {
         /// entries), and it's the one quoted in the `"Duplicate
         /// filename parsed:"` prefix.
         cycle: Vec<String>,
+        /// The `include` that closed the cycle: the directive, in the last
+        /// file of the cycle, that names a file already being loaded. Set by
+        /// the include walk ([`LoadError::at_include`]); `None` only for an
+        /// error built without one.
+        include_site: Option<IncludeSite>,
     },
 
     /// The same file was reached twice in the include graph without forming a
@@ -321,12 +326,17 @@ impl LoadError {
 
     /// Attach the `include` site that caused this failure.
     ///
-    /// Only [`LoadError::Io`] carries an include site today — other variants
-    /// either already embed enough context or are not produced from an
-    /// include walk. Non-IO errors are returned unchanged.
+    /// [`LoadError::Io`] (an included file that could not be read) and
+    /// [`LoadError::IncludeCycle`] (an include of a file already being
+    /// loaded) carry an include site, so a surface can report them at the
+    /// `include` line that caused them (#2959). Other variants are returned
+    /// unchanged.
     #[must_use]
     pub fn at_include(mut self, site: IncludeSite) -> Self {
         if let Self::Io {
+            include_site: slot, ..
+        }
+        | Self::IncludeCycle {
             include_site: slot, ..
         } = &mut self
         {
@@ -339,7 +349,9 @@ impl LoadError {
     #[must_use]
     pub const fn include_site(&self) -> Option<&IncludeSite> {
         match self {
-            Self::Io { include_site, .. } => include_site.as_ref(),
+            Self::Io { include_site, .. } | Self::IncludeCycle { include_site, .. } => {
+                include_site.as_ref()
+            }
             _ => None,
         }
     }
@@ -681,7 +693,11 @@ impl Loader {
                 .map(|p| p.display().to_string())
                 .chain(std::iter::once(path.display().to_string()))
                 .collect();
-            return Err(LoadError::IncludeCycle { cycle });
+            // The caller's include loop attaches the site (`at_include`).
+            return Err(LoadError::IncludeCycle {
+                cycle,
+                include_site: None,
+            });
         }
 
         // Check if already loaded. Beancount reports this and carries on with
@@ -1081,6 +1097,7 @@ mod tests {
             },
             LoadError::IncludeCycle {
                 cycle: vec!["a".into(), "b".into(), "a".into()],
+                include_site: None,
             },
             LoadError::DuplicateInclude { path: "a".into() },
             LoadError::ParseErrors {

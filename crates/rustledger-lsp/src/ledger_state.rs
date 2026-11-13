@@ -207,7 +207,8 @@ impl LedgerState {
         tracing::info!("Loading journal file: {}", journal_path.display());
 
         // The LSP runs its own validation in `all_diagnostics` over the open-buffer
-        // overlay and discards `ledger.errors`, so skip the loader's in-process
+        // overlay and reads only the load errors from `ledger.errors`
+        // (`load_errors`), so skip the loader's in-process
         // validation pass — otherwise (now that the `validation` feature is enabled
         // for the shared converter) every load/file-watch refresh would validate
         // the whole ledger twice. See diagnostics::all_diagnostics.
@@ -224,8 +225,14 @@ impl LedgerState {
         let loaded = loader
             .load(journal_path)
             .map_err(rustledger_loader::ProcessError::from)
-            .and_then(|raw| {
+            .and_then(|mut raw| {
                 let raw_directives = raw.directives.clone();
+                // Parse errors are the LSP's own to report, each on its line
+                // from a fresh parse of its file. Left in, `process` would
+                // also give each file one line-less `parse errors in <path>`
+                // LOAD error; taken out, the ledger's LOAD errors are exactly
+                // the include failures [`Self::load_errors`] publishes.
+                drop(raw.take_parse_errors());
                 process(raw, &options).map(|ledger| (ledger, raw_directives))
             });
         match loaded {
@@ -333,6 +340,21 @@ impl LedgerState {
     /// Get the loaded ledger.
     pub fn ledger(&self) -> Option<&Ledger> {
         self.ledger.as_ref()
+    }
+
+    /// The load errors of the loaded ledger (code `LOAD`): a missing or
+    /// unreadable include, an include cycle, a duplicate include, an include
+    /// glob that matches nothing, and the like, as the loader's `process`
+    /// words and locates them, so as `rledger check` reports them (#2959).
+    ///
+    /// An include failure carries the `include` line that caused it; the
+    /// others carry no location. Parse errors are not among them (see
+    /// [`Self::load`]).
+    pub fn load_errors(&self) -> impl Iterator<Item = &rustledger_loader::LedgerError> {
+        self.ledger
+            .iter()
+            .flat_map(|ledger| ledger.errors.iter())
+            .filter(|e| e.code == "LOAD")
     }
 
     /// How numerals should be grouped when formatting `path`.

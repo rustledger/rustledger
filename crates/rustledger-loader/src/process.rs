@@ -1048,7 +1048,7 @@ impl crate::Directives<crate::Synthed> {
         // `late_validate`.
         let session_out = validation_session.map(|session| {
             let (session, phase_errors) = session.run_early_spanned(self.as_slice(), today);
-            ledger_errors_extend(errors, phase_errors, source_map);
+            ledger_errors_extend(errors, &phase_errors, source_map);
             session
         });
         (
@@ -1183,7 +1183,7 @@ impl crate::Directives<crate::RegularPluginsApplied> {
                 session.note_refused_by_booking(refused);
             }
             let (session, phase_errors) = session.run_late_spanned(self.as_slice(), today);
-            ledger_errors_extend(errors, phase_errors, source_map);
+            ledger_errors_extend(errors, &phase_errors, source_map);
             // Harvested BEFORE `finalize()` consumes the session. Only the
             // failing assertions: a passing one has no discrepancy to report,
             // which is what beancount's `diff_amount` does too (#2180).
@@ -1199,7 +1199,7 @@ impl crate::Directives<crate::RegularPluginsApplied> {
                 })
                 .collect();
             let finalize_errors = session.finalize();
-            ledger_errors_extend(errors, finalize_errors, source_map);
+            ledger_errors_extend(errors, &finalize_errors, source_map);
         }
         (
             crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
@@ -2371,52 +2371,89 @@ fn build_validation_options(
 /// locations) and append to the existing list.
 ///
 /// Factored out so both validation phases in `process()` share the
-/// same conversion path.
+/// same conversion path, [`validation_error_to_ledger_error`].
 #[cfg(feature = "validation")]
 fn ledger_errors_extend(
     errors: &mut Vec<LedgerError>,
-    validation_errors: Vec<rustledger_validate::ValidationError>,
+    validation_errors: &[rustledger_validate::ValidationError],
     source_map: &SourceMap,
 ) {
-    for err in validation_errors {
-        let phase = if err.code.is_parse_phase() {
-            "parse"
-        } else {
-            "validate"
-        };
-        let severity_level = if err.code.is_warning() {
-            ErrorSeverity::Warning
-        } else {
-            ErrorSeverity::Error
-        };
-        // Fold the advisory note (if any) into the message so it propagates
-        // through every downstream format (LedgerError, JSON diagnostic, CLI
-        // report, LSP diagnostic) without each one needing a dedicated field.
-        let message = match &err.note {
-            Some(note) => format!("{err}\n  note: {note}"),
-            None => err.to_string(),
-        };
-        // Resolve span + file_id into a file/line/column triple so CLI and
-        // LSP consumers can render `file:line:col` headers without having
-        // to do the lookup themselves (issue #901).
-        let location = err
-            .span
-            .and_then(|span| source_map.locate(err.file_id?, span.start));
-        errors.push(LedgerError {
-            severity: severity_level,
-            code: err.code.code().to_string(),
-            message,
-            location,
-            source_span: err.span.map(|s| (s.start, s.end)),
-            file_id: err.file_id,
-            phase: phase.to_string(),
-            hint: err.hint,
-            booking_failure: false,
-            plugin_failure: false,
-            blocking_load: false,
-            option_refusal: false,
-            validation_finding: true,
-        });
+    errors.extend(
+        validation_errors
+            .iter()
+            .map(|err| validation_error_to_ledger_error(err, source_map)),
+    );
+}
+
+/// A validation finding as the [`LedgerError`] `rledger check` reports.
+///
+/// The one rule for what a finding's `ValidationError` fields become on the
+/// wire:
+///
+/// - `message`: the finding's text, with its advisory `note` (if any) folded
+///   in as `"{message}\n  note: {note}"`, so the note reaches every format
+///   (JSON diagnostic, CLI report) without a field of its own;
+/// - `hint`: the finding's `hint` (a suggested fix, which `check` prints as
+///   `help:`), and only that. Neither the `note` nor the `context` becomes a
+///   hint;
+/// - `context` is not carried;
+/// - `code`, `severity` (a warning code is a warning), and `phase` (`parse`
+///   for a parse-phase code, else `validate`);
+/// - the location: the start of the span, located in its file by
+///   [`SourceMap::locate`], and the span itself in `source_span`.
+///
+/// `process` converts every finding through this, so `rledger check` reports
+/// what it gives. WASM's single-source surfaces (`validateSource`,
+/// `ParsedLedger`) call it too (`validation_error_to_wasm` in
+/// `rustledger-wasm/src/helpers.rs`), keep its message, code, phase, hint and
+/// severity, and place the finding by their own rule. They used to promote the
+/// `note`, else the `context`, into `hint`, so a failing balance carried a
+/// hint (`difference: 1, tolerance: 0`) that `check` does not give (#2972);
+/// `test_validation_findings_match_the_loaders` in
+/// `rustledger-wasm/src/helpers.rs` pins the two to agree.
+#[cfg(feature = "validation")]
+#[must_use]
+pub fn validation_error_to_ledger_error(
+    err: &rustledger_validate::ValidationError,
+    source_map: &SourceMap,
+) -> LedgerError {
+    let phase = if err.code.is_parse_phase() {
+        "parse"
+    } else {
+        "validate"
+    };
+    let severity_level = if err.code.is_warning() {
+        ErrorSeverity::Warning
+    } else {
+        ErrorSeverity::Error
+    };
+    // Fold the advisory note (if any) into the message so it propagates
+    // through every downstream format (LedgerError, JSON diagnostic, CLI
+    // report) without each one needing a dedicated field.
+    let message = match &err.note {
+        Some(note) => format!("{err}\n  note: {note}"),
+        None => err.to_string(),
+    };
+    // Resolve span + file_id into a file/line/column triple so CLI and
+    // LSP consumers can render `file:line:col` headers without having
+    // to do the lookup themselves (issue #901).
+    let location = err
+        .span
+        .and_then(|span| source_map.locate(err.file_id?, span.start));
+    LedgerError {
+        severity: severity_level,
+        code: err.code.code().to_string(),
+        message,
+        location,
+        source_span: err.span.map(|s| (s.start, s.end)),
+        file_id: err.file_id,
+        phase: phase.to_string(),
+        hint: err.hint.clone(),
+        booking_failure: false,
+        plugin_failure: false,
+        blocking_load: false,
+        option_refusal: false,
+        validation_finding: true,
     }
 }
 
@@ -2648,6 +2685,74 @@ mod validation_options_tests {
 
         assert_eq!(vo.inferred_tolerance_default.get("CLP"), Some(&dec!(0.5)));
         assert_eq!(vo.account_types[0], "Activos");
+    }
+}
+
+/// What a finding's fields become in the `LedgerError` `rledger check`
+/// reports (#2972).
+#[cfg(all(test, feature = "validation"))]
+mod validation_error_to_ledger_error_tests {
+    use super::{ErrorSeverity, SourceMap, validation_error_to_ledger_error};
+    use rustledger_parser::Span;
+    use rustledger_validate::{ErrorCode, ValidationError};
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_validation_error_to_ledger_error_folds_the_note_drops_the_context_keeps_the_hint() {
+        let source = "2024-01-01 open Assets:A\n2024-01-03 balance Assets:A 2 USD\n";
+        let mut map = SourceMap::new();
+        let file_id = map.add_file(PathBuf::from("main.beancount"), source.into());
+        let start = source.find("2024-01-03").expect("balance line");
+        let mut finding = ValidationError::new(
+            ErrorCode::BalanceAssertionFailed,
+            "Balance failed",
+            rustledger_core::naive_date(2024, 1, 3).expect("date"),
+        )
+        .with_context("difference: 1, tolerance: 0")
+        .with_note("directive was synthesized by a plugin")
+        .with_hint("assert 1 USD");
+        finding.span = Some(Span::new(start, source.len()));
+        finding.file_id = Some(u16::try_from(file_id).expect("file id"));
+
+        let e = validation_error_to_ledger_error(&finding, &map);
+        assert_eq!(
+            e.message,
+            "Balance failed\n  note: directive was synthesized by a plugin"
+        );
+        assert_eq!(e.hint.as_deref(), Some("assert 1 USD"));
+        assert!(
+            !format!("{e:?}").contains("difference: 1"),
+            "the context is not carried: {e:?}"
+        );
+        assert_eq!(e.code, "E2001");
+        assert_eq!(e.phase, "validate");
+        assert_eq!(e.severity, ErrorSeverity::Error);
+        assert!(e.is_validation_finding());
+        assert_eq!(e.source_span, Some((start, source.len())));
+        let location = e.location.expect("located");
+        assert_eq!(
+            (location.file, location.line, location.column),
+            (PathBuf::from("main.beancount"), 2, 1)
+        );
+
+        // No note: the message is the finding's own; no hint: none is made
+        // up from the context. A parse-phase code is `phase: "parse"`.
+        let bare = ValidationError::new(
+            ErrorCode::InvalidAccountName,
+            "Invalid account name",
+            rustledger_core::naive_date(2024, 1, 1).expect("date"),
+        )
+        .with_context("Foo:Bar");
+        let e = validation_error_to_ledger_error(&bare, &map);
+        assert_eq!(
+            (
+                e.message.as_str(),
+                e.hint,
+                e.phase.as_str(),
+                e.location.is_none()
+            ),
+            ("Invalid account name", None, "parse", true)
+        );
     }
 }
 

@@ -6,7 +6,9 @@
 //! character before an error read it high, where `validateMultiFile` (and
 //! `rledger check`) did not. Each surface now locates through the loader's
 //! canonical (`SourceMap::locate`, `LineIndex`). The end of each span is
-//! pinned too, in characters, where the span really ends.
+//! pinned too, in characters, where the span really ends, on the multi-file
+//! surfaces (`validateMultiFile`, `Ledger`) as on the single-source ones:
+//! the multi-file surfaces gave a validation finding a null end (#2964).
 //!
 //! Runs under `wasm-pack test --node`.
 
@@ -68,29 +70,29 @@ fn assert_load_surfaces(source: &str, want: &[(&str, u32, u32, u32, u32)]) {
         "validateSource"
     );
 
-    // `validateMultiFile` reports a validation finding through the loader's
-    // `LedgerError`, whose end is null here: `From<LedgerError> for Error`
-    // copies only the point `ErrorLocation` and does not locate the end from
-    // `source_span` and `file_id`, though the source map could (issue
-    // #2964). Its parse errors carry their end. When #2964 is fixed, expect
-    // the same ends as `validateSource` here.
-    let multi_file_want: Vec<Location> = want
-        .iter()
-        .cloned()
-        .map(|(code, line, column, end_line, end_column)| {
-            if code.starts_with('E') {
-                (code, line, column, 0, 0)
-            } else {
-                (code, line, column, end_line, end_column)
-            }
-        })
-        .collect();
+    // A validation finding has its end on `validateMultiFile` too, located
+    // from the loader's `source_span`; it was null there (#2964).
     let result = rustledger_wasm::validate_multi_file(files(source), "ledger.beancount")
         .expect("validateMultiFile");
     assert_eq!(
         locations(&get_field(&result, "errors")),
-        multi_file_want,
+        want,
         "validateMultiFile"
+    );
+
+    let ledger =
+        rustledger_wasm::Ledger::from_files(files(source), "ledger.beancount").expect("fromFiles");
+    assert_eq!(
+        locations(&ledger.get_errors().expect("getErrors")),
+        want,
+        "Ledger"
+    );
+    let restored = rustledger_wasm::Ledger::from_cache(&ledger.serialize().expect("serialize"))
+        .expect("fromCache");
+    assert_eq!(
+        locations(&restored.get_errors().expect("getErrors")),
+        want,
+        "Ledger from cache"
     );
 
     let parsed = rustledger_wasm::ParsedLedger::new(source);

@@ -218,9 +218,9 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
     },
     // A refused `booking_method` in a source that also fails to parse. The
     // load goes on past the parse error (#2949), so a query lists the parse
-    // error first and then the refusal, as on a source that parses. Not run
-    // through WASM `queryMultiFile`, which refuses on a parse error before a
-    // `Ledger` exists and lists no option diagnostic (issue #2960).
+    // error first and then the refusal, as on a source that parses, WASM
+    // `queryMultiFile` too: it refused on the parse error before a `Ledger`
+    // existed and listed no option diagnostic (#2960).
     QueryOptionCase {
         name: "refused-booking-method-with-parse-error",
         files: &[(
@@ -249,9 +249,7 @@ pub const QUERY_OPTION_CASES: &[QueryOptionCase] = &[
     },
     // A parse error and no option diagnostic: the parse error alone refuses
     // the query, though the entries that did parse would give rows (review
-    // of #2946). WASM `queryMultiFile` runs it too: it refuses on a parse
-    // error before a `Ledger` exists, but there are no option diagnostics to
-    // miss (issue #2960).
+    // of #2946).
     QueryOptionCase {
         name: "refused-by-parse-error-alone",
         files: &[(

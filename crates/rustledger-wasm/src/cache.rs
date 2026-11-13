@@ -496,7 +496,14 @@ use crate::types::{Error, LedgerOptions};
 /// pool, where it was booked as a new lot on its own side when a lot there
 /// cost the same. `ParsedLedger` and `Ledger` archive booked directives, so an older
 /// blob would keep serving that new lot. (v106 is held by #2931.)
-pub const CACHE_VERSION: u32 = 108;
+/// v109: loader v73, unchanged. Both payloads' error lists move (#2961,
+/// #2964): a `Ledger`'s parse errors carry the parser's message with no
+/// `<path>: ` prefix, and a loader error (a validation finding, a booking
+/// error, an include's `LOAD` error) carries its end and its hint, on a
+/// `Ledger` and, for its booking errors, on a `ParsedLedger`. An older blob
+/// would keep serving the prefixed messages, the null ends and no hint.
+/// (v106 is held by #2931.)
+pub const CACHE_VERSION: u32 = 109;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

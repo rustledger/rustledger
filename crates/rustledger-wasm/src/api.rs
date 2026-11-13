@@ -29,17 +29,16 @@ use crate::utils::LineLookup;
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
 ///
-/// A parse error's message, code, phase and hint are WASM's one mapping,
-/// [`crate::helpers::parse_error_fields`], which also documents why WASM
-/// does not call the loader's `parse_errors_to_ledger_errors`. Unlike the
-/// single-source surfaces, `rledger check` and the FFI, this prefixes the
-/// message with the file's path (`main.beancount: parse error: ...`),
-/// though the file is in its own field too: a pre-existing divergence of
-/// every multi-file surface (`validateMultiFile`, `Ledger`,
-/// `queryMultiFile`), tracked in issue #2961. Drop the prefix there, with
-/// the matching adjustments in `tests/wasm_query_option_errors.rs` and in
-/// the `parse_error_mapping_parity` test of `src/helpers.rs`, which both
-/// strip it.
+/// Each parse error is the loader's
+/// ([`rustledger_loader::parse_errors_to_ledger_errors`], behind the FFI),
+/// placed with [`crate::helpers::ledger_error_to_wasm`]: the parser's
+/// message as is, the file in its own field, and the span's end. The
+/// single-source surfaces map the same fields with
+/// [`crate::helpers::parse_error_fields`] (which says why), and
+/// `parse_error_mapping_parity` in `src/helpers.rs` pins the two to agree.
+/// This prefixed the message with the file's path (`main.beancount: parse
+/// error: ...`), unlike `rledger check`, the FFI and the single-source
+/// surfaces (#2961).
 pub fn load_errors_to_errors(
     load_errors: &[LoadError],
     source_map: &rustledger_loader::SourceMap,
@@ -48,26 +47,12 @@ pub fn load_errors_to_errors(
 
     for load_error in load_errors {
         match load_error {
-            LoadError::ParseErrors {
-                path,
-                errors: parse_errors,
-            } => {
-                // Expand parse errors with the same rich fields as the
-                // single-file path (code / phase / hint / file / full span).
-                for parse_error in parse_errors {
-                    let span = parse_error.span();
-                    let file = source_map.get_by_path(path);
-                    let mut err = crate::helpers::parse_error_fields(parse_error)
-                        .with_file(Some(path.display().to_string()));
-                    // The path prefix of issue #2961 (see above).
-                    err.message = format!("{}: {}", path.display(), err.message);
-                    if let Some(file) = file {
-                        let (sl, sc) = file.line_col(span.0);
-                        let (el, ec) = file.line_col(span.1);
-                        err = err.with_span((sl as u32, sc as u32), (el as u32, ec as u32));
-                    }
-                    errors.push(err);
-                }
+            LoadError::ParseErrors { .. } => {
+                errors.extend(
+                    rustledger_loader::parse_errors_to_ledger_errors(load_error, source_map)
+                        .into_iter()
+                        .map(|e| crate::helpers::ledger_error_to_wasm(e, source_map)),
+                );
             }
             other => {
                 // Other errors use default string conversion. When the failure
@@ -77,10 +62,16 @@ pub fn load_errors_to_errors(
                 let mut err = Error::new(other.to_string()).with_phase("parse");
                 if let Some(site) = other.include_site() {
                     err = err.with_file(Some(site.file.display().to_string()));
-                    if let Some(file) = source_map.get(site.file_id as usize) {
-                        let (sl, sc) = file.line_col(site.span.start);
-                        let (el, ec) = file.line_col(site.span.end);
-                        err = err.with_span((sl as u32, sc as u32), (el as u32, ec as u32));
+                    if source_map.get(usize::from(site.file_id)).is_some()
+                        && let (Some(start), Some(end)) = (
+                            source_map.locate(site.file_id, site.span.start),
+                            source_map.locate(site.file_id, site.span.end),
+                        )
+                    {
+                        err = err.with_span(
+                            (start.line as u32, start.column as u32),
+                            (end.line as u32, end.column as u32),
+                        );
                     }
                 }
                 errors.push(err);
@@ -594,7 +585,12 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
         };
         match process(load_result, &process_options) {
             Ok(ledger) => {
-                errors.extend(ledger.errors.into_iter().map(Error::from));
+                errors.extend(
+                    ledger
+                        .errors
+                        .into_iter()
+                        .map(|e| crate::helpers::ledger_error_to_wasm(e, &ledger.source_map)),
+                );
                 ledger.directives.into_iter().map(|s| s.value).collect()
             }
             Err(e) => {
@@ -629,7 +625,9 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
 /// expansion, duplicate detection and per-file error attribution belong to the
 /// loader in both cases — which is the point of #2101, and would be undone by
 /// giving either entry point its own copy of this.
-fn validate_with_filesystem(
+// `pub` only for `helpers`' tests. `api` is a private module, so this is
+// crate-private anyway, and `pub(crate)` trips `clippy::redundant_pub_crate`.
+pub fn validate_with_filesystem(
     fs: Box<dyn rustledger_loader::FileSystem>,
     entry_point: &str,
 ) -> ValidationResult {
@@ -692,7 +690,10 @@ fn validate_with_filesystem(
         }
     };
 
-    errors.extend(crate::helpers::reported_ledger_errors(ledger.errors));
+    errors.extend(crate::helpers::reported_ledger_errors(
+        ledger.errors,
+        &ledger.source_map,
+    ));
     errors.extend(option_errors);
 
     ValidationResult {
@@ -810,7 +811,7 @@ fn query_with_filesystem(
     let mut loader = Loader::new().with_filesystem(fs);
 
     // Load from entry point
-    let load_result = match loader.load(Path::new(entry_point)) {
+    let mut load_result = match loader.load(Path::new(entry_point)) {
         Ok(result) => result,
         Err(e) => {
             let result = QueryResult {
@@ -829,20 +830,19 @@ fn query_with_filesystem(
     // include cycle, a duplicate include or an empty glob is reported beside
     // the rows, as `bean-query` and `rledger query` report it.
     //
-    // This refusal lists no option diagnostics: it returns before a `Ledger`
-    // exists, so it cannot list `Ledger::query_option_errors` as the FFI's
-    // `query-file` does over a file that fails to parse. A known divergence,
-    // noted on that function too (in `rustledger-loader/src/process.rs`);
-    // revisit when this path can reach it (#2960).
-    let load_errors = load_errors_to_errors(&load_result.errors, &load_result.source_map);
-    if load_result.errors.iter().any(LoadError::blocks_queries) {
-        let result = QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            errors: load_errors,
-        };
-        return to_js(&result);
-    }
+    // The parse errors are taken out and reported one by one, and the load
+    // goes on to `process` whatever failed to parse (#2949), as in
+    // `Ledger::from_file_map`, so a refusal over a parse error lists the
+    // ledger's option diagnostics too (`Ledger::query_option_errors`, below),
+    // as the FFI's `query-file` and every other WASM query surface list them.
+    // This refused before `process`, so no `Ledger` existed and it listed none
+    // (#2960). Every other load error stays for `process`, which reports it
+    // as `LOAD`.
+    let parse_failures = load_result.take_parse_errors();
+    let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
+    let parse_errors = load_errors_to_errors(&parse_failures, &load_result.source_map);
+    // Read before `process` consumes the options, for its error arm.
+    let option_errors = option_warnings_to_errors(&load_result.options.warnings);
 
     // Run the shared processing pipeline WITH validation, as `rledger query`
     // does: `#balances.discrepancy` comes from the balance checker, which runs
@@ -858,10 +858,13 @@ fn query_with_filesystem(
     let mut ledger = match process(load_result, &options) {
         Ok(ledger) => ledger,
         Err(e) => {
+            let mut errors = parse_errors;
+            errors.push(Error::new(format!("Processing error: {e}")));
+            errors.extend(option_errors);
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                errors,
             };
             return to_js(&result);
         }
@@ -871,17 +874,22 @@ fn query_with_filesystem(
     // failure leaves the directive stream unbooked, and a rejected
     // `booking_method` would book it with a method the ledger did not ask for
     // (#2911).
-    let booking_failed = ledger.blocks_queries();
-    // Advisory-only codes (E1004, closing an account with a balance) are not
-    // reported by `rledger query` either: the same canonical predicate.
-    let mut errors = crate::helpers::reported_ledger_errors(std::mem::take(&mut ledger.errors));
+    let query_refused = parse_blocks_queries || ledger.blocks_queries();
+    // The parse errors first, then the ledger's. Advisory-only codes (E1004,
+    // closing an account with a balance) are not reported by `rledger query`
+    // either: the same canonical predicate.
+    let mut errors = parse_errors;
+    errors.extend(crate::helpers::reported_ledger_errors(
+        std::mem::take(&mut ledger.errors),
+        &ledger.source_map,
+    ));
     // Then the option diagnostics as a query lists them, through the
     // canonical (`Ledger::query_option_errors`), as the FFI's `query-file`
     // lists them: the rejected `booking_method`'s E7002 is the refusal that
     // says why the query did not answer (#2911, #2929). This surface listed
     // the refusal alone and no other option diagnostic.
     errors.extend(ledger.query_option_errors().into_iter().map(Error::from));
-    if booking_failed {
+    if query_refused {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),

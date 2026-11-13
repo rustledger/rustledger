@@ -486,7 +486,7 @@ use crate::types::{Error, LedgerOptions};
 /// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
 /// also carries its parse and validation errors at character columns now,
 /// where a byte column read high after a BOM or a multi-byte character.
-/// (v104 is held by #2931.)
+/// (v104 was held by #2931 and never released.)
 /// v106: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
 /// BOM in the middle of a line starts an invalid token that runs to the next
 /// blank, as in beancount, so a quote after it opens no string. Every input

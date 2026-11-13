@@ -752,10 +752,12 @@ fn test_parse_bom_alone_at_eof_after_directive_is_one_error() {
 /// where the amount ends, right at the glued token, and a balance's
 /// malformed-amount check reported a second one. The price or cost the
 /// token stands in front of is dropped (issue #2954), as it is with the
-/// blank; a price after a dropped cost (`{{4 USD}} @@ 5 USD`) is kept.
+/// blank; a price after a dropped cost (`{{4 USD}} @@ 5 USD`) is kept. A
+/// posting indented with a tab is a posting all the same: the second error
+/// came back when only spaces counted as its indentation.
 #[test]
 fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
-    for end in ["\n", "\r\n"] {
+    for (end, indent) in [("\n", "  "), ("\r\n", "  "), ("\n", "\t"), ("\r\n", "\t")] {
         for gap in ["", " "] {
             for (tail, price_kept) in [
                 ("@ 2 USD", false),
@@ -766,8 +768,8 @@ fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
                 ("~ 2 USD", false),
             ] {
                 let src = format!(
-                    "{HEAD}2024-01-02 * \"x\"{end}  Assets:A  1 HOOL{gap}{BOM}{tail}{end}  \
-                     Assets:B  -2 USD{end}"
+                    "{HEAD}2024-01-02 * \"x\"{end}{indent}Assets:A  1 HOOL{gap}{BOM}{tail}{end}\
+                     {indent}Assets:B  -2 USD{end}"
                 );
                 let result = parse_both(&src);
                 assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
@@ -790,5 +792,44 @@ fn test_parse_bom_glued_before_price_cost_or_tolerance_is_one_error() {
             assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
             assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
         }
+    }
+}
+
+/// BOMs after the leading one at the very start of a file: the first is the
+/// permitted leading BOM, the rest start the first line's BOM-led run
+/// (`<BOM>*7`, an org-mode heading start), and the invalid token after it on
+/// the line (`Z#`) is one more error, as in bean-check 3.2.3. That error is
+/// kept only when the run is looked up at offsets that leave the leading BOM
+/// out, as the parsed text does.
+#[test]
+fn test_parse_bom_run_after_the_leading_bom_counts_the_rest() {
+    for src in [
+        format!("{BOM}{BOM}{BOM}{BOM}*7 Z#"),
+        format!("{BOM}{BOM}{BOM}*7 Z#\n"),
+        format!("{BOM}{BOM}*7 Z#"),
+    ] {
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), 2, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// A second BOM at the very start of a file is left in front of the first
+/// line, so that line's header starts past it (`top-level directive must
+/// start at column 0`), and a line error for the header starts after the
+/// line's start, before an invalid token on it. Such an error stands for its
+/// line, not for a construct the token sits in, so it is not dropped as one:
+/// the line keeps the error that names the token. Two errors, as in
+/// bean-check 3.2.3.
+#[test]
+fn test_parse_header_after_two_leading_boms_names_its_invalid_token() {
+    for keyword in ["event", "query"] {
+        let src = format!("{BOM}{BOM}2024-01-02 {keyword} \u{11}\n");
+        let result = parse_both(&src);
+        let messages: Vec<String> = result.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(messages.len(), 2, "{src:?}: {messages:?}");
+        assert!(
+            messages[1].ends_with("invalid token '\\u{11}'"),
+            "{src:?}: {messages:?}"
+        );
     }
 }

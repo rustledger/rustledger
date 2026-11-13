@@ -8956,6 +8956,73 @@ mod tests {
         };
         assert_eq!(txn.meta.get("kk"), Some(&MetaValue::None));
     }
+
+    /// `header_grammar_reaches(src, at)` for the byte offset of the first
+    /// occurrence of `at` in `src` (`quiet_after_invalid_tokens`).
+    fn header_reaches_at(src: &str, at: &str) -> bool {
+        let first = src.find(at).expect("`at` occurs in `src`");
+        let source_file = SourceFile::parse(src);
+        header_grammar_reaches(source_file.syntax(), src, first)
+    }
+
+    /// `header_grammar_reaches` is true for a token among a non-transaction
+    /// directive's header tokens when the header's rule reads up to it: no
+    /// defect at all (`Assets:A`), or the first defect at the token itself
+    /// (`$~`, where the balance expects its currency).
+    #[test]
+    fn test_header_grammar_reaches_a_header_token_the_rule_reads_up_to() {
+        assert!(header_reaches_at("2024-01-01 open Assets:A\n", "Assets:A"));
+        assert!(header_reaches_at(
+            "2024-01-01 balance Assets:A 1.00 $~ 0.01 USD\n",
+            "$~"
+        ));
+        // The token right at the start of a directive is that directive's
+        // (the right-biased token at the offset), not the end of the line
+        // before it.
+        assert!(header_reaches_at(
+            "2024-01-01 open Assets:B\n2024-01-01 close Assets:A\n",
+            "2024-01-01 close"
+        ));
+    }
+
+    /// `header_grammar_reaches` is false when the header's rule fails before
+    /// the token (`open` expects an account at the `5`), and for a token that
+    /// is not one of a non-transaction directive's header tokens: a metadata
+    /// line's (whose `META_ENTRY` is no directive, though it is the token's
+    /// nearest ancestor), a posting's (a transaction has no header rule
+    /// here), the end of an empty source, and an offset past what a tree can
+    /// hold.
+    #[test]
+    fn test_header_grammar_reaches_is_false_off_the_header_rule() {
+        assert!(!header_reaches_at("2024-01-01 open 5 $x\n", "$x"));
+        assert!(!header_reaches_at(
+            "2024-01-01 open Assets:A\n  kk: $x\n",
+            "kk"
+        ));
+        assert!(!header_reaches_at(
+            "2024-01-01 *\n  Assets:A  1 USD\n  Assets:B\n",
+            "Assets:A"
+        ));
+        let empty = SourceFile::parse("");
+        assert!(!header_grammar_reaches(empty.syntax(), "", 0));
+        let src = "2024-01-01 open Assets:A\n";
+        let source_file = SourceFile::parse(src);
+        if let Ok(first) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert!(!header_grammar_reaches(source_file.syntax(), src, first));
+        }
+    }
+
+    /// A comment line between two directives is leading trivia of the
+    /// second one's node, before any of its header tokens: no header token
+    /// at all starts at or before it, which `header_grammar_reaches` answers
+    /// `false` for rather than running the rule on nothing.
+    #[test]
+    fn test_header_grammar_reaches_is_false_before_the_first_header_token() {
+        assert!(!header_reaches_at(
+            "2024-01-01 open Assets:B ; c\n  ; x\n2024-01-01 open Assets:A\n",
+            "; x"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -9600,12 +9667,22 @@ fn quiet_after_invalid_tokens(
             }
         }
     }
+    // A shortcut: with no invalid token the loop below drops nothing.
     if invalid.is_empty() {
         return;
     }
     invalid.sort_unstable();
     unread.sort_unstable();
     let inside_unread = |at: usize| {
+        // `s <= at` would differ only for an error that starts where an
+        // unread token does, and the one caller asks only after its search
+        // of `invalid` (the same starts) found none there. That caller asks
+        // for an error after its line's first invalid token, whose entry
+        // comes before it, so there is always one (`is_none_or` would be
+        // the same); and `at <= e` would differ only for an error that
+        // starts right where a token ends, which is a blank or a line end
+        // for every invalid token but a line-start BOM's, whose line's
+        // errors are all kept.
         let i = unread.partition_point(|&(s, _)| s < at);
         i.checked_sub(1)
             .and_then(|i| unread.get(i))
@@ -9615,6 +9692,12 @@ fn quiet_after_invalid_tokens(
     // The end (its `\n`, or the end of the source) of the last line handled.
     let mut line_end = 0;
     for (k, &first) in invalid.iter().enumerate() {
+        // `<=` would differ only for a token at offset 0, the first
+        // `line_end`: any later one is a `\n`, where no token starts. A line
+        // that starts with an invalid token is an `ERROR_NODE` line, whose
+        // errors are all kept below anyway (its line error starts where its
+        // content does, the others are invalid tokens' own errors, invalid
+        // dates and BOM errors), so handling that line changes nothing.
         if first < line_end {
             continue;
         }
@@ -9632,8 +9715,15 @@ fn quiet_after_invalid_tokens(
         // Whether the line's grammar gets as far as the invalid token, asked
         // at most once per line and only when an error contains the token.
         let mut reaches: Option<bool> = None;
+        // Past the errors that start where the line's content does: such an
+        // error stands for the whole line (its line error, or a check of
+        // the line from its first token), and is kept, so `<` would change
+        // nothing.
         let mut i = errors.partition_point(|e| e.span.start <= content + off);
         while let Some(e) = errors.get(i) {
+            // An error at the line's own `\n` is on the line, so `>`, not
+            // `>=`. None starts there today (a defect at the end of a line
+            // points at its last token), so the two agree.
             if e.span.start > to {
                 break;
             }
@@ -9643,9 +9733,10 @@ fn quiet_after_invalid_tokens(
                 &e.kind,
                 crate::ParseErrorKind::SyntaxError(m) if !m.starts_with("unexpected input")
             );
-            dropped[i] = if e.span.start < at
-                || (e.span.start == at && e.span.end > token_end && construct_check)
-            {
+            // One that starts at the token and runs past it is asked below
+            // whether it is a construct check, like one that starts before;
+            // anything else that starts at the token is kept either way.
+            dropped[i] = if e.span.start < at || (e.span.start == at && e.span.end > token_end) {
                 // A check of a construct the invalid token sits inside (a
                 // cost spec, an amount expression, a posting's trailing
                 // tokens, a balance's amount), when the line's grammar fails
@@ -9656,13 +9747,26 @@ fn quiet_after_invalid_tokens(
                 // start right at the token, when the token is glued to what
                 // comes before it: a posting's trailing tokens start where
                 // its amount ends (`1 HOOL<BOM>@ 2 USD`, `1 HOOL$@ 2 USD`).
-                // On a header line, only a construct check, when the header
-                // grammar reads up to the token (`balance Assets:A 1.00 $~
-                // 0.01 USD`); elsewhere the error is where the grammar fails
-                // first (`price /6"E_X`: the price expects a currency at the
-                // `/`), and is kept.
+                // Only when the line's grammar reads up to the token
+                // (`balance Assets:A 1.00 $~ 0.01 USD`); elsewhere the error
+                // is where the grammar fails first (`price /6"E_X`: the price
+                // expects a currency at the `/`), and is kept.
+                //
+                // Only a construct check's error, too. A header's line error
+                // starts where the header does, which is past the line's
+                // start, so before the token, when a BOM is left at the very
+                // start of a file (`<BOM><BOM>2024-01-02 event \x11`); it
+                // stands for its line and is kept. On an indented line every
+                // other error that starts before the token is a line error,
+                // at the line's content (skipped above), or covers one token
+                // before the invalid one (an invalid date, an account), so
+                // there this condition changes nothing.
+                //
+                // A check that ends right at the token (a posting's sign
+                // check, `-$x`) is kept, one error more than beancount;
+                // `>=` would drop it too (#2967).
                 e.span.end > at
-                    && matches!(e.kind, crate::ParseErrorKind::SyntaxError(_))
+                    && construct_check
                     && *reaches.get_or_insert_with(|| {
                         if content > line_start {
                             indented_grammar_reaches(stripped, line_start, line_end, first)
@@ -9670,10 +9774,11 @@ fn quiet_after_invalid_tokens(
                             header_grammar_reaches(root, stripped, first)
                         }
                     })
-                    && (content > line_start || construct_check)
             } else {
-                e.span.start > at
-                    && invalid.binary_search(&(e.span.start - off)).is_err()
+                // The error starts at the token or after it. One at the
+                // token is that token's own error: the search finds the
+                // token and keeps it.
+                invalid.binary_search(&(e.span.start - off)).is_err()
                     && !inside_unread(e.span.start - off)
                     && !matches!(
                         e.kind,
@@ -9752,8 +9857,11 @@ fn header_grammar_reaches(root: &crate::SyntaxNode, stripped: &str, first: usize
     if tokens.last().is_none_or(|(_, r)| r.start != first) {
         return false;
     }
-    let end = tokens.last().map_or(first, |(_, r)| r.end);
-    super::directive_header::first_header_defect(node.kind(), &tokens, end, stripped)
+    // The rule points a defect at `end` (here `first`) only when it consumes
+    // no token at all, and it always consumes the first one: a header's
+    // first token is never whitespace, a comment or a BOM, which the rule
+    // skips. So any `end` gives the same answer.
+    super::directive_header::first_header_defect(node.kind(), &tokens, first, stripped)
         .is_none_or(|d| d.range.start >= first)
 }
 

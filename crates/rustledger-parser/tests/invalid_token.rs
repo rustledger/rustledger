@@ -129,6 +129,25 @@ fn test_parse_invalid_token_is_one_error() {
             "2024-01-01 *\n  Assets:A  1 HOOL$~ 2 USD\n  Assets:B\n",
             &[2][..],
         ),
+        // A posting indented with a tab, not spaces, is a posting all the
+        // same: its trailing-tokens and cost-spec checks report nothing more
+        // either.
+        (
+            "2024-01-01 *\n\tAssets:A  1 HOOL$@ 2 USD\n\tAssets:B  -2 USD\n",
+            &[2][..],
+        ),
+        (
+            "2024-01-01 *\n\tAssets:A  1 HOOL$~ 2 USD\n\tAssets:B\n",
+            &[2][..],
+        ),
+        (
+            "2024-01-01 *\n\tAssets:A  {{2 .USD}}\n\tAssets:B\n",
+            &[2][..],
+        ),
+        (
+            "2024-01-01 *\n\tAssets:A  1 HOOL {{2 .USD}} @@ 3 USD\n\tAssets:B\n",
+            &[2][..],
+        ),
     ] {
         check(src, lines);
     }

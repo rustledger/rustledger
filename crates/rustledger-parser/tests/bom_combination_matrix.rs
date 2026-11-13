@@ -807,6 +807,14 @@ fn cause(
     let text = line(l);
     let facts = LineFacts::new(input, text, l, counts);
     let worse = r.abs_diff(b) > m.abs_diff(b);
+    // Whether line `d` is a date alone whose one error rledger reports there
+    // and beancount on the next line: one more on `d` than beancount, and one
+    // fewer on `d + 1`.
+    let moved_to_next_line = |d: usize| {
+        date_alone(line(d))
+            && get(&counts.rl, d) == get(&counts.bc, d) + 1
+            && get(&counts.bc, d + 1) == get(&counts.rl, d + 1) + 1
+    };
     // The errors rledger reports beyond beancount's, and how many of them
     // the named kind could be. Read only where `r > b`, so it never
     // saturates there, and `wrapping_sub` would be the same.
@@ -874,11 +882,12 @@ fn cause(
             // grammar never pushes, so it reports no unclosed push at the end of
             // the file (line 0); rledger keeps the push.
             "failed-push-still-pushed"
-        } else if (date_alone(text) && r == b + 1) || (date_alone(line(l - 1)) && b == r + 1) {
+        } else if moved_to_next_line(l) || moved_to_next_line(l - 1) {
             // A date alone on a line: beancount reports its `unexpected EOL` on
             // the next line, rledger on the date's. So the date's line counts
-            // exactly one more here, and the next line one fewer; any other
-            // difference on either line is not this one.
+            // exactly one more here, and the next line one fewer, both at once;
+            // any other difference on either line is not this one. (`l - 1`
+            // cannot underflow: line 0 is taken above.)
             "eol-reported-on-next-line"
         } else if r > b && account_after_bom(text) && accounts >= extra {
             // An invalid account (non-ASCII first character) after a BOM token
@@ -1172,6 +1181,7 @@ fn check_row(line: &str) -> RowResult {
     let differing: BTreeSet<usize> = counts.bc.keys().chain(counts.rl.keys()).copied().collect();
     for l in differing {
         let (b, r, m) = (get(&counts.bc, l), get(&counts.rl, l), get(&counts.main, l));
+        // A line counted alike needs no cause (`r == b` is the same test).
         if b == r {
             continue;
         }
@@ -1431,6 +1441,8 @@ fn check_worse_than_main(worse: &[(String, Worse)]) -> Vec<String> {
 
 #[test]
 fn test_parse_bom_combination_matrix_matches_beancount() {
+    // Read only by the guard against a table cut short below, which holds
+    // by a wide margin: starting at 1 or counting by 2 changes nothing.
     let mut rows = 0;
     let mut computed: Vec<(String, String, String)> = Vec::new();
     let mut worse: Vec<(String, Worse)> = Vec::new();
@@ -1722,6 +1734,8 @@ fn reason_holds(known: &BTreeMap<&str, KnownRow>, tail: &str, counts: Option<&st
 /// fails here in either mode, so a stale list cannot quietly let an update
 /// take a regression from matching for a new row.
 fn matching_hashes() -> BTreeSet<&'static str> {
+    // `split('\n')` for `lines()` would be the same here and below: the list
+    // holds no `\r` (`test_data_files_hold_no_carriage_return`).
     let hashes: Vec<&str> = MATCHING
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -2542,22 +2556,52 @@ fn test_cause_eol_reported_on_next_line_needs_a_date_alone() {
 }
 
 /// `eol-reported-on-next-line` explains exactly one error moved from the
-/// date's line to the next: one more on the date's line, one fewer on the
-/// next. Any other difference on either line is not that one. Made-up
-/// counts on `2024-01-02` then `foo` (no BOM, and main's count unlike
-/// rledger's, so no later rule takes the line either).
+/// date's line to the next: one more on the date's line AND one fewer on the
+/// next, on either line. Any other difference on either line is not that
+/// one, nor is either half alone. Made-up counts (beancount, rledger) on
+/// `2024-01-02` (line 3) then `foo` (line 4), no BOM, and main's count 9 on
+/// both, unlike rledger's, so no later rule takes either line.
 #[test]
 fn test_cause_eol_reported_on_next_line_needs_one_error_moved() {
-    let date_line =
-        |b: usize, r: usize| made_up_cause("2024-01-02\nfoo", 3, &line_counts(3, b, r, 9, 0));
-    assert_eq!(date_line(0, 1), Some("eol-reported-on-next-line"));
-    assert_eq!(date_line(0, 2), None, "two more on the date's line");
-    assert_eq!(date_line(1, 0), None, "one fewer on the date's line");
-    let next_line =
-        |b: usize, r: usize| made_up_cause("2024-01-02\nfoo", 4, &line_counts(4, b, r, 9, 0));
-    assert_eq!(next_line(2, 1), Some("eol-reported-on-next-line"));
-    assert_eq!(next_line(3, 1), None, "two fewer on the next line");
-    assert_eq!(next_line(1, 2), None, "one more on the next line");
+    let causes = |date: (usize, usize), next: (usize, usize)| {
+        let mut counts = line_counts(3, date.0, date.1, 9, 0);
+        counts.bc.insert(4, next.0);
+        counts.rl.insert(4, next.1);
+        counts.main.insert(4, 9);
+        [3, 4].map(|l| made_up_cause("2024-01-02\nfoo", l, &counts))
+    };
+    let moved = Some("eol-reported-on-next-line");
+    assert_eq!(causes((0, 1), (2, 1)), [moved, moved]);
+    assert_eq!(
+        causes((0, 2), (2, 1)),
+        [None, None],
+        "two more on the date's line"
+    );
+    assert_eq!(
+        causes((1, 0), (2, 1)),
+        [None, None],
+        "one fewer on the date's line"
+    );
+    assert_eq!(
+        causes((0, 1), (3, 1)),
+        [None, None],
+        "two fewer on the next line"
+    );
+    assert_eq!(
+        causes((0, 1), (1, 2)),
+        [None, None],
+        "one more on the next line"
+    );
+    assert_eq!(
+        causes((0, 1), (1, 1)),
+        [None, None],
+        "none fewer on the next line"
+    );
+    assert_eq!(
+        causes((1, 1), (2, 1)),
+        [None, None],
+        "none more on the date's line"
+    );
 }
 
 /// `beancount_date` reads a `DATE` token as beancount 3.2.3 does, and
@@ -2655,13 +2699,15 @@ fn test_beancount_date_reads_dates_as_beancount_does() {
 /// beancount crashed on alone (no entry) is not taken for one that matches.
 /// Made-up counts: beancount 1 on `foo` (line 3), and on the date alone
 /// after it (line 4) beancount 0 and rledger 1 (main 9, so no later rule
-/// takes the line), so the line is both `line-after-error-line` and
-/// `eol-reported-on-next-line`.
+/// takes the line), with beancount's 1 on line 5 instead, so the line is
+/// both `line-after-error-line` and `eol-reported-on-next-line`.
 #[test]
 fn test_cause_recovery_first_needs_a_matching_count_alone() {
     let with_alone = |alone: Option<usize>| {
         let mut counts = line_counts(4, 0, 1, 9, 0);
         counts.bc.insert(3, 1);
+        // The error beancount reports on the line after the date instead.
+        counts.bc.insert(5, 1);
         counts.bc_alone = alone.map(|n| (4, n)).into_iter().collect();
         made_up_cause("foo\n2024-01-02", 4, &counts)
     };
@@ -3277,7 +3323,8 @@ fn test_hash_bang_share_is_the_difference_it_takes_away() {
 }
 
 /// `data_lines` skips blank lines and header lines (`# ...`, a bare `#`),
-/// and keeps a source that starts with `#`.
+/// and keeps a source that starts with `#`. A list checked out with CRLF
+/// line endings reads the same: no `\r` is left on a row.
 #[test]
 fn test_data_lines_skips_only_headers_and_blanks() {
     let text = "# a header\n#\n\n#t x\t3:1\nrow\t1\n";
@@ -3285,6 +3332,27 @@ fn test_data_lines_skips_only_headers_and_blanks() {
         data_lines(text).collect::<Vec<_>>(),
         vec!["#t x\t3:1", "row\t1"]
     );
+    assert_eq!(
+        data_lines(&text.replace('\n', "\r\n")).collect::<Vec<_>>(),
+        vec!["#t x\t3:1", "row\t1"]
+    );
+}
+
+/// The data files hold no `\r`: a source's `\r` is written escaped
+/// (`\\r`), so each line ends at its `\n` alone, however a reader splits
+/// it (`matching_hashes`).
+#[test]
+fn test_data_files_hold_no_carriage_return() {
+    for (name, text) in [
+        ("table", DATA),
+        ("known", KNOWN),
+        ("worse than main", WORSE_THAN_MAIN),
+        ("texts", TEXTS),
+        ("exceptions", EXCEPTIONS),
+        ("matching", MATCHING),
+    ] {
+        assert!(!text.contains('\r'), "the {name} list holds a `\\r`");
+    }
 }
 
 /// `parse_exceptions` reads the source, line and reason of each exception.
@@ -3457,6 +3525,26 @@ fn test_regressed_rows_needs_a_line_further_than_recorded() {
         &none,
     );
     assert!(new_row.is_empty(), "new to the table");
+}
+
+/// `regressed_rows` goes on past a row new to the table: a regressed row
+/// after it is still named.
+#[test]
+fn test_regressed_rows_goes_on_past_a_new_row() {
+    let known: BTreeMap<&str, KnownRow> = BTreeMap::from([("t", ("3:2", "c", None))]);
+    let bc = BTreeMap::from([("t".to_string(), "3:1".to_string())]);
+    let rows = [
+        ("u".to_string(), "3:5".to_string(), String::new()),
+        ("t".to_string(), "3:3".to_string(), String::new()),
+    ];
+    let regressed = regressed_rows(&rows, &bc, &known, &BTreeSet::new());
+    assert_eq!(
+        regressed
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        ["t"]
+    );
 }
 
 /// `glued_boms_replace_construct` counts the `P0026`s the rewrite takes

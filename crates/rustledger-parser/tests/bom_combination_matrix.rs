@@ -153,6 +153,35 @@ fn hash_bang_analog(src: &str) -> String {
     out
 }
 
+/// `src` as main read it before #2928 made a mid-line `#!` / `#+` a `#` and
+/// the token after it: each `#!` or `#+` past its line's start (and past the
+/// BOMs that start the line, which the lexer steps over there) and the rest
+/// of its line cut off, since main lexed them as a comment to the end of the
+/// line. A `\r` that ends the line is kept.
+fn hash_bang_cut(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.split_inclusive('\n') {
+        let (content, newline) = line.strip_suffix('\n').map_or((line, ""), |c| (c, "\n"));
+        let (content, cr) = content
+            .strip_suffix('\r')
+            .map_or((content, ""), |c| (c, "\r"));
+        let start = content.len() - content.trim_start_matches(BOM).len();
+        let cut = ["#!", "#+"]
+            .iter()
+            .filter_map(|m| {
+                content
+                    .match_indices(m)
+                    .map(|(i, _)| i)
+                    .find(|&i| i > start)
+            })
+            .min();
+        out.push_str(cut.map_or(content, |i| &content[..i]));
+        out.push_str(cr);
+        out.push_str(newline);
+    }
+    out
+}
+
 /// `line:count` cells back to a map.
 fn parse_cells(cells: &str) -> BTreeMap<usize, usize> {
     cells
@@ -1077,6 +1106,8 @@ struct Worse {
     text: String,
     bc: usize,
     rl: usize,
+    /// main's count for the line.
+    main: usize,
     analog_bc: usize,
     analog_main: usize,
     /// The whole input, and beancount's count on this line for the input
@@ -1198,6 +1229,7 @@ fn check_row(line: &str) -> RowResult {
                     text: text.unwrap_or("").to_string(),
                     bc: b,
                     rl: r,
+                    main: m,
                     analog_bc: get(&counts.analog_bc, l),
                     analog_main: get(&counts.analog_main, l),
                     input: input.clone(),
@@ -1354,8 +1386,26 @@ const fn signed(n: usize) -> i64 {
     n as i64
 }
 
-/// Whether an accepted further-than-main line holds for its cause.
+/// Whether an accepted further-than-main line holds: for its cause, or
+/// because main was closer to beancount only by not reading the rest of a
+/// line (`main_read_less`).
 fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
+    cause_holds(a, w) || main_read_less(w)
+}
+
+/// Whether main's count for the line is exactly what rledger counts with
+/// each mid-line `#!` / `#+` and the rest of its line cut off
+/// (`hash_bang_cut`), as main read them before #2928: a comment to the end
+/// of the line. Such a line is further from beancount than main only because
+/// rledger now reads what main skipped, and the line holds or follows such a
+/// `#!` / `#+`, so the cut moves the count.
+fn main_read_less(w: &Worse) -> bool {
+    let cut = hash_bang_cut(&w.input);
+    cut != w.input && rledger_counts(&cut).get(&w.line).copied().unwrap_or(0) == w.main
+}
+
+/// Whether an accepted further-than-main line holds for its cause.
+fn cause_holds(a: &Accepted<'_>, w: &Worse) -> bool {
     match a.cause {
         "like-main-without-bom" => w.analog_bc == w.bc && w.analog_main == w.rl,
         "inner-bom-under-line-error" => w.facts().inner_boms_are_the_difference(),
@@ -2885,6 +2935,19 @@ fn test_hash_bang_analog_rewrites_only_past_a_lines_start() {
     );
 }
 
+/// `hash_bang_cut` cuts a line at its first `#!` or `#+` past its start, as
+/// main read them (a comment to the end of the line, before #2928), keeping
+/// the line ending (a CRLF's `\r` too): one at a line's start, or right after
+/// the BOMs that start it, stays, as main and the lexer read it there.
+#[test]
+fn test_hash_bang_cut_cuts_only_past_a_lines_start() {
+    assert_eq!(
+        hash_bang_cut("#!a\nx #+b #!c\r\n  #!d\n\u{FEFF}#!e #+f\ny\n"),
+        "#!a\nx \r\n  \n\u{FEFF}#!e \ny\n"
+    );
+    assert_eq!(hash_bang_cut("x #!y"), "x ");
+}
+
 /// `is_blank` takes a space or a tab, nothing else (not a `\r`, nor any
 /// other control character below the space).
 #[test]
@@ -2975,6 +3038,9 @@ fn made_up_worse(text: &str, bc: usize, rl: usize) -> Worse {
         text: text.to_string(),
         bc,
         rl,
+        // No main count, so `main_read_less` takes no made-up line unless a
+        // test sets one.
+        main: usize::MAX,
         analog_bc: 0,
         analog_main: 0,
         input: format!("{MADE_UP_HEAD}{text}\n"),
@@ -2984,6 +3050,26 @@ fn made_up_worse(text: &str, bc: usize, rl: usize) -> Worse {
         roles: BomRoles::default(),
         later_grammar: 0,
     }
+}
+
+/// A further-than-main line holds whatever its cause when main's count is
+/// what rledger counts with the mid-line `#!` / `#+` and the rest of its line
+/// cut off (`main_read_less`), and only then: not for another main count, and
+/// not on a line with nothing to cut.
+#[test]
+fn test_holds_takes_a_line_main_read_less_of() {
+    let made_up = accepted_as("made up", None);
+    let mut w = made_up_worse("2024-01-02 * \"x\" #!y $z", 3, 3);
+    w.main = rledger_counts(&hash_bang_cut(&w.input))
+        .get(&3)
+        .copied()
+        .unwrap_or(0);
+    assert!(holds(&made_up, &w));
+    w.main += 1;
+    assert!(!holds(&made_up, &w));
+    let mut w = made_up_worse("2024-01-02 * \"x\" $z", 2, 2);
+    w.main = rledger_counts(&w.input).get(&3).copied().unwrap_or(0);
+    assert!(!holds(&made_up, &w));
 }
 
 /// An accepted line for `holds`, with a made-up reason.

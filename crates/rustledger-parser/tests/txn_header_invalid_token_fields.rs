@@ -214,11 +214,12 @@ fn test_parse_invalid_token_with_tags_and_links_keeps_every_field() {
 /// Every other token the header grammar has no place for: a number, a
 /// currency (one letter too), an account, `~`, `@`, a brace, a parenthesis,
 /// a comma, a boolean, a metadata key, a keyword, a second flag and a
-/// mid-line `#!`. None of them can have swallowed a quoted string, so none
-/// holds a string slot: the count rule stands.
+/// mid-line `#!` or `#+` (a `#` and a `!` or `+`, as in beancount, #2928).
+/// None of them can have swallowed a quoted string, so none holds a string
+/// slot: the count rule stands.
 const JUNK: &[&str] = &[
     "123", "USD", "A", "Assets:A", "~", "@", "{", "(1+2)", ",", "TRUE", "key:", "open", "txn", "*",
-    "!", "#!x",
+    "!", "#!", "#+",
 ];
 
 fn other(header: &str, payee: Option<&'static str>, narration: &'static str) -> Case {
@@ -255,11 +256,6 @@ fn test_parse_other_token_after_the_string_keeps_the_narration() {
             ("txn", &[][..], &[][..], ""),
             ("*", &["t"][..], &["l"][..], " #t ^l"),
         ] {
-            // A mid-line `#!` runs to the end of the line (#2802), so it
-            // takes any tag after it with it.
-            if *junk == "#!x" && !tail.is_empty() {
-                continue;
-            }
             let c = other_with(
                 &format!("{flag} \"n\" {junk}{tail}"),
                 None,
@@ -279,12 +275,24 @@ fn test_parse_other_token_after_the_string_keeps_the_narration() {
 #[test]
 fn test_parse_other_token_and_invalid_token_after_the_payee_keep_the_payee() {
     for junk in JUNK {
-        // A mid-line `#!` takes the invalid token after it with it.
-        if *junk == "#!x" {
-            continue;
-        }
         check(
             &other_with(&format!("* \"p\" {junk} <bad>"), Some("p"), "", &[], &[], 2),
+            junk,
+        );
+    }
+}
+
+/// A mid-line `#!x` or `#+x` is a `#`, a `!` or `+`, and the invalid token
+/// `x`, as in beancount's lexer (#2928): two errors, as bean-check 3.2.3
+/// reports, and the invalid token after the lone string keeps it the payee,
+/// as any other invalid token there does. It was one token running to the
+/// end of the line, so it held no invalid token and the string stayed the
+/// narration.
+#[test]
+fn test_parse_invalid_token_after_a_mid_line_hash_bang_keeps_the_payee() {
+    for junk in ["#!x", "#+x"] {
+        check(
+            &other_with(&format!("* \"p\" {junk}"), Some("p"), "", &[], &[], 2),
             junk,
         );
     }
@@ -296,11 +304,6 @@ fn test_parse_other_token_and_invalid_token_after_the_payee_keep_the_payee() {
 #[test]
 fn test_parse_other_token_before_the_string_keeps_the_narration() {
     for junk in JUNK {
-        // A mid-line `#!` runs to the end of the line (#2802), so no string
-        // after it survives.
-        if *junk == "#!x" {
-            continue;
-        }
         for header in [format!("* {junk} \"n\""), format!("* {junk} \"n\" {junk}")] {
             check(&other(&header, None, "n"), junk);
         }

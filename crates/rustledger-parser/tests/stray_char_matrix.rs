@@ -1005,6 +1005,9 @@ fn test_parse_reports_a_second_transaction_flag() {
 /// Only `;` starts a comment that is indented or in the middle of a line, in
 /// beancount; `%`, `#!` and `#+` there read the rest of the line as a comment
 /// here, so it vanished in silence. At column 0 they are still comments.
+/// They lex as beancount's tokens there now (a FLAG, or a HASH and a FLAG or
+/// PLUS), so an invalid token after a `#!` or `#+` is an error of its own as
+/// well, as in bean-check 3.2.3: `#!x` is two (#2928).
 #[test]
 fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
     for (label, src) in [
@@ -1014,7 +1017,7 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
         ),
         (
             "header #!",
-            "2024-01-01 * \"p\" #!x\n  Assets:A  1 USD\n  Assets:B\n",
+            "2024-01-01 * \"p\" #!\n  Assets:A  1 USD\n  Assets:B\n",
         ),
         (
             "posting",
@@ -1022,7 +1025,7 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
         ),
         (
             "posting #+",
-            "2024-01-01 *\n  Assets:A  1 USD #+x\n  Assets:B\n",
+            "2024-01-01 *\n  Assets:A  1 USD #+\n  Assets:B\n",
         ),
         (
             "tags line",
@@ -1034,10 +1037,19 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
         ),
         (
             "under a posting",
-            "2024-01-01 *\n  Assets:A  1 USD\n    #!m\n  Assets:B\n",
+            "2024-01-01 *\n  Assets:A  1 USD\n    #!\n  Assets:B\n",
         ),
     ] {
         assert_reported_once(label, src, "unexpected");
+    }
+    for src in [
+        "2024-01-01 * \"p\" #!x\n  Assets:A  1 USD\n  Assets:B\n",
+        "2024-01-01 *\n  Assets:A  1 USD #+x\n  Assets:B\n",
+        "2024-01-01 *\n  Assets:A  1 USD\n    #!m\n  Assets:B\n",
+    ] {
+        let r = parse_both(src);
+        assert_eq!(r.errors.len(), 2, "{src:?}: {:?}", r.errors);
+        assert_eq!(r.directives.len(), 1, "{src:?}: the transaction is kept");
     }
     for src in [
         "% note\n2024-01-01 *\n  Assets:A  1 USD\n  Assets:B\n",

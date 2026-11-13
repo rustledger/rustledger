@@ -395,15 +395,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 &mut errors,
                 &mut header_tokens,
             );
-            indented_comment_check(
-                &cst_node,
-                stripped,
-                bom_offset,
-                &prior_error_starts,
-                errors_before,
-                &mut errors,
-                &mut header_tokens,
-            );
         }
         if converted_or_stateful {
             meta_entry_check(
@@ -4485,114 +4476,6 @@ fn posting_builder_error(
         }
     }
     None
-}
-
-/// Report a `#!` or `#+` that is not at column 0 anywhere in a transaction
-/// (#2802, stage 3). (A `%` there is no longer a comment token at all: the
-/// lexer reads it as a FLAG, as beancount does.)
-///
-/// Only `;` starts a comment that is indented or in the middle of a line in
-/// beancount: `%` lexes as a FLAG and `#` as a HASH, so `  % note`, `  #!t`
-/// or `  #t ^l %` inside a transaction is a syntax error there, and ours read
-/// each as a comment to the end of the line. At column 0 they are whole-line
-/// comments in both (#2769, #2779). The header line and posting lines report
-/// theirs from their own rules; a token one of those already reported is not
-/// reported again, so this catches the rest: tag lines, and indented comment
-/// lines in the body or under a posting.
-///
-/// Runs from the shared directive loop over GREEN tokens, so the green and
-/// red parse paths cannot disagree on it.
-fn indented_comment_check(
-    node: &crate::SyntaxNode,
-    stripped: &str,
-    bom_offset: u32,
-    prior_error_starts: &[usize],
-    errors_before: usize,
-    errors: &mut Vec<crate::ParseError>,
-    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
-) {
-    use crate::SyntaxKind as K;
-    // Runs on every transaction, and the kinds it looks for are rare: only a
-    // `#!` or a `#+` can be one (`%` is a comment only at column 0, where it
-    // is fine, and a FLAG anywhere else). A byte search of the transaction's
-    // own source is far cheaper than walking its tree, or than `text()`,
-    // which builds red nodes.
-    let (from, to) = (
-        usize::from(node.text_range().start()),
-        usize::from(node.text_range().end()),
-    );
-    let Some(source) = stripped.get(from..to) else {
-        return;
-    };
-    if !source.contains("#!") && !source.contains("#+") {
-        return;
-    }
-    // A header with no flag (#2905) fails beancount's grammar at its first
-    // string, and bison discards the rest of that line in silence, so a `#!`
-    // or `#+` later on it is not reported there. Up to the `NEWLINE` token that
-    // ends the header, not the first `\n` byte, which may be inside a string.
-    let header_end = header_line_tokens(node, tokens);
-    let no_flag_line_end = matches!(
-        super::txn_header::first_header_defect(tokens.iter().cloned()),
-        Some((super::txn_header::HeaderDefect::MissingFlag, _))
-    )
-    .then_some(header_end);
-    tokens.clear();
-    let mut at = usize::from(node.text_range().start());
-    flatten_green_matching(node.green(), &mut at, tokens, |k| {
-        matches!(k, K::SHEBANG | K::EMACS_DIRECTIVE)
-    });
-    let off = bom_offset as usize;
-    for (_, range) in tokens.iter() {
-        if range.start == 0 || stripped.as_bytes().get(range.start - 1) == Some(&b'\n') {
-            continue;
-        }
-        if no_flag_line_end.is_some_and(|end| range.start < end) {
-            continue;
-        }
-        let start = range.start + off;
-        let reported = prior_error_starts.binary_search(&start).is_ok()
-            || errors[errors_before..]
-                .iter()
-                .any(|e| e.span.start == start);
-        if reported {
-            continue;
-        }
-        let end = (range.start + 2).min(range.end);
-        let text = stripped.get(range.start..end).unwrap_or_default();
-        errors.push(crate::ParseError::new(
-            crate::ParseErrorKind::SyntaxError(format!(
-                "unexpected {text:?} in a transaction: only `;` starts a comment \
-                 that is indented or in the middle of a line; `{text}` starts one only \
-                 at the beginning of a line"
-            )),
-            Span::new(start, end + off),
-        ));
-    }
-}
-
-/// [`flatten_green`], keeping only the tokens whose kind `keep` accepts (the
-/// offsets still advance over the others).
-fn flatten_green_matching(
-    node: &rowan::GreenNodeData,
-    at: &mut usize,
-    out: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
-    keep: impl Fn(crate::SyntaxKind) -> bool + Copy,
-) {
-    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
-    for child in node.children() {
-        match child {
-            rowan::NodeOrToken::Token(t) => {
-                let range = *at..*at + u32::from(t.text_len()) as usize;
-                *at = range.end;
-                let kind = kind_of(t.kind());
-                if keep(kind) {
-                    out.push((kind, range));
-                }
-            }
-            rowan::NodeOrToken::Node(n) => flatten_green_matching(n, at, out, keep),
-        }
-    }
 }
 
 /// Append every token under `node` to `out`, with absolute ranges starting at

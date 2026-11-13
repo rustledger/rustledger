@@ -152,14 +152,16 @@ fn a_header_with_no_flag_is_rejected() {
 /// #2905: beancount's grammar fails at the first string of a header with no
 /// flag and discards the rest of the line, so a `|` (its deprecation warning
 /// comes from the grammar) or a mid-line `#!` / `#+` after it is not reported
-/// there: one error. With a flag, both are still reported.
+/// there: one error. With a flag, both are still reported. An invalid token
+/// later on the line is its lexer's error, not the grammar's, so it is
+/// reported all the same: `#+ y` is two errors there (#2928).
 #[test]
 fn nothing_after_a_missing_flag_is_reported_on_the_line() {
     let bodies = "\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
     for header in [
         "2024-01-02 \"p\" | \"x\"",
         "2024-01-02 \"x\" #!",
-        "2024-01-02 \"x\" #+ y",
+        "2024-01-02 \"x\" #+ Y",
         // The first string spans two lines: the header line ends at the
         // NEWLINE token after it, not at the `\n` inside the string.
         "2024-01-02 \"a\nb\" #!",
@@ -178,6 +180,23 @@ fn nothing_after_a_missing_flag_is_reported_on_the_line() {
                 result.errors
             );
         }
+    }
+    // The invalid token after the `#+` (`y`, where `Y` lexes) is reported, as
+    // beancount's lexer reports it after the grammar has given up.
+    let src = format!("2024-01-02 \"x\" #+ y\n{bodies}");
+    let y_at = src.find(" y\n").expect("the header has the token") + 1;
+    for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+        let errors = &result.errors;
+        assert_eq!(errors.len(), 2, "{name}: {errors:?}");
+        assert!(
+            errors[0].to_string().contains("needs a flag"),
+            "{name}: {errors:?}"
+        );
+        assert_eq!(
+            (errors[1].span.start, errors[1].span.end),
+            (y_at, y_at + 1),
+            "{name}: {errors:?}"
+        );
     }
     // Controls: with a flag the pipe warns and the `#!` is an error.
     for header in ["2024-01-02 * \"p\" | \"x\"", "2024-01-02 * \"x\" #!"] {

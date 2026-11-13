@@ -73,8 +73,9 @@ pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec}
 pub use decimal::{
     add_python_scale, checked_add_exact, checked_add_exact_python_scale, checked_add_python_scale,
     checked_div_python_scale, checked_exact_sum_python_scale, checked_mul_exact, checked_sub_exact,
-    checked_sub_python_scale, decimal_from_big_exact, negate_python, py_compound_per_unit, py_div,
-    round_dp_python, sub_python_scale, to_bigdecimal, with_ideal_scale,
+    checked_sub_python_scale, decimal_from_big_exact, fills_decimal, half_unit_in_last_place,
+    negate_python, py_compound_per_unit, py_div, round_dp_python, sub_python_scale, to_bigdecimal,
+    with_ideal_scale, written_allowance,
 };
 pub use directive::{
     AUTOMATIC_META, Balance, BookingDecision, Close, CommentList, Commodity, Custom, Directive,
@@ -99,9 +100,10 @@ pub use identifiers::{
 pub use implicit_prices::{extract_per_unit_price, per_unit_price};
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
-    AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory,
-    MergeSpecMismatch, OverflowError, ReductionScope, for_each_strict_subaccount,
-    python_inventory_str, python_position_str, sum_account_and_subaccounts,
+    AccountedBookingError, AverageClaimMiss, BookingError, BookingMethod, BookingResult, Inventory,
+    MergeSpecMismatch, OverflowError, ReductionScope, average_claim_mismatch,
+    for_each_strict_subaccount, python_inventory_str, python_position_str,
+    sum_account_and_subaccounts,
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use metadata::MetadataBuilder;

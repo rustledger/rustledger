@@ -350,3 +350,196 @@ fn the_comparison_can_report_a_disagreement() {
     let asked = realize(BookingMethod::Fifo, &opens, &forgotten(&booked));
     assert_ne!(asked, realized, "and asking the inventory differs from it");
 }
+
+const ALL_METHODS: [BookingMethod; 7] = [
+    BookingMethod::Strict,
+    BookingMethod::StrictWithSize,
+    BookingMethod::Fifo,
+    BookingMethod::Lifo,
+    BookingMethod::Hifo,
+    BookingMethod::Average,
+    BookingMethod::None,
+];
+
+/// The seed lots of #2958: 4 at 100 and 2 at 100.
+const SEEDS_2958: [(u32, u32); 2] = [(4, 100), (2, 100)];
+
+/// A transaction that sells the seed pool out, opens a short of 1 at 101,
+/// and buys 5 at 102 and 5 at 100: under AVERAGE the account then holds a
+/// short at 101 beside longs that average exactly 101 (#2958).
+fn short_beside_longs_2958() -> Vec<Leg> {
+    vec![
+        Leg::SellAny { units: 6 },
+        Leg::SellAt {
+            units: 1,
+            cost: 101,
+        },
+        Leg::Buy {
+            units: 5,
+            cost: 102,
+        },
+        Leg::Buy {
+            units: 5,
+            cost: 100,
+        },
+    ]
+}
+
+/// The stock account's units held long and short after booking `txns` on
+/// the #2958 seeds.
+fn sides_after(method: BookingMethod, txns: &[Vec<Leg>]) -> (Decimal, Decimal) {
+    let (opens, written) = ledger(None, &SEEDS_2958, txns);
+    let (engine, _) = book(method, &opens, written);
+    let inv = engine
+        .inventory(&STOCK.into())
+        .expect("the account holds lots");
+    let side = |long: bool| {
+        inv.positions()
+            .filter(|p| p.cost.is_some() && p.units.number.is_sign_positive() == long)
+            .map(|p| p.units.number)
+            .sum::<Decimal>()
+    };
+    (side(true), side(false))
+}
+
+/// The case proptest found for #2958, as it shrank (the committed seed in
+/// `proptest-regressions/booking_record_tests.txt` replays it too).
+///
+/// Under AVERAGE the last sale, `-1 X {}`, sells from the longs, whose
+/// average is 101, and books as `-1 X {101 USD}`. A short at 101 sits beside
+/// them, so a consumer asking the inventory about the booked posting read
+/// that cost as naming the short, and opened a second short where booking had
+/// reduced the longs.
+#[test]
+fn an_average_sale_priced_like_a_short_beside_it_agrees_everywhere_2958() {
+    let txns = vec![
+        vec![
+            Leg::SellAny { units: 1 },
+            Leg::SellAny { units: 4 },
+            Leg::Buy {
+                units: 2,
+                cost: 100,
+            },
+        ],
+        vec![
+            Leg::Buy {
+                units: 5,
+                cost: 102,
+            },
+            Leg::Buy {
+                units: 5,
+                cost: 100,
+            },
+            Leg::SellAny { units: 3 },
+            Leg::SellAt {
+                units: 1,
+                cost: 101,
+            },
+        ],
+        vec![Leg::SellAny { units: 1 }],
+    ];
+    for m in ALL_METHODS {
+        for account in [None, Some(BookingMethod::Average)] {
+            check(m, account, &SEEDS_2958, &txns)
+                .unwrap_or_else(|e| panic!("{m:?} / {account:?}: {e}"));
+        }
+    }
+    // And the sale reduced the longs: 9 left, the one short untouched.
+    assert_eq!(
+        sides_after(BookingMethod::Average, &txns),
+        (Decimal::from(9), Decimal::from(-1))
+    );
+}
+
+/// Shapes beside #2958's on the same account: several sales then a buy in
+/// one transaction, partial and whole and over-reductions of the pool, a
+/// sale stating the pool's average (which is also the short's cost), a sale
+/// stating a cost that is neither, and a cover of the short.
+#[test]
+fn sales_beside_a_short_priced_at_the_pool_average_agree_everywhere_2958() {
+    let at = |units, cost| Leg::SellAt { units, cost };
+    let buy = |units, cost| Leg::Buy { units, cost };
+    let any = |units| Leg::SellAny { units };
+    let follow_ups: Vec<Vec<Leg>> = vec![
+        vec![any(1)],
+        vec![at(1, 101)],
+        vec![any(1), any(4), buy(2, 100)],
+        vec![any(3), at(3, 101), buy(1, 101)],
+        vec![at(2, 101), any(2), buy(4, 102)],
+        vec![any(5)],
+        vec![any(10)],
+        vec![any(5), any(5), any(1)],
+        vec![any(12)],
+        vec![at(1, 102)],
+        vec![buy(1, 101)],
+        vec![Leg::SellMerged { units: 2 }],
+    ];
+    for next in &follow_ups {
+        let txns = vec![short_beside_longs_2958(), next.clone()];
+        for m in ALL_METHODS {
+            for account in [None, Some(BookingMethod::Average)] {
+                check(m, account, &SEEDS_2958, &txns)
+                    .unwrap_or_else(|e| panic!("{next:?} under {m:?} / {account:?}: {e}"));
+            }
+        }
+    }
+    // A sale stating the pool's average sells from the pool, as `{}` does,
+    // rather than adding to the short that happens to cost the same.
+    let stated = sides_after(
+        BookingMethod::Average,
+        &[short_beside_longs_2958(), vec![at(1, 101)]],
+    );
+    let elided = sides_after(
+        BookingMethod::Average,
+        &[short_beside_longs_2958(), vec![any(1)]],
+    );
+    assert_eq!(stated, (Decimal::from(9), Decimal::from(-1)));
+    assert_eq!(stated, elided);
+}
+
+/// The mirror of [`short_beside_longs_2958`]: sells the seed pool out, then
+/// opens a long of 1 at 101 and shorts of 5 at 102 and 5 at 100, so under
+/// AVERAGE the account holds a long at 101 beside shorts that average
+/// exactly 101.
+fn long_beside_shorts_2958() -> Vec<Leg> {
+    vec![
+        Leg::SellAny { units: 6 },
+        Leg::Buy {
+            units: 1,
+            cost: 101,
+        },
+        Leg::SellAt {
+            units: 5,
+            cost: 102,
+        },
+        Leg::SellAt {
+            units: 5,
+            cost: 100,
+        },
+    ]
+}
+
+/// The rule holds for a cover as it does for a sale (#2958): a buy stating
+/// the shorts' average covers them, rather than opening a second long beside
+/// the one that happens to cost the same.
+#[test]
+fn an_average_cover_priced_like_a_long_beside_it_agrees_everywhere_2958() {
+    let txns = vec![
+        long_beside_shorts_2958(),
+        vec![Leg::Buy {
+            units: 1,
+            cost: 101,
+        }],
+    ];
+    for m in ALL_METHODS {
+        for account in [None, Some(BookingMethod::Average)] {
+            check(m, account, &SEEDS_2958, &txns)
+                .unwrap_or_else(|e| panic!("{m:?} / {account:?}: {e}"));
+        }
+    }
+    // The buy covered the shorts: 9 short left, the one long untouched.
+    assert_eq!(
+        sides_after(BookingMethod::Average, &txns),
+        (Decimal::from(1), Decimal::from(-9))
+    );
+}

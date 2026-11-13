@@ -204,6 +204,40 @@ sale written with its units elided, which booking's lot matching never sees
 too. A booked AVERAGE sale carries the pool's undated cost, so the validator
 and BQL replays never trip it.
 
+## Amendment: a claim the pool accepts names the pool (#2958)
+
+On an account holding both a long and a short, a posting whose cost names a
+lot of its own side and no lot of the other side adds to its own side (#2384).
+Under AVERAGE "no lot of the other side" was still read lot by lot, but an
+AVERAGE sale reduces a pool and its cost is a claim about that pool's average
+(#2603), not a lot filter. The two readings met on a booked sale: holding a
+short at 101 beside longs at 100 and 102, `-1 X {}` sold from the longs and
+booked as `-1 X {101 USD}`, their average. Asked again of the inventory, as a
+consumer does for a posting with no recorded booking decision, that cost
+matched the short and neither long, and the sale read as a second short.
+
+So under AVERAGE a cost also names the other side when that side's pool accepts
+it as a claim (`average_claim_mismatch`, the rule booking refuses a claim by,
+now in `rustledger-core` so both ask the same rule). The claim must carry no
+date or label (the pool has neither, as above) and the pool must be held in the
+claim's cost currency. A booked sale then reads as the reduction it was, and a
+sale written `-1 X {101 USD}` books the way `-1 X {}` does: from the pool, not
+as a new short beside it. A cover reads the same way: holding a long at 101
+beside shorts at 100 and 102, `+1 X {101 USD}` covers the shorts rather than
+opening a second long. A cost the pool rejects that names an own-side lot
+still adds to that side.
+
+Two consequences follow:
+
+- A claim the pool accepts only by rounding (#2603) now beats a lot at exactly
+  that cost. Holding longs of 5 at 100 and 5 at 101.5 (average 100.75) beside
+  a short at exactly 101, `-1 X {101 USD}` sells from the longs, where it used
+  to add to the short.
+- A ledger that used to load can now fail with E4002. Holding 10 longs
+  averaging 101 beside a short at 101, `-11 X {101 USD}` is now an
+  over-reduction of the longs ("requested 11, available 10") where it used to
+  open a new short of 11.
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

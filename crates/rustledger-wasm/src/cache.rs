@@ -491,6 +491,12 @@ use crate::types::{Error, LedgerOptions};
 /// include cycle's `LOAD` error carries the file and line of the `include`
 /// that closed it, where it had no location. An older blob would keep
 /// serving it with none. (v106 was held by #2931 and never released.)
+/// v108: loader v73, unchanged -- parsed directives did not move. Booking
+/// did (#2958): on an AVERAGE account holding lots of both signs, a sale or
+/// a cover whose stated cost the pool accepts as its average reduces the
+/// pool, where it was booked as a new lot on its own side when a lot there
+/// cost the same. `ParsedLedger` and `Ledger` archive booked directives, so an older
+/// blob would keep serving that new lot. (v106 was held by #2931 and never released.)
 /// v110: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
 /// BOM in the middle of a line starts an invalid token that runs to the next
 /// blank, as in beancount, so a quote after it opens no string. Every input
@@ -498,7 +504,7 @@ use crate::types::{Error, LedgerOptions};
 /// error-free load, holds none of them; both payloads here archive a source
 /// with parse errors, and an older blob would keep serving such a file with
 /// its old errors and values. (v104 and v106 were held by #2931 and never
-/// released; v108 is held by #2970 and v109 by #2971.)
+/// released; v108 was taken by #2970 and v109 is held by #2971.)
 pub const CACHE_VERSION: u32 = 110;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

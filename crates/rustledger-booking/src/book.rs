@@ -10,7 +10,8 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
     AccountedBookingError, Amount, BookingDecision, BookingMethod, Cost, CostSpec, Decimal,
-    Directive, IncompleteAmount, Inventory, Position, Posting, Transaction,
+    Directive, IncompleteAmount, Inventory, Position, Posting, Transaction, fills_decimal,
+    half_unit_in_last_place, written_allowance,
 };
 use thiserror::Error;
 
@@ -2914,68 +2915,29 @@ fn check_merge_spec(
 /// decision on #2603): a correct rounding is correct beside cash written to
 /// any number of places.
 ///
-/// The average is never rounded: `pool` is the exact `(units, total)`
-/// [`rustledger_core::Inventory::reduction_pool_exact`] sums, and the claim is
-/// compared as `|claim × units − total × denominator| <= allowance × |units|`
-/// in `BigDecimal`. A total's exact pool total is what #2427 keeps on the
-/// lots, so `{{500.00 USD}}` for 3 X bought at 100, 200 and 200 holds exactly.
+/// The comparison is [`rustledger_core::average_claim_mismatch`], which
+/// [`Inventory::is_booking_reduction`] also asks (#2958): `pool` is the exact
+/// `(units, total)` [`rustledger_core::Inventory::reduction_pool_exact`] sums,
+/// and the average is never rounded. A total's exact pool total is what #2427
+/// keeps on the lots, so `{{500.00 USD}}` for 3 X bought at 100, 200 and 200
+/// holds exactly. This adds only the message.
 fn check_average_spec(
     written: rustledger_core::CostNumber,
     units: &rustledger_core::Amount,
     pool: &(bigdecimal::BigDecimal, bigdecimal::BigDecimal),
     currency: &rustledger_core::Currency,
 ) -> Result<(), rustledger_core::BookingError> {
-    use bigdecimal::BigDecimal;
-    use rustledger_core::{CostNumber, to_bigdecimal as big};
-    let reduction = units.number.abs();
-    let (pool_units, pool_total) = pool;
-    if reduction.is_zero() || pool_units == &BigDecimal::from(0) {
+    let Some(miss) = rustledger_core::average_claim_mismatch(written, units.number, pool) else {
         return Ok(());
-    }
-    let r = big(reduction);
-    // The claim is `numerator / denominator` per unit; `allowance` is the one
-    // its written precision gives it, on the numerator (per unit, or on the
-    // total for a total or compound claim), and `stated` what the message
-    // quotes.
-    let (numerator, denominator, allowance, stated) = match written {
-        CostNumber::PerUnit { value } => (big(value), None, big(written_allowance(value)), value),
-        CostNumber::Total { value } => (big(value), Some(r), big(written_allowance(value)), value),
-        // Not something a ledger writes; booking's own output.
-        CostNumber::PerUnitFromTotal(booked) => (
-            big(booked.total),
-            Some(r),
-            big(written_allowance(booked.total)),
-            booked.total,
-        ),
-        CostNumber::Compound { per_unit, total } => {
-            let combined = big(per_unit) * &r + big(total);
-            let allowance = &r * big(written_allowance(per_unit)) + big(written_allowance(total));
-            // Booking already refused a compound whose combined total leaves
-            // `Decimal`'s range (`cost_overflow`), so this is the value it
-            // booked; the fallback only keeps the message total-shaped.
-            let stated = reduction
-                .checked_mul(per_unit)
-                .and_then(|v| v.checked_add(total))
-                .unwrap_or(total);
-            (combined, Some(r), allowance, stated)
-        }
-    };
-    let scale = denominator.clone().unwrap_or_else(|| BigDecimal::from(1));
-    let off = (&numerator * pool_units - pool_total * &scale).abs();
-    if off <= allowance * pool_units.abs() {
-        return Ok(());
-    }
-    // The pool in the claim's form: its average, or what the reduced units
-    // cost at it.
-    let exact = match &denominator {
-        None => pool_total / pool_units,
-        Some(r) => pool_total * r / pool_units,
     };
     Err(rustledger_core::BookingError::AverageSpecMismatch {
         currency: units.currency.clone(),
-        stated: Amount::new(stated, currency.clone()),
-        pool: Amount::new(distinguishing_round(&exact, stated), currency.clone()),
-        total: denominator.is_some(),
+        stated: Amount::new(miss.stated, currency.clone()),
+        pool: Amount::new(
+            distinguishing_round(&miss.exact, miss.stated),
+            currency.clone(),
+        ),
+        total: miss.total,
     })
 }
 
@@ -3013,43 +2975,6 @@ fn distinguishing_round(exact: &bigdecimal::BigDecimal, stated: Decimal) -> Deci
 /// panic in `rust_decimal`); numbers that far apart differ by any allowance.
 fn differ(a: Decimal, b: Decimal, allowance: Decimal) -> bool {
     a.checked_sub(b).is_none_or(|d| d.abs() > allowance)
-}
-
-/// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
-/// `0.5` for `110`. At 28 decimal places the half unit cannot be written, and
-/// it is one unit in the 28th place instead.
-fn half_unit_in_last_place(number: Decimal) -> Decimal {
-    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
-}
-
-/// How far a number a spec states may be from the value its author meant.
-///
-/// Half a unit in the last place written, for a number typed to the places
-/// its author chose. A number that fills `Decimal`'s digits was not typed:
-/// it is an expression's result (`{{*, 1604500/66 USD}}`), rounded at every
-/// operation, and how many operations depends on how the expression was
-/// written (`r*S/N` rounds once, `r*a/N + r*b/N` three times). So its last
-/// digit is noise, and it is held to one unit in the place before that: a
-/// correct sum of fractions landed two units out in one of 200 generated
-/// claims, and nothing an author means lives in the 28th digit.
-fn written_allowance(number: Decimal) -> Decimal {
-    if fills_decimal(number) {
-        // At least 28 digits, so there is a place before the last.
-        Decimal::try_new(1, number.scale().saturating_sub(1)).unwrap_or(Decimal::ONE)
-    } else {
-        half_unit_in_last_place(number)
-    }
-}
-
-/// Whether `number` uses all of `Decimal`'s precision: 28 or 29 significant
-/// digits, which is what a rounded result has (106.666… is
-/// `106.66666666666666666666666667`).
-fn fills_decimal(number: Decimal) -> bool {
-    number
-        .mantissa()
-        .unsigned_abs()
-        .checked_ilog10()
-        .is_some_and(|l| l + 1 >= 28)
 }
 
 /// How far a computed `number` may be from the value it stands for.
@@ -3449,33 +3374,6 @@ mod tests {
         assert_eq!(chained, e.to_string(), "the message is the whole chain");
         assert_eq!(chained.matches(&inner_text).count(), 1, "{chained}");
         assert!(chained.starts_with("interpolation failed: "), "{chained}");
-    }
-
-    #[test]
-    fn half_unit_in_last_place_is_half_the_last_digit_written() {
-        use super::half_unit_in_last_place as half;
-        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
-        assert_eq!(half(d("106.67")), d("0.005"));
-        assert_eq!(half(d("110")), d("0.5"));
-        // 28 places: one unit in the 28th, not zero (#2398).
-        let at_limit = d("1") / d("3");
-        assert_eq!(at_limit.scale(), 28);
-        assert_eq!(half(at_limit), rust_decimal::Decimal::new(1, 28));
-    }
-
-    #[test]
-    fn a_written_number_that_fills_decimal_is_held_to_the_place_before_its_last() {
-        use super::written_allowance;
-        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
-        // Typed: half a unit in the last place written.
-        assert_eq!(written_allowance(d("106.67")), d("0.005"));
-        // Computed, 29 digits at scale 26: one unit at scale 25.
-        let computed = d("1600") / d("15");
-        assert_eq!(computed.scale(), 26);
-        assert_eq!(
-            written_allowance(computed),
-            rust_decimal::Decimal::new(1, 25)
-        );
     }
 
     #[test]

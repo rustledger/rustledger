@@ -625,6 +625,8 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
 /// expansion, duplicate detection and per-file error attribution belong to the
 /// loader in both cases — which is the point of #2101, and would be undone by
 /// giving either entry point its own copy of this.
+// `pub` only for `helpers`' tests. `api` is a private module, so this is
+// crate-private anyway, and `pub(crate)` trips `clippy::redundant_pub_crate`.
 pub fn validate_with_filesystem(
     fs: Box<dyn rustledger_loader::FileSystem>,
     entry_point: &str,

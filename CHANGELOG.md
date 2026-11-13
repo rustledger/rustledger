@@ -4,6 +4,8 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Breaking
 
+- **WASM's multi-file surfaces give a parse error's message without a file prefix**: `validateMultiFile`, `validateWithHost`, `parseMultiFile`, `Ledger` (`fromFiles`, `getErrors`, `query`), `queryMultiFile` and `queryWithHost` wrote the file in front of the parser's message (`main.beancount: parse error: ...`), though it is already in the error's `file` field. The message is now the parser's text unchanged, as `rledger check --format json`, the FFI component and `validateSource` give it. A host that matched on the prefixed text must drop the prefix. rustfava is unaffected, since it embeds the FFI component, not WASM; `packages/mcp-server`'s `formatErrors`, which prints `file:line:column: message`, no longer names the file twice (issue #2961).
+
 - **An include cycle is reported at the `include` that closed it, and `LoadError::IncludeCycle` gains an `include_site` field**: the cycle was located on line 1 of the first file of the cycle, or nowhere (issue #2959).
   - `rustledger_loader::LoadError::IncludeCycle` gains a public `include_site: Option<IncludeSite>` field, the directive in the last file of the cycle that names a file already being loaded. `LoadError` is not `#[non_exhaustive]`, so an exhaustive pattern or struct literal on the variant needs the field. `LoadError::at_include` and `LoadError::include_site` now cover the variant, as they did `Io`.
   - `rledger check --format json` now places the `E0002` diagnostic on that `include` line, in the file that holds it, where it gave line 1 of the first file of the cycle.
@@ -142,9 +144,9 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 ### Fixed
 
 - **WASM's multi-file surfaces report errors as `rledger check`, the FFI and the single-source surfaces do**:
-  - A parse error's message is the parser's, as `check --format json`, the FFI component and `validateSource` give it: `validateMultiFile`, `validateWithHost`, `parseMultiFile`, `Ledger` (`fromFiles`, `getErrors`, `query`), `queryMultiFile` and `queryWithHost` prefixed it with the file (`main.beancount: parse error: ...`), which is in the error's `file` field. A host that matched on the prefixed text must drop the prefix (issue #2961).
-  - A validation finding, a booking error or an include's `LOAD` error carries its end (`end_line`, `end_column`) and its hint on those surfaces, as on `validateSource` and in `check`'s `hint` (E8001's documents-folder hint among them): the end was null and the hint dropped (issue #2964).
-  - `queryMultiFile` and `queryWithHost` list the ledger's option diagnostics over a source that fails to parse, as every other query surface and the FFI's `query-file` list them: they refused on the parse error before loading the rest, and listed the parse errors alone (issue #2960).
+  - A parse error's message is the parser's, without the file prefix those surfaces put in front of it; see the breaking entry for WASM parse error messages above (issue #2961).
+  - A validation finding, a booking error or an include's `LOAD` error carries its end (`end_line`, `end_column`) on those surfaces, as on `validateSource`: the end was null. A finding or booking error carries the hint `rledger check --format json` gives it in `hint` (E8001's documents-folder hint among them), which they dropped (issue #2964). A `LOAD` error carries none, as the loader gives it none (`check` adds its include-cycle hint itself). `validateSource` still gives `E2001` a hint that `check` does not give (issue #2972).
+  - `queryMultiFile` and `queryWithHost` list the ledger's option diagnostics over a source that fails to parse, as every other query surface and the FFI's `query-file` list them: they refused on the parse error before loading the rest, and listed the parse errors alone. In that refusal they now report any other load error as `LOAD`, from `process`, where it was a code-less `phase: parse` error (issue #2960).
   - WASM cache v109, since a `Ledger` archives its errors and a `ParsedLedger` its booking errors; the loader cache is unchanged at v73.
 
 - **The LSP publishes plugin errors and load errors where `rledger check` reports them, and validates a buffer outside the ledger on its own**:

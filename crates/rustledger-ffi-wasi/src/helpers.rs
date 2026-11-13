@@ -35,6 +35,10 @@ impl LineLookup {
 pub struct LoadResult {
     pub directives: Vec<Directive>,
     pub spanned_directives: Vec<Spanned<Directive>>,
+    /// The transactions booking refused, as indices into `spanned_directives`
+    /// ([`rustledger_loader::Ledger::booking_refused`]): a semantic validation
+    /// of this load sets them aside, as `rledger check` does (#2937).
+    pub booking_refused: Vec<usize>,
     /// The files `spanned_directives` index into: the source, named
     /// `<string>` as beancount's `load_string` names it, so a query's
     /// `filename` / `lineno` / `location` columns resolve (#2825).
@@ -51,9 +55,28 @@ pub struct LoadResult {
     pub error_blocks_queries: Vec<bool>,
     /// Why a query over the source refuses though no error blocks it: a
     /// rejected `booking_method`
-    /// ([`rustledger_loader::Ledger::query_refusal`]). Listed only on
-    /// query results, not among `errors`.
+    /// ([`rustledger_loader::Ledger::query_refusal`]). Not among `errors`;
+    /// its E7002 is among [`Self::option_errors`], so a surface listing those
+    /// does not list this as well.
     pub query_refusal: Option<Error>,
+    /// The option diagnostics (E7001 to E7011,
+    /// [`rustledger_loader::option_warnings_to_errors`]), kept apart from
+    /// `errors` on purpose (#2929).
+    ///
+    /// `errors` is what the surfaces gate on: semantic validation is skipped
+    /// over a parse-phase error, and [`apply_plugins`] skips the host's
+    /// plugins over an error. An invalid option makes neither the directives
+    /// nor the parse unsound, so folding these in would stop both, and
+    /// `validate` would count them as parse errors. A reporting surface
+    /// appends them to its `errors` last, after the plugins and validation
+    /// have run. They include a rejected `booking_method`'s E7002, so a
+    /// surface listing them does not list [`Self::query_refusal`] too.
+    pub option_errors: Vec<Error>,
+    /// What a query over the load lists of [`Self::option_errors`]: the same,
+    /// with the rejected `booking_method`'s E7002 replaced by
+    /// [`Self::query_refusal`]'s reason
+    /// ([`rustledger_loader::Ledger::query_option_errors`], #2911, #2929).
+    pub query_option_errors: Vec<Error>,
     pub options: LedgerOptions,
     /// The ledger's `tolerance_multiplier` option, for the padding
     /// [`expand_pads`] inserts (a difference within a balance's tolerance is
@@ -113,22 +136,33 @@ pub fn load_source(source: &str) -> LoadResult {
         validate: false,
         ..Default::default()
     };
+    // The parse errors are taken out before `process`, to be reported one by
+    // one with their code, line and column, as `rledger check` reports them
+    // (`take_parse_errors`, `parse_errors_to_ledger_errors`); left in,
+    // `process` reports them as one line-less `parse errors in <string>`.
+    // The entries that did parse are loaded, and validated by
+    // `ledger.validate` / `ledger.load`, as `check` and bean-check validate
+    // them (#2949).
+    let mut parse_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
     let ledger = match rustledger_loader::Loader::new()
         .with_filesystem(Box::new(vfs))
         .load(std::path::Path::new("<string>"))
         .map_err(|e| e.to_string())
-        .and_then(|raw| rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string()))
-    {
+        .and_then(|mut raw| {
+            parse_errors = parse_errors_of(&mut raw);
+            rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string())
+        }) {
         Ok(ledger) => ledger,
         Err(e) => {
             // Fatal load/process failure is unexpected for an in-memory source,
             // but surface it rather than panicking. Tag it `validate` (not the
             // default `parse`): a fatal process/plugin failure must not be
-            // wrongly classified as a parse error, which would make the
-            // `ledger.validate`/`query` handlers suppress validation entirely.
+            // wrongly classified as a parse error, which `validate` would count
+            // in its `parse-error-count`.
             return LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
+                booking_refused: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 directive_lines: Vec::new(),
                 line_lookup: lookup,
@@ -136,6 +170,8 @@ pub fn load_source(source: &str) -> LoadResult {
                 // Nothing was loaded, so a query has nothing to answer from.
                 error_blocks_queries: vec![true],
                 query_refusal: None,
+                option_errors: Vec::new(),
+                query_option_errors: Vec::new(),
                 options: LedgerOptions::default(),
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 validation_options: rustledger_validate::ValidationOptions::default(),
@@ -209,9 +245,9 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
-        .errors
+    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = parse_errors
         .iter()
+        .chain(&ledger.errors)
         .filter(|e| {
             if e.phase != "parse"
                 || !(e.message.contains("not found") || e.message.contains("does not match"))
@@ -224,6 +260,8 @@ pub fn load_source(source: &str) -> LoadResult {
         .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
         .unzip();
     let query_refusal = query_refusal_error(&ledger);
+    let option_errors = option_errors(&ledger);
+    let query_option_errors = query_option_errors(&ledger);
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
@@ -244,6 +282,7 @@ pub fn load_source(source: &str) -> LoadResult {
 
     LoadResult {
         directives,
+        booking_refused: ledger.booking_refused,
         spanned_directives: ledger.directives,
         source_map: ledger.source_map,
         directive_lines,
@@ -251,6 +290,8 @@ pub fn load_source(source: &str) -> LoadResult {
         errors,
         error_blocks_queries,
         query_refusal,
+        option_errors,
+        query_option_errors,
         options,
         tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
         validation_options,
@@ -349,17 +390,33 @@ pub struct FileLoad {
     /// `<auto_accounts>`, 0, which `directive_files` / `directive_lines`
     /// flatten to `<unknown>`, 0. A query reports it, as the CLI does (#2825).
     pub directive_placeholders: Vec<Option<(String, u32)>>,
+    /// The load's errors: the files', booking's and the ledger's plugins'.
+    /// Never a validation finding ([`Self::validation_errors`]) or an option
+    /// diagnostic ([`Self::option_errors`]): these are what [`apply_plugins`]
+    /// gates the host's plugins on.
     pub errors: Vec<Error>,
     /// Parallel to `errors`: whether the error stops a query over the ledger
     /// from answering: a parse error, a file that could not be read or
     /// decrypted, or a booking failure
     /// ([`rustledger_loader::LedgerError::blocks_queries`], #2861).
     pub error_blocks_queries: Vec<bool>,
+    /// What the canonical pipeline's validation reported, at each finding's
+    /// own file and line, as `rledger check` reports them (#2935). Empty
+    /// unless [`load_file_with_fs`] was asked to validate. None of them
+    /// blocks a query or stops the host's plugins: a failed `balance` leaves
+    /// the booked directives sound.
+    pub validation_errors: Vec<Error>,
+    /// The option diagnostics (E7001 to E7011); see
+    /// [`LoadResult::option_errors`] for why they are kept apart (#2929).
+    pub option_errors: Vec<Error>,
+    /// See [`LoadResult::query_option_errors`].
+    pub query_option_errors: Vec<Error>,
     /// Why a query over the ledger refuses though no error blocks it: a
     /// rejected `booking_method`
-    /// ([`rustledger_loader::Ledger::query_refusal`]). Listed only on
-    /// query results, not among `errors`, so it does not stop the session
-    /// plugins [`apply_plugins`] runs.
+    /// ([`rustledger_loader::Ledger::query_refusal`]). Not among `errors`, so
+    /// it does not stop the session plugins [`apply_plugins`] runs; its E7002
+    /// is among [`Self::option_errors`], so a surface listing those does not
+    /// list this as well.
     pub query_refusal: Option<Error>,
     pub options: LedgerOptions,
     /// See [`LoadResult::tolerance_multiplier`].
@@ -406,23 +463,31 @@ pub fn expand_pads<T: Clone>(
 }
 
 /// Load a ledger from a file path, resolving `include` directives and booking
-/// transactions. Shared by the JSON-RPC `ledger.loadFile` handler and the WIT
-/// component (#1384).
+/// transactions, without validating it. Shared by the JSON-RPC
+/// `ledger.loadFile` handler and the WIT component (#1384).
 ///
 /// # Errors
 ///
 /// Returns the loader error string if the entry file cannot be read/parsed.
 pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad, String> {
-    load_file_with_fs(path, path_security, None)
+    load_file_with_fs(path, path_security, None, false)
 }
 
 /// Like [`load_file`], but with an optional caller-provided
-/// [`FileSystem`](rustledger_loader::FileSystem).
+/// [`FileSystem`](rustledger_loader::FileSystem), and validating when
+/// `validate` is set.
 ///
 /// The WASI component passes a filesystem whose `decrypt` delegates to a host
 /// capability, so GPG-encrypted ledgers load in the sandbox (the guest can
 /// neither spawn `gpg` nor reach the keyring) — #1667. `None` uses the default
 /// on-disk filesystem (gpg via subprocess), matching the native path.
+///
+/// With `validate`, the canonical pipeline validates as `rledger check` does
+/// (Early before booking, Late after the ledger's plugins, with the options
+/// `build_validation_options` makes from the ledger's own), and its findings
+/// come back in [`FileLoad::validation_errors`] at their own file and line
+/// (#2935). The component's `load-file` and `validate-file` used to report
+/// no validation errors for a ledger with includes at all.
 ///
 /// # Errors
 ///
@@ -431,28 +496,40 @@ pub fn load_file_with_fs(
     path: &std::path::Path,
     path_security: bool,
     fs: Option<Box<dyn rustledger_loader::FileSystem>>,
+    validate: bool,
 ) -> Result<FileLoad, String> {
     // Route through the single canonical pipeline (`process::load`:
-    // sort → synth → book → regular → finalize) rather than re-implementing a
-    // partial loader here. This keeps the FFI surface in lock-step with the
-    // native loader — crucially it runs the pre-booking SYNTH pass
-    // (`auto_accounts`, `document_discovery`) that the previous hand-rolled
-    // parse-and-book path silently skipped (see `tests/load_synth_plugins.rs`).
-    //
-    // `validate: false` preserves this surface's historical load-only error
-    // contract (booking errors surface; semantic-validation errors do not, and
-    // remain the concern of the `ledger.validate` endpoint); `run_plugins`
-    // (default `true`) is what enables the synth pass.
+    // sort → synth → Early → book → regular → Late → finalize) rather than
+    // re-implementing a partial loader here. This keeps the FFI surface in
+    // lock-step with the native loader: crucially it runs the pre-booking
+    // SYNTH pass (`auto_accounts`, `document_discovery`) that the previous
+    // hand-rolled parse-and-book path silently skipped (see
+    // `tests/load_synth_plugins.rs`), and, when asked, the validation passes
+    // exactly as `rledger check` runs them. `run_plugins` (default `true`) is
+    // what enables the synth pass.
     let options = rustledger_loader::LoadOptions {
         path_security,
-        validate: false,
+        validate,
         ..Default::default()
     };
-    let ledger = match fs {
-        Some(fs) => rustledger_loader::load_with_fs(path, &options, fs),
-        None => rustledger_loader::load(path, &options),
+    // `rustledger_loader::load` / `load_with_fs`, with the parse errors taken
+    // out before `process` to be reported one by one, each at its own file,
+    // line and column with its code, as `rledger check` reports them; left
+    // in, `process` reports each file's as one line-less `parse errors in
+    // <path>`. `process` then validates what did parse, as `check` does.
+    let mut loader = rustledger_loader::Loader::new();
+    if let Some(fs) = fs {
+        loader = loader.with_filesystem(fs);
     }
-    .map_err(|e| format!("Failed to load file: {e}"))?;
+    if path_security {
+        loader = loader.with_path_security(true);
+    }
+    let mut raw = loader
+        .load(path)
+        .map_err(|e| format!("Failed to load file: {e}"))?;
+    let parse_errors = parse_errors_of(&mut raw);
+    let ledger = rustledger_loader::process(raw, &options)
+        .map_err(|e| format!("Failed to load file: {e}"))?;
 
     // Directives + their line numbers / originating files (multi-file).
     // Synth-generated directives carry a `file_id` absent from the source map,
@@ -481,13 +558,33 @@ pub fn load_file_with_fs(
         }
     }
 
-    let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
-    let error_blocks_queries: Vec<bool> = ledger
-        .errors
+    // The validator's findings apart from the load's own errors: these are
+    // what the host's plugins are gated on, and a finding (a failed
+    // `balance`) does not make the booked directives unsound.
+    let (findings, load_errors): (Vec<_>, Vec<_>) = parse_errors
         .iter()
-        .map(rustledger_loader::LedgerError::blocks_queries)
+        .chain(&ledger.errors)
+        .partition(|e| e.is_validation_finding());
+    let errors: Vec<Error> = load_errors
+        .iter()
+        .copied()
+        .map(ledger_error_to_ffi)
+        .collect();
+    let error_blocks_queries: Vec<bool> = load_errors.iter().map(|e| e.blocks_queries()).collect();
+    // As `rledger check` reports them: an advisory-only code (E1004, closing
+    // an account with a balance, which bean-check does not flag) is left out,
+    // by the canonical predicate the CLI and the WASM query apply. A finding
+    // is kept when a declared plugin was not run (E8004, E8005): `check`
+    // keeps it too, so an account the plugin would have opened is an E1001
+    // on both, beside the plugin error that says why.
+    let validation_errors: Vec<Error> = findings
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(ledger_error_to_ffi)
         .collect();
     let query_refusal = query_refusal_error(&ledger);
+    let option_errors = option_errors(&ledger);
+    let query_option_errors = query_option_errors(&ledger);
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -512,12 +609,45 @@ pub fn load_file_with_fs(
         directive_placeholders,
         errors,
         error_blocks_queries,
+        validation_errors,
+        option_errors,
+        query_option_errors,
         query_refusal,
         options,
         tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
         plugins,
         loaded_files,
     })
+}
+
+/// The ledger's option diagnostics as wire errors: the loader's
+/// [`rustledger_loader::option_warnings_to_errors`], the mapping the WASM
+/// surface shares, so neither decides a severity, code or phase of its own
+/// (#2929).
+fn option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
+    rustledger_loader::option_warnings_to_errors(&ledger.options.warnings)
+        .iter()
+        .map(ledger_error_to_ffi)
+        .collect()
+}
+
+/// The option diagnostics a query over `ledger` lists, as wire errors:
+/// [`rustledger_loader::Ledger::query_option_errors`], so the rejected
+/// `booking_method`'s E7002 is the refusal, as [`query_refusal_error`]
+/// gives it (#2911, #2929).
+fn query_option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
+    ledger
+        .query_option_errors()
+        .iter()
+        .map(|e| {
+            // The refusal crosses as `query_refusal_error` gives it.
+            if e.blocks_queries() {
+                refusal_to_ffi(e)
+            } else {
+                ledger_error_to_ffi(e)
+            }
+        })
+        .collect()
 }
 
 /// The refusal a rejected option makes for queries over `ledger`
@@ -532,30 +662,58 @@ pub fn load_file_with_fs(
 fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
     ledger.query_refusal().map(|refusal| {
         debug_assert!(refusal.blocks_queries());
-        // Not "parse" on the wire, though options are read at parse time:
-        // a parse-phase error there stops semantic validation, and the
-        // ledger parsed.
-        ledger_error_to_ffi(&refusal).validate_phase()
+        refusal_to_ffi(&refusal)
     })
+}
+
+/// A query refusal ([`rustledger_loader::Ledger::query_refusal`]) as a wire
+/// error, for [`query_refusal_error`] and [`query_option_errors`] alike.
+///
+/// Not "parse" on the wire, though options are read at parse time: the
+/// ledger parsed, and a "parse" error here would be counted in `validate`'s
+/// `parse-error-count` as a syntax error.
+fn refusal_to_ffi(refusal: &rustledger_loader::LedgerError) -> Error {
+    ledger_error_to_ffi(refusal).validate_phase()
+}
+
+/// Take `raw`'s parse errors out ([`rustledger_loader::LoadResult::take_parse_errors`])
+/// and give each as `rledger check` reports it
+/// ([`rustledger_loader::parse_errors_to_ledger_errors`]): with its code,
+/// file, line and column, for an included file too. Left in, `process`
+/// reports each file's as one line-less `parse errors in <path>`.
+fn parse_errors_of(raw: &mut rustledger_loader::LoadResult) -> Vec<rustledger_loader::LedgerError> {
+    raw.take_parse_errors()
+        .iter()
+        .flat_map(|failure| {
+            rustledger_loader::parse_errors_to_ledger_errors(failure, &raw.source_map)
+        })
+        .collect()
 }
 
 /// Convert a loader [`rustledger_loader::LedgerError`] (produced by the
 /// canonical `process::load` pipeline) into the FFI wire [`Error`], preserving
-/// the message and source line. The wire `Error` distinguishes only two phases:
+/// the message, code and source file and line. The wire `Error` distinguishes
+/// only two phases:
 /// `"parse"`-phase errors keep the default `"parse"`; every other phase
-/// (`"validate"`, `"plugin"`) maps to `"validate"`. The `ledger.validate`/
-/// `query` handlers gate semantic validation on parse-phase errors only, so
-/// non-parse diagnostics must not be reported as `"parse"`.
+/// (`"validate"`, `"plugin"`) maps to `"validate"`. No phase stops semantic
+/// validation any more (#2949), but `ledger.validate` counts `"parse"` errors
+/// as its `parse-error-count`, so non-parse diagnostics must not be reported
+/// as `"parse"`. (Whether an error blocks queries is carried separately, in
+/// [`LoadResult::error_blocks_queries`].)
 fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     let mut err = Error::new(e.message.clone());
+    if !e.code.is_empty() {
+        err.code = Some(e.code.clone());
+    }
     if let Some(loc) = &e.location {
         err = err.with_line(loc.line as u32);
+        err.column = Some(loc.column as u32);
+        err.file = Some(loc.file.display().to_string());
     }
-    // The wire `Error` distinguishes only "parse" vs "validate". The
-    // `ledger.validate`/`query` handlers gate semantic validation on
-    // *parse*-phase errors only, so anything that is not a parse error
-    // (booking → "validate", plugin/synth → "plugin") must NOT be reported as
-    // "parse", or it would wrongly suppress validation.
+    // The wire `Error` distinguishes only "parse" vs "validate". Anything
+    // that is not a parse error (booking → "validate", plugin/synth →
+    // "plugin") must NOT be reported as "parse", or `validate` would count it
+    // as one.
     if e.phase != "parse" {
         err = err.validate_phase();
     }
@@ -581,8 +739,15 @@ fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
 ///
 /// Returns the (possibly rewritten) directives + their line numbers/files;
 /// plugin errors and unknown-plugin errors are pushed onto `errors`. No-ops if
-/// `plugin_names` is empty or `errors` is already non-empty (don't run plugins
-/// over a broken load).
+/// `plugin_names` is empty or `errors` already holds an error (don't run
+/// plugins over a broken load). A warning does not count: it used to, so a
+/// ledger plugin's warning silently skipped every plugin the host asked for
+/// (#2929). Pass the load's own errors only, never its validation findings
+/// or option diagnostics, which leave the directives sound.
+///
+/// A plugin's errors are mapped as the loader maps a declared plugin's
+/// (`rustledger_loader::plugin_error_to_ledger_error`), its file resolved
+/// through `source_map`, the load's (pass an empty one where there is none).
 #[must_use]
 pub fn apply_plugins(
     plugin_names: &[&str],
@@ -591,13 +756,14 @@ pub fn apply_plugins(
     mut directive_files: Vec<String>,
     errors: &mut Vec<Error>,
     options: &LedgerOptions,
+    source_map: &rustledger_loader::SourceMap,
 ) -> (Vec<Directive>, Vec<u32>, Vec<String>) {
     use rustledger_plugin::{
         NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper,
         wrapper_to_directive,
     };
 
-    if plugin_names.is_empty() || !errors.is_empty() {
+    if plugin_names.is_empty() || errors.iter().any(Error::is_error) {
         return (directives, directive_lines, directive_files);
     }
     let registry = NativePluginRegistry::global();
@@ -664,9 +830,13 @@ pub fn apply_plugins(
         let input_dirs = input.directives.clone();
         let output = plugin.process(input);
 
-        for err in output.errors {
-            errors.push(Error::new(err.message));
-        }
+        // As the loader records a declared plugin's errors (code `PLUGIN`,
+        // its severity, its location, escaped): the one canonical mapping.
+        errors.extend(output.errors.iter().map(|err| {
+            ledger_error_to_ffi(&rustledger_loader::plugin_error_to_ledger_error(
+                err, source_map,
+            ))
+        }));
 
         // Validate the op set against the shared contract (the same coverage
         // check the loader pipeline runs). On violation, record it — naming the
@@ -954,6 +1124,7 @@ mod plugin_options_tests {
             vec!["<test>".to_string(); n],
             &mut errors,
             &options,
+            &rustledger_loader::SourceMap::new(),
         );
 
         assert!(
@@ -994,6 +1165,7 @@ mod plugin_options_tests {
                 vec!["<test>".to_string(); n],
                 &mut errors,
                 options,
+                &rustledger_loader::SourceMap::new(),
             );
             errors.len()
         };
@@ -1011,6 +1183,50 @@ mod plugin_options_tests {
             0,
             "a tolerance_multiplier of 5 allows the 4 cents; an error means \
              the ledger's option never reached the plugin"
+        );
+    }
+
+    /// The host's plugins are gated by severity (#2929): a warning already in
+    /// `errors` (a ledger plugin's notice) used to skip them all; an error
+    /// still does.
+    #[test]
+    fn test_apply_plugins_runs_over_a_warning_not_over_an_error() {
+        let source = "\
+2024-01-01 open Assets:Bank
+2024-01-01 open Expenses:Food
+
+2024-02-01 * \"lunch\"
+  Expenses:Food   10.00 USD
+  Assets:Bank    -10.00 USD
+
+2024-03-01 close Assets:Bank
+";
+        let run = |prior: Error| {
+            let parsed = rustledger_parser::parse(source);
+            let directives: Vec<rustledger_core::Directive> =
+                parsed.directives.iter().map(|d| (**d).clone()).collect();
+            let n = directives.len();
+            let mut errors = vec![prior];
+            let (out, _, _) = apply_plugins(
+                &["check_drained"],
+                directives,
+                vec![0; n],
+                vec!["<test>".to_string(); n],
+                &mut errors,
+                &crate::types::output::LedgerOptions::default(),
+                &rustledger_loader::SourceMap::new(),
+            );
+            out.len() > n
+        };
+        let mut warning = Error::new("a ledger plugin's notice").validate_phase();
+        warning.severity = "warning".to_string();
+        assert!(
+            run(warning),
+            "a warning must not stop the host's plugins: check_drained added nothing"
+        );
+        assert!(
+            !run(Error::new("a parse error")),
+            "an error must still stop them"
         );
     }
 }

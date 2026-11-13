@@ -20,6 +20,17 @@ pub struct Document {
     version: i32,
     /// Cached parse result (lazily computed, invalidated on change).
     parse_cache: Option<Arc<ParseResult>>,
+    /// The latest parse of this buffer that a diagnostics pass saw with no
+    /// parse error, if one has since it was opened. Recorded only by
+    /// [`Self::clean_view_parse`], never by [`Self::parse_result`], so a
+    /// request handler (hover, semantic tokens, workspace symbols) that
+    /// happens to parse a clean text between two passes does not change it.
+    /// Kept across edits (unlike `parse_cache`) and dropped with the document
+    /// on close, or when a load of the ledger reads the buffer's current text
+    /// (see [`Self::forget_last_clean_parse`]): it is what the buffer
+    /// contributes to the view other files are validated against while its
+    /// current text is broken (see `MainLoopState::publish_diagnostics`).
+    last_clean_parse: Option<Arc<ParseResult>>,
 }
 
 impl Document {
@@ -29,6 +40,7 @@ impl Document {
             content: Rope::from_str(&content),
             version,
             parse_cache: None,
+            last_clean_parse: None,
         }
     }
 
@@ -49,6 +61,32 @@ impl Document {
             self.parse_cache = Some(Arc::new(parse(&text)));
         }
         self.parse_cache.clone().unwrap()
+    }
+
+    /// What this buffer contributes to the clean view: its current parse if
+    /// that has no error (recorded then as its last clean parse), else the
+    /// last clean parse recorded here, else `None`.
+    ///
+    /// Only diagnostics passes call this, so a broken buffer's part of the
+    /// clean view is the last text a diagnostics pass saw parse cleanly, and
+    /// does not depend on the timing of requests between passes.
+    pub fn clean_view_parse(&mut self) -> Option<Arc<ParseResult>> {
+        let current = self.parse_result();
+        if current.errors.is_empty() {
+            self.last_clean_parse = Some(Arc::clone(&current));
+            Some(current)
+        } else {
+            self.last_clean_parse.clone()
+        }
+    }
+
+    /// Drop the last clean parse, so that until this buffer next parses
+    /// cleanly it has no clean-view parse and its file is validated as the
+    /// ledger loaded it. For a buffer whose current text a load of the
+    /// ledger just read (it was saved): `rledger check` validates the saved
+    /// text, parse error and all, so the clean view does too.
+    pub fn forget_last_clean_parse(&mut self) {
+        self.last_clean_parse = None;
     }
 
     /// Invalidate the parse cache (called on content change).
@@ -129,6 +167,14 @@ impl Vfs {
         self.documents.iter().map(|(path, doc)| (path, doc.text()))
     }
 
+    /// Every open document that has a clean-view parse (see
+    /// `Document::clean_view_parse`), with that parse.
+    pub fn iter_clean_view_parses(&mut self) -> impl Iterator<Item = (&PathBuf, Arc<ParseResult>)> {
+        self.documents
+            .iter_mut()
+            .filter_map(|(path, doc)| Some((path, doc.clean_view_parse()?)))
+    }
+
     /// Iterate over all open documents with parse results.
     pub fn iter_with_parse(
         &mut self,
@@ -161,5 +207,80 @@ mod tests {
     fn test_document_text() {
         let doc = Document::new("hello world".to_string(), 1);
         assert_eq!(doc.text(), "hello world");
+    }
+
+    #[test]
+    fn test_clean_view_parse_keeps_the_last_clean_parse_until_close() {
+        let mut vfs = Vfs::new();
+        let path = PathBuf::from("/test.beancount");
+        let clean_view = |vfs: &mut Vfs| {
+            vfs.get_mut(&path)
+                .and_then(Document::clean_view_parse)
+                .map(|p| p.directives.len())
+        };
+
+        // Broken since open: nothing to contribute.
+        vfs.open(path.clone(), "garbage\n".to_string(), 1);
+        assert_eq!(clean_view(&mut vfs), None);
+
+        vfs.update(&path, "2024-01-01 open Assets:A\n".to_string(), 2);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // Broken again: the last clean parse stands in for it.
+        vfs.update(&path, "2024-01-01 open Assets:A\ngarbage\n".to_string(), 3);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // A newer clean parse replaces it.
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n".to_string(),
+            4,
+        );
+        assert_eq!(clean_view(&mut vfs), Some(2));
+
+        // Closing drops it with the document.
+        vfs.close(&path);
+        vfs.open(path.clone(), "garbage\n".to_string(), 5);
+        assert_eq!(clean_view(&mut vfs), None);
+    }
+
+    /// A request handler's parse (`parse_result`, as hover or semantic
+    /// tokens call it) of a clean text between two diagnostics passes does
+    /// not become the clean view: only a pass (`clean_view_parse`) records
+    /// one, so the clean view does not depend on request timing.
+    #[test]
+    fn test_clean_view_parse_ignores_clean_texts_only_a_request_parsed() {
+        let mut vfs = Vfs::new();
+        let path = PathBuf::from("/test.beancount");
+        let clean_view = |vfs: &mut Vfs| {
+            vfs.get_mut(&path)
+                .and_then(Document::clean_view_parse)
+                .map(|p| p.directives.len())
+        };
+
+        // A pass sees one clean `open`.
+        vfs.open(path.clone(), "2024-01-01 open Assets:A\n".to_string(), 1);
+        assert_eq!(clean_view(&mut vfs), Some(1));
+
+        // Within the debounce window: a clean text with two `open`s that
+        // only a request parses, then a broken one the next pass sees.
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n".to_string(),
+            2,
+        );
+        let requested = vfs
+            .get_document_data(&path)
+            .map(|(_, p)| p.directives.len());
+        assert_eq!(requested, Some(2));
+        vfs.update(
+            &path,
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\ngarbage\n".to_string(),
+            3,
+        );
+
+        // The pass falls back to the text the previous PASS saw, as it
+        // would had the request not run.
+        assert_eq!(clean_view(&mut vfs), Some(1));
     }
 }

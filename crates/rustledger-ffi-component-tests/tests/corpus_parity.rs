@@ -20,8 +20,9 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use rustledger_ffi_component_tests::{compiled_component, component_built};
+use wasmtime::Store;
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
@@ -49,14 +50,8 @@ impl rustledger::ledger::host::Host for Host {
     }
 }
 
-fn component_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/debug/rustledger_ffi_component.wasm")
-}
-
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -140,8 +135,7 @@ fn wit_kind(d: &rustledger::ledger::types::Directive) -> (&'static str, String) 
 
 #[test]
 fn corpus_loads_identically_via_native_and_component() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let files = corpus_files();
@@ -332,8 +326,7 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
 /// the coupling.
 #[test]
 fn plugin_feature_gate_message_is_stable() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;

@@ -12,7 +12,10 @@
 //! # Cache format
 //!
 //! Each cache blob starts with a 12-byte header (8-byte magic + 4-byte version)
-//! followed by an rkyv-serialized payload.
+//! followed by an rkyv-serialized payload. The payload is therefore not at
+//! its archive's alignment in the blob, and the blob a caller hands back need
+//! not be aligned at all, so decoding copies the payload into an aligned
+//! buffer first (#2934).
 //!
 //! # Cache invalidation
 //!
@@ -445,8 +448,71 @@ use crate::types::{Error, LedgerOptions};
 /// make are at new lines (their place in the plugin's sorted list, as in
 /// beancount), so the archived lines and error locations for them move.
 /// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
-/// and held v91 before #2930 took v92. v93 is held by #2931.)
-pub const CACHE_VERSION: u32 = 94;
+/// and held v91 before #2930 took v92. v93 was never released.)
+/// v97: loader v69, unchanged. Both payloads' error lists move (#2937): an
+/// account closed with a balance is no longer reported (E1004 is
+/// advisory-only, as in `rledger check`), and a `ParsedLedger` validates
+/// after a booking error, setting the refused transaction aside, so it
+/// reports the `Balance failed` that follows one. An older blob would keep
+/// serving the old errors. (v95 was held by #2931 and never released; v96
+/// was never released.)
+/// v99: loader v71 (#2925). Both payloads' option diagnostics move: each
+/// carries its option's line, and a `Ledger`'s its file too, and an invalid
+/// option in an included file is its converter's error (`E7002`, `E7008`,
+/// ...) instead of the `E7009` warning, which is left for a value the
+/// converter accepts. The loader also ignores a `documents` option in an
+/// included file (`E7009`), so it no longer scans that root. An older blob would keep serving them with
+/// no location and the old codes, and a `Ledger` with such an option as
+/// valid. (v98 was never released.)
+/// v102: loader v73, PARSER OUTPUT changed (#2932). An invalid token after a
+/// lone header string moves it to no other field, so `* "p" <bad>` keeps
+/// payee `p` where `p` was the narration; an older blob would keep serving
+/// the shifted fields. (v100 was held by #2931 and never released.)
+/// v103: loader v73, unchanged. Both payloads move (#2949): a source with a
+/// parse error is booked and validated over the entries that did parse, as
+/// `rledger check` validates it, so a `ParsedLedger` archives those
+/// directives and their validation errors where it archived none, and a
+/// `Ledger` archives each parse error with its code and line where it
+/// archived one line-less `parse errors in <path>`. An older blob would keep
+/// serving the old errors: a `ParsedLedger` with no directives and no
+/// validation errors for a source with a parse error, and a `Ledger` with one
+/// line-less parse error per file. (v101 was never released; v104 was held by
+/// #2931 and never released.)
+/// v105: loader v73, unchanged. ARCHIVED LAYOUT moved (#2946): the
+/// `ParsedLedger` payload gained `query_option_errors` and the `Ledger` payload
+/// `query_errors`, what a query lists, in which a rejected `booking_method`'s
+/// E7002 is the refusal that says why the query does not answer
+/// (`Ledger::query_option_errors`, as the FFI lists it). A v103 blob holds
+/// neither, so it is read at the wrong offsets. The `ParsedLedger` payload
+/// also carries its parse and validation errors at character columns now,
+/// where a byte column read high after a BOM or a multi-byte character.
+/// (v104 was held by #2931 and never released.)
+/// v107: loader v73, unchanged. A `Ledger`'s error list moves (#2959): an
+/// include cycle's `LOAD` error carries the file and line of the `include`
+/// that closed it, where it had no location. An older blob would keep
+/// serving it with none. (v106 was held by #2931 and never released.)
+/// v108: loader v73, unchanged -- parsed directives did not move. Booking
+/// did (#2958): on an AVERAGE account holding lots of both signs, a sale or
+/// a cover whose stated cost the pool accepts as its average reduces the
+/// pool, where it was booked as a new lot on its own side when a lot there
+/// cost the same. `ParsedLedger` and `Ledger` archive booked directives, so an older
+/// blob would keep serving that new lot. (v106 was held by #2931 and never released.)
+/// v109: loader v73, unchanged. Both payloads' error lists move (#2961,
+/// #2964): a `Ledger`'s parse errors carry the parser's message with no
+/// `<path>: ` prefix, and a loader error (a validation finding, a booking
+/// error, an include's `LOAD` error) carries its end and its hint, on a
+/// `Ledger` and, for its booking errors, on a `ParsedLedger`. An older blob
+/// would keep serving the prefixed messages, the null ends and no hint.
+/// (v106 was held by #2931 and never released.)
+/// v110: loader v73, unchanged; PARSER OUTPUT changed (#2931, for #2928). A
+/// BOM in the middle of a line starts an invalid token that runs to the next
+/// blank, as in beancount, so a quote after it opens no string. Every input
+/// that changes has a parse error, so the loader's cache, saved only for an
+/// error-free load, holds none of them; both payloads here archive a source
+/// with parse errors, and an older blob would keep serving such a file with
+/// its old errors and values. (v104 and v106 were held by #2931 and never
+/// released; v108 was taken by #2970 and v109 by #2971.)
+pub const CACHE_VERSION: u32 = 110;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -478,7 +544,7 @@ pub const CACHE_VERSION: u32 = 94;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 69;
+const LOADER_CACHE_VERSION_PIN: u32 = 73;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -509,6 +575,9 @@ pub struct ParsedLedgerPayload {
     /// restored ledger gates its operations on that list and must not refuse
     /// a query over an invalid option.
     pub option_errors: Vec<Error>,
+    /// The option diagnostics a query lists (`Ledger::query_option_errors`):
+    /// a rejected `booking_method`'s E7002 is the refusal (#2929).
+    pub query_option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
     /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
     /// #2882: a parse error or a booking failure). The archived
@@ -550,6 +619,9 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
+    /// What a query lists: `errors` with the option diagnostics as a query
+    /// lists them (`Ledger::query_option_errors`, #2929).
+    pub query_errors: Vec<Error>,
     /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
     /// #2861: a parse error, a file that could not be read or decrypted, a
     /// booking failure). Archived because
@@ -590,6 +662,34 @@ fn prepend_header(magic: [u8; 8], data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Copy an archive into a buffer aligned for every archived type before
+/// rkyv reads it in place (#2934).
+///
+/// `rkyv::from_bytes` validates and reads the archive where it lies, so each
+/// archived value must sit at its own alignment in memory. `ArchivedMetaValue`
+/// needs 8 (its `Int(i64)` variant), and every `custom` directive and metadata
+/// entry archives one. The archive starts [`HEADER_SIZE`] (12) bytes into the
+/// blob, so even in a 16-aligned blob those values sat 4 bytes off and every
+/// such ledger failed with `unaligned pointer`. Nor is the blob itself aligned:
+/// wasm-bindgen copies a JS `Uint8Array` into wasm memory with alignment 1,
+/// and a native caller may hand in any slice. So rather than pad the header,
+/// which would still depend on where the caller's bytes happen to lie, the
+/// payload is copied into an [`rkyv::util::AlignedVec`], aligned to 16, the
+/// alignment `rkyv::to_bytes` writes the archive for. The copy is one
+/// `memcpy` of the blob, small beside the deserialization that follows, and
+/// leaves the cache format unchanged.
+///
+/// Memory: while it lives, the copy holds a second blob-sized buffer beside
+/// the caller's bytes (which wasm-bindgen has already copied in) and the
+/// directives being built. Under wasm32 that peak sets the instance's linear
+/// memory high-water mark, and linear memory never shrinks, so restoring a
+/// cache grows the instance by about one more blob size than it did before.
+fn aligned_payload(data: &[u8]) -> rkyv::util::AlignedVec {
+    let mut aligned = rkyv::util::AlignedVec::with_capacity(data.len());
+    aligned.extend_from_slice(data);
+    aligned
+}
+
 /// Serialize a [`ParsedLedgerPayload`] to bytes.
 pub fn serialize_parsed(payload: &ParsedLedgerPayload) -> Result<Vec<u8>, String> {
     let data = rkyv::to_bytes::<rkyv::rancor::Error>(payload)
@@ -599,8 +699,8 @@ pub fn serialize_parsed(payload: &ParsedLedgerPayload) -> Result<Vec<u8>, String
 
 /// Deserialize a [`ParsedLedgerPayload`] from bytes.
 pub fn deserialize_parsed(bytes: &[u8]) -> Result<ParsedLedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_PARSED)?;
-    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned_payload(strip_header(bytes, *MAGIC_PARSED)?);
+    rkyv::from_bytes::<ParsedLedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 
@@ -613,8 +713,8 @@ pub fn serialize_ledger(payload: &LedgerPayload) -> Result<Vec<u8>, String> {
 
 /// Deserialize a [`LedgerPayload`] from bytes.
 pub fn deserialize_ledger(bytes: &[u8]) -> Result<LedgerPayload, String> {
-    let data = strip_header(bytes, *MAGIC_LEDGER)?;
-    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(data)
+    let data = aligned_payload(strip_header(bytes, *MAGIC_LEDGER)?);
+    rkyv::from_bytes::<LedgerPayload, rkyv::rancor::Error>(&data)
         .map_err(|e| format!("Deserialization failed: {e}"))
 }
 
@@ -916,6 +1016,7 @@ mod tests {
                 "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
+            query_errors: Vec::new(),
             query_refused: true,
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
@@ -969,6 +1070,7 @@ option "operating_currency" "USD"
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         };
@@ -977,6 +1079,65 @@ option "operating_currency" "USD"
         let restored = deserialize_parsed(&bytes).expect("deserialize");
         assert_eq!(restored.directives.len(), processed.directives.len());
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
+    }
+
+    /// A payload holding `MetaValue`s (8-byte aligned) decodes wherever the
+    /// caller's bytes lie (#2934).
+    ///
+    /// The archive sits 12 bytes into the blob, and a `Uint8Array` reaches
+    /// wasm memory with alignment 1, so the decoder may not assume either.
+    /// Each shift below places the blob at a different offset from a 16-byte
+    /// boundary; before the fix every one failed with `unaligned pointer`.
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn test_deserialize_at_any_alignment() {
+        use crate::helpers::load_and_book;
+
+        let source = "2024-01-01 open Assets:Bank USD\n  note: \"meta\"\n\
+2024-01-02 custom \"budget\" Assets:Bank \"monthly\" 2024-02-01 TRUE 42 2.5 1.00 USD\n";
+        let processed = load_and_book(source);
+        assert!(processed.errors.is_empty(), "{:?}", processed.errors);
+        let parsed = serialize_parsed(&ParsedLedgerPayload {
+            directives: processed.directives.clone(),
+            directive_spans: processed.directive_spans.clone(),
+            placeholders: Vec::new(),
+            options: processed.options.clone(),
+            parse_errors: Vec::new(),
+            option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
+            validation_errors: Vec::new(),
+            query_refused: false,
+        })
+        .expect("serialize");
+        let ledger = serialize_ledger(&LedgerPayload {
+            directives: processed.directives.clone(),
+            options: processed.options,
+            account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
+            summary_account_names: Vec::new(),
+            errors: Vec::new(),
+            query_errors: Vec::new(),
+            query_refused: false,
+        })
+        .expect("serialize");
+
+        for shift in 0..16 {
+            let at = |blob: &[u8]| {
+                let mut buf = rkyv::util::AlignedVec::<16>::with_capacity(shift + blob.len());
+                buf.extend_from_slice(&vec![0; shift]);
+                buf.extend_from_slice(blob);
+                buf
+            };
+            let restored = deserialize_parsed(&at(&parsed)[shift..])
+                .unwrap_or_else(|e| panic!("ParsedLedger at shift {shift}: {e}"));
+            assert_eq!(restored.directives, processed.directives, "shift {shift}");
+            let restored = deserialize_ledger(&at(&ledger)[shift..])
+                .unwrap_or_else(|e| panic!("Ledger at shift {shift}: {e}"));
+            assert_eq!(restored.directives, processed.directives, "shift {shift}");
+        }
     }
 
     #[test]
@@ -991,6 +1152,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
@@ -1019,10 +1181,11 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
-        bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CACHE_VERSION + 1).to_le_bytes());
         assert!(
             deserialize_ledger(&bytes)
                 .unwrap_err()
@@ -1065,6 +1228,7 @@ option "operating_currency" "USD"
             directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_errors: Vec::new(),
             query_refused: false,
         })
         .unwrap();
@@ -1081,6 +1245,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
+            query_option_errors: Vec::new(),
             validation_errors: Vec::new(),
             query_refused: false,
         })

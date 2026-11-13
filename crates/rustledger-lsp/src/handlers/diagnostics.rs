@@ -3,7 +3,10 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustledger_booking::BookingEngine;
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap, SourceText};
+use rustledger_loader::{
+    ErrorSeverity, LedgerError, LoadOptions, Options as LoaderOptions, Plugin, SourceMap,
+    SourceText,
+};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
 use rustledger_validate::{Severity, ValidationError, ValidationOptions, ValidationSession};
@@ -165,17 +168,135 @@ fn parse_result_to_plugins(
         .collect()
 }
 
-/// LSP severity for an option warning, from the one rule both surfaces share.
+/// LSP severity for a loader diagnostic (an option diagnostic, a plugin
+/// error or a load error), from the one rule every surface shares.
 ///
 /// `rledger check` and the LSP each had their own idea of which `E70xx` codes
-/// were fatal, and they disagreed (#2291). The rule now lives on
-/// `OptionWarning`; this only translates it into the LSP's vocabulary.
-fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> DiagnosticSeverity {
-    if warning.is_error() {
-        DiagnosticSeverity::ERROR
-    } else {
-        DiagnosticSeverity::WARNING
+/// were fatal, and they disagreed (#2291). The rule lives on `OptionWarning`
+/// and reaches here through the loader's `option_warnings_to_errors`; a
+/// plugin error's is the plugin's own. This only translates it into the
+/// LSP's vocabulary.
+fn ledger_error_severity(error: &LedgerError) -> DiagnosticSeverity {
+    match error.severity {
+        ErrorSeverity::Error => DiagnosticSeverity::ERROR,
+        ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
     }
+}
+
+/// The source-map file id of the file a loader diagnostic is located in, or
+/// `None` for one with no location (or a location the map does not name,
+/// such as a plugin's placeholder `<auto_accounts>`).
+///
+/// The location is the loader's, the one `rledger check` prints: an
+/// option's (`OptionWarning::site`, through `option_warnings_to_errors`), a
+/// plugin error's (`plugin_error_to_ledger_error`, #2957), or a load error's
+/// `include` line (`process`, located by `SourceMap::locate`, #2959). So a
+/// diagnostic in an included file is published on that file, not the main
+/// one.
+fn ledger_error_file_id(error: &LedgerError, source_map: &SourceMap) -> Option<u16> {
+    let location = error.location.as_ref()?;
+    let file = source_map
+        .files()
+        .iter()
+        .find(|file| file.path == location.file)?;
+    u16::try_from(file.id).ok()
+}
+
+/// The byte length of the directive on a line: up to a `;` comment outside
+/// a string, without trailing whitespace.
+fn directive_line_extent(text: &str) -> usize {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = text.len();
+    for (i, c) in text.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            ';' if !in_string => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    text[..end].trim_end().len()
+}
+
+/// A loader diagnostic located by file and line (an option diagnostic from
+/// `option_warnings_to_errors`, a plugin error, or a load error) as an LSP
+/// diagnostic, at the severity [`ledger_error_severity`] gives it.
+///
+/// With `source`, the text of the file the diagnostic's location is in, the
+/// range covers the directive on its line (the `option` #2925, the entry a
+/// plugin named #2957, the `include` #2959), without a trailing `; comment`,
+/// as `rledger check` reports its file and line. Without one, or with no
+/// location, it is the top of the file, where these were all published
+/// before they had a location.
+///
+/// Known limitation: the line comes from the loaded ledger, and `source` is
+/// the live buffer. An unsaved edit that adds or removes lines above the
+/// directive moves the range off it until the ledger reloads, as it does for
+/// every other diagnostic the loaded ledger locates.
+fn ledger_error_to_diagnostic(
+    error: &LedgerError,
+    source: Option<&str>,
+    encoding: PositionEncoding,
+) -> Diagnostic {
+    let range = error
+        .location
+        .as_ref()
+        .zip(source)
+        .and_then(|(location, source)| {
+            let index = LineIndex::new(source, encoding);
+            let line = u32::try_from(location.line.checked_sub(1)?).ok()?;
+            let start = index.line_start_byte(line)?;
+            let text = index.line_text(line)?;
+            let (sl, sc) = index.offset_to_position(start);
+            let (el, ec) = index.offset_to_position(start + directive_line_extent(text));
+            Some(Range {
+                start: Position::new(sl, sc),
+                end: Position::new(el, ec),
+            })
+        })
+        .unwrap_or_default();
+    Diagnostic {
+        range,
+        // Not always an error: `rledger check` calls E7003 and E7009
+        // warnings, and publishing them as errors put a red squiggle on a
+        // file the CLI exits 0 on (#2291).
+        severity: Some(ledger_error_severity(error)),
+        code: Some(lsp_types::NumberOrString::String(error.code.clone())),
+        source: Some("rustledger".to_string()),
+        message: error.message.clone(),
+        related_information: None,
+        tags: None,
+        code_description: None,
+        data: None,
+    }
+}
+
+/// The loader diagnostics among `errors` that belong in the ledger file
+/// `here`, whose text is `source`: those located in it
+/// ([`ledger_error_file_id`]) on their lines, plus, in the main file (id 0),
+/// those with no location at its top. Each error belongs in exactly one
+/// file, so publishing every file with this publishes each error once.
+fn ledger_errors_in_file<'e>(
+    errors: impl IntoIterator<Item = &'e LedgerError>,
+    source_map: &SourceMap,
+    here: u16,
+    source: &str,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    errors
+        .into_iter()
+        .filter_map(|error| {
+            let file_id = ledger_error_file_id(error, source_map);
+            (file_id.unwrap_or(0) == here).then(|| {
+                ledger_error_to_diagnostic(error, file_id.is_some().then_some(source), encoding)
+            })
+        })
+        .collect()
 }
 
 /// Run validation on parsed directives and convert errors to LSP diagnostics.
@@ -262,9 +383,11 @@ pub(crate) struct LedgerValidation {
     /// Booking failures across ALL files, labeled and worded as
     /// `rledger check` words them (#2510).
     booking_errors: Vec<BookingDiagnostic>,
-    /// Loader plugin errors (they carry no `file_id`), pre-converted to
-    /// `(severity, code, message)`. Shown only in the main file (file 0).
-    plugin_errors: Vec<(DiagnosticSeverity, String, String)>,
+    /// Loader plugin errors across ALL files, each with the file id of its
+    /// location ([`ledger_error_file_id`]): the file and line `rledger check`
+    /// reports it at (#2957). One with no location, or a placeholder one,
+    /// has `None` and is shown in the main file.
+    plugin_errors: Vec<(Option<u16>, LedgerError)>,
 }
 
 /// A booking failure, ready to show.
@@ -473,21 +596,32 @@ pub(crate) fn run_ledger_validation(
             rustledger_loader::PluginPass::PostBooking,
         );
     }
-    let mut plugin_errors_out = Vec::new();
-    if plugin_ctx.is_some() && plugins_ok {
-        for err in &plugin_errors {
-            let severity = match err.severity {
-                rustledger_loader::ErrorSeverity::Error => DiagnosticSeverity::ERROR,
-                rustledger_loader::ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
-            };
-            plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
-        }
-    }
+    // Each plugin error with the file its location names, so it is published
+    // where `check` reports it (#2957).
+    //
+    // Its line is the one the loader's `build_wrappers` gave the plugin, from
+    // `ctx.source_map`. In a loaded ledger that is the ledger's map, the text
+    // of each file as last loaded from disk, not the live buffer, so in a
+    // buffer with unsaved edits that add or remove lines the line drifts off
+    // its entry until the ledger next reloads. Load errors' `include` lines
+    // (`LedgerState::load_errors`) come from the same loaded text and drift
+    // the same way (see `ledger_error_to_diagnostic`).
+    let plugin_errors_out = match plugin_ctx {
+        Some(ctx) if plugins_ok => plugin_errors
+            .into_iter()
+            .map(|err| (ledger_error_file_id(&err, ctx.source_map), err))
+            .collect(),
+        _ => Vec::new(),
+    };
     #[cfg(test)]
     LAST_LATE_DIRECTIVES.with(|c| c.borrow_mut().clone_from(&booked_directives));
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
+    // Advisory-only diagnostics (E1004, closing an account with a balance)
+    // are not shown, as `rledger check` and bean-check do not report them;
+    // `rledger lint closed-nonempty` does (#2937).
+    errors.retain(|e| !e.code.is_advisory_only());
     // A validator could re-derive a booking failure word for word (an
     // inventory overflow is reported both by `apply` here and by
     // `update_inventories`); with failed transactions out of Late that no
@@ -558,7 +692,8 @@ pub(crate) fn lsp_load_options() -> LoadOptions {
 /// Map a shared [`LedgerValidation`] to the diagnostics for ONE file: the
 /// validation errors whose `file_id` matches (plus global `None`-file errors),
 /// mapped to positions in this file's `source`, plus this file's non-native
-/// plugin info notes and (in the main file only) the loader plugin errors.
+/// plugin info notes and the loader plugin errors located in it (those with
+/// no location in the main file).
 pub(crate) fn map_validation_to_diagnostics(
     validation: &LedgerValidation,
     source: &str,
@@ -639,25 +774,15 @@ pub(crate) fn map_validation_to_diagnostics(
             });
         }
 
-        // Plugin errors don't carry file_id, so we only show them in the main
-        // file (file_id 0) to avoid duplication across open documents.
-        let show_plugin_errors = current_file_id.is_none() || current_file_id == Some(0);
-        if show_plugin_errors {
-            for (severity, code, message) in &validation.plugin_errors {
-                extra_diagnostics.push(Diagnostic {
-                    range: Range {
-                        start: Position::new(0, 0),
-                        end: Position::new(0, 0),
-                    },
-                    severity: Some(*severity),
-                    code: Some(lsp_types::NumberOrString::String(code.clone())),
-                    source: Some("rustledger".to_string()),
-                    message: message.clone(),
-                    related_information: None,
-                    tags: None,
-                    code_description: None,
-                    data: None,
-                });
+        // Plugin errors, each on the file and line `rledger check` reports
+        // it at (#2957); one with no location (or a placeholder one) at the
+        // top of the main file. Each lands in exactly one file, so none is
+        // published twice across documents. Without a `current_file_id` (a
+        // buffer validated alone) every error is this buffer's.
+        for (file_id, error) in &validation.plugin_errors {
+            if current_file_id.is_none_or(|here| file_id.unwrap_or(0) == here) {
+                let located = file_id.is_some().then_some(source);
+                extra_diagnostics.push(ledger_error_to_diagnostic(error, located, encoding));
             }
         }
     }
@@ -798,9 +923,14 @@ const MAX_VALIDATION_FILE_SIZE: usize = 500 * 1024;
 /// to run" (render neutrally, never `✓`). Without it a balance lens
 /// would silently mislabel an unvalidated assertion as passing — the
 /// inverse of the dead-link UX that #1264 closed.
+///
+/// Only the size cap stops it. A parse error does not: the entries that did
+/// parse are validated, as `rledger check` (the validating loader's
+/// `process`) and bean-check validate them (#2949). This used to decline on
+/// any parse error, so one syntax error hid every other finding.
 #[must_use]
-pub(crate) fn validation_would_run(source: &str, parse_result: &ParseResult) -> bool {
-    parse_result.errors.is_empty() && source.len() <= MAX_VALIDATION_FILE_SIZE
+pub(crate) fn validation_would_run(source: &str) -> bool {
+    source.len() <= MAX_VALIDATION_FILE_SIZE
 }
 
 /// Build the effective directive list for validation by overlaying one or
@@ -915,6 +1045,17 @@ fn build_live_directive_overlay(
 /// every entry in `other_buffer_overlays` replace the on-disk snapshot of
 /// those files in the validation input, so in-memory edits are seen before
 /// the buffer is saved.
+///
+/// The ledger is used only for a buffer that is one of its files, that is,
+/// with a `current_file_id`. A buffer outside it (a scratch file opened
+/// while a ledger is loaded) is validated as a single-file ledger of its own
+/// text alone, whatever else is open. Its `include`s are not followed, so it
+/// agrees with `rledger check <that file>` only for a file that includes
+/// nothing, since `check` loads what it includes.
+/// `ledger_state` and `other_buffer_overlays` are ignored for it (#2955).
+/// Validating the ledger for it instead mapped every other file's errors, by
+/// their byte offsets, onto the scratch buffer's lines, and ran the scratch
+/// buffer's `plugin` lines in place of the main file's.
 pub fn all_diagnostics(
     result: &ParseResult,
     source: &str,
@@ -924,16 +1065,23 @@ pub fn all_diagnostics(
     other_buffer_overlays: &[(u16, &[Spanned<Directive>])],
     encoding: PositionEncoding,
 ) -> Vec<Diagnostic> {
+    // A buffer outside the ledger validates alone (#2955, see above).
+    let (ledger_state, other_buffer_overlays) = if current_file_id.is_some() {
+        (ledger_state, other_buffer_overlays)
+    } else {
+        (None, &[][..])
+    };
     let mut diagnostics = parse_errors_to_diagnostics(result, source, encoding);
 
     // [`validation_would_run`] is the single source of truth for whether
-    // the validator runs (no parse errors AND under the size cap). It's
+    // the validator runs (under the size cap; a parse error does not stop it,
+    // #2949). It's
     // re-used by `handle_code_lens` to render the balance lens neutrally
     // when validation was skipped, instead of mistaking an empty
     // diagnostic vec for "validator approved." Calling it here keeps
     // the two sites structurally locked-step instead of relying on a
     // humans-must-remember comment.
-    if validation_would_run(source, result) {
+    if validation_would_run(source) {
         // Get full directives from ledger state if available, then
         // apply a live overlay of every fresh in-memory parse we have.
         //
@@ -1077,15 +1225,10 @@ pub fn all_diagnostics(
             encoding,
         );
         diagnostics.extend(validation_diagnostics);
-    } else if result.errors.is_empty() && source.len() > MAX_VALIDATION_FILE_SIZE {
-        // The size-specific log is the only signal a human gets when
-        // a giant file silently stops validating. Skipped-because-of-
-        // parse-errors is self-evident: the parse-error diagnostics
-        // are already in `diagnostics`. Guard on `result.errors.is_empty()`
-        // so the log fires ONLY when the size cap is the sole reason —
-        // pre-refactor the outer `if errors.is_empty()` provided the
-        // same gating; replicate it here so an operator chasing the
-        // skip cause isn't pointed at the wrong remediation.
+    } else {
+        // The size cap is the only reason validation is skipped, and this
+        // log is the only signal a human gets when a giant file silently
+        // stops validating.
         tracing::debug!(
             "Skipping validation for large file ({} bytes > {} limit)",
             source.len(),
@@ -1094,60 +1237,61 @@ pub fn all_diagnostics(
     }
 
     // Emit option warnings (E7001–E7011), at the severity
-    // `OptionWarning::is_error` gives them.
-    // In multi-file mode, use warnings from the loaded ledger (shown only in
-    // the main file to avoid duplication). In single-file mode (no ledger),
-    // validate options from the parse result so diagnostics still appear
-    // before the workspace ledger has loaded.
-    let show_option_warnings = current_file_id.is_none() || current_file_id == Some(0);
-    if show_option_warnings {
-        let single_file_options;
-        let option_warnings = if let Some(ls) = ledger_state
-            && let Some(ledger) = ls.ledger()
-        {
-            ledger.options.warnings.as_slice()
-        } else {
-            // Single-file fallback: validate parsed options to generate warnings.
-            let mut opts = LoaderOptions::default();
-            for (key, value, _span) in &result.options {
-                opts.set(key, value);
-            }
-            // `Options::set` no longer checks that `documents` roots exist —
-            // it has no base dir, so it could only ask about the LSP process's
-            // CWD, which is wherever the editor happened to launch us (#1999).
-            // Resolve against the open buffer's directory instead, the same
-            // base dir the validation options above already use.
-            opts.warnings
-                .extend(rustledger_loader::document_root_warnings(
-                    &opts.documents,
-                    current_file_path.and_then(|p| p.parent()),
-                    &rustledger_loader::DiskFileSystem,
-                ));
-            // E7010, once every option is set, as the loader raises it (#2408).
-            let rooted = opts.rooted_leaf_warnings();
-            opts.warnings.extend(rooted);
-            single_file_options = opts;
-            single_file_options.warnings.as_slice()
-        };
-
-        for warning in option_warnings {
-            diagnostics.push(Diagnostic {
-                range: Range {
-                    start: Position::new(0, 0),
-                    end: Position::new(0, 0),
-                },
-                // Not always an error: `rledger check` calls E7003 and E7009
-                // warnings, and publishing them as errors put a red squiggle
-                // on a file the CLI exits 0 on (#2291).
-                severity: Some(option_warning_severity(warning)),
-                code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
-                source: Some("rustledger".to_string()),
-                message: warning.message.clone(),
-                related_information: None,
-                tags: None,
-                code_description: None,
-                data: None,
-            });
+    // `OptionWarning::is_error` gives them, on the line of the `option` that
+    // raised them (#2925).
+    //
+    // For a file of the loaded ledger, use its warnings: each one in the file
+    // its option is in, an included file's on that file, and one with no
+    // location in the main file, so none is published twice. Otherwise (no
+    // ledger yet, or a buffer the ledger does not include), validate this
+    // buffer's own options from its parse, so diagnostics still appear and
+    // the ledger's are never drawn on an unrelated buffer's lines.
+    //
+    // The ledger's load errors (#2959) go with them, by the same rule: an
+    // include failure on its `include` line, the rest in the main file.
+    if let Some(here) = current_file_id
+        && let Some(ls) = ledger_state
+        && let Some(ledger) = ls.ledger()
+    {
+        let option_errors = rustledger_loader::option_warnings_to_errors(&ledger.options.warnings);
+        diagnostics.extend(ledger_errors_in_file(
+            option_errors.iter().chain(ls.load_errors()),
+            &ledger.source_map,
+            here,
+            source,
+            encoding,
+        ));
+    } else {
+        // Single-file fallback: validate parsed options to generate warnings,
+        // each at its option's line in this buffer.
+        let line_index = LineIndex::new(source, encoding);
+        let mut opts = LoaderOptions::default();
+        for (key, value, span) in &result.options {
+            let site = rustledger_loader::OptionSite {
+                file: current_file_path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                line: line_index.offset_to_position(span.start).0 as usize + 1,
+            };
+            opts.set_scoped_at(key, value, true, Some(site));
+        }
+        // `Options::set` no longer checks that `documents` roots exist:
+        // it has no base dir, so it could only ask about the LSP process's
+        // CWD, which is wherever the editor happened to launch us (#1999).
+        // Resolve against the open buffer's directory instead, the same
+        // base dir the validation options above already use.
+        let mut doc_warnings = rustledger_loader::document_root_warnings(
+            &opts.documents,
+            current_file_path.and_then(|p| p.parent()),
+            &rustledger_loader::DiskFileSystem,
+        );
+        opts.locate(&mut doc_warnings);
+        opts.warnings.extend(doc_warnings);
+        // E7010, once every option is set, as the loader raises it (#2408).
+        let rooted = opts.rooted_leaf_warnings();
+        opts.warnings.extend(rooted);
+        for error in rustledger_loader::option_warnings_to_errors(&opts.warnings) {
+            diagnostics.push(ledger_error_to_diagnostic(&error, Some(source), encoding));
         }
     }
 
@@ -1174,6 +1318,44 @@ pub(crate) struct FileDiagTarget<'a> {
     pub parse: &'a ParseResult,
 }
 
+/// The plugins of a view (see [`ledger_diagnostics_multi`]): `stored`, with
+/// every file in `view` declaring its parse's plugins instead of its stored
+/// ones, in the order the loader would collect them for those texts.
+///
+/// That order is by `file_id`, each file's plugins in declaration order: the
+/// loader gives a file its id and pushes its plugins in the same step, before
+/// it follows that file's includes, so both follow one pre-order walk and the
+/// loader's list is sorted by `file_id` (pinned by the loader's
+/// `test_load_plugins_are_collected_in_file_id_order`). The order matters,
+/// as plugins run in it: two `rename_accounts` chaining `A -> B` and
+/// `B -> C` leave `A` as `C` only in that order. So the result is a stable
+/// sort by `file_id`, which depends on the view's contents alone, not on the
+/// order its files are listed in (#2949).
+///
+/// The `file_id`s are the stored load's, so the set and order of the files
+/// are those of the last load: this is the order `check` runs the view's
+/// plugins in for the files that load found, in the order it found them. A
+/// view whose buffer added, removed or reordered an `include` line keeps the
+/// old file order until the ledger is next loaded, where `check` on that text
+/// would follow the new one.
+fn view_plugins(stored: &[Plugin], view: &[(u16, &ParseResult)]) -> Vec<Plugin> {
+    let in_view = |fid: usize| view.iter().any(|(f, _)| usize::from(*f) == fid);
+    let mut merged: Vec<Plugin> = stored
+        .iter()
+        .filter(|p| !in_view(p.file_id))
+        .cloned()
+        .collect();
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for (fid, parsed) in view {
+        if seen.insert(*fid) {
+            merged.extend(parse_result_to_plugins(&parsed.plugins, usize::from(*fid)));
+        }
+    }
+    // Stable: a file's plugins keep their declaration order.
+    merged.sort_by_key(|p| p.file_id);
+    merged
+}
+
 /// Compute diagnostics for MANY ledger files from a SINGLE whole-ledger
 /// book + validate — the fix for #1799.
 ///
@@ -1193,21 +1375,22 @@ pub(crate) struct FileDiagTarget<'a> {
 /// main file) option warnings, and per-file import-review hints. The result is
 /// aligned 1:1 with `targets`.
 ///
-/// `overlay` is the fresh parse of every clean open buffer (current file
-/// included when clean), applied to the ledger snapshot so unsaved edits are
-/// reflected — the same overlay the current-file [`all_diagnostics`] path
-/// builds. `primary_parse` / `primary_file_id` identify the file being edited,
-/// whose fresh plugin declarations replace the ledger's for that file (mirrors
-/// the single-file path); unopened files are not edited, so their ledger
-/// plugins are already current.
+/// `view` is the parse to validate each overlaid file with, applied to the
+/// ledger snapshot so unsaved edits are reflected; which parse belongs in it
+/// for which file is the caller's rule (`MainLoopState::publish_diagnostics`).
+/// A file in `view` contributes BOTH its directives and its plugin
+/// declarations, which replace the ledger's for that file; every other file
+/// keeps what the ledger loaded. The plugins then run in the order the loader
+/// would collect them for those texts (see [`view_plugins`]), not in the
+/// order `view` lists its files, so the result depends on the view's contents
+/// alone: not on which of its files is being published, nor on the order the
+/// open buffers are visited in (#2949).
 ///
 /// Requires a loaded ledger; falls back to parse-only diagnostics otherwise
 /// (the caller only uses this path for multi-file ledgers).
 pub(crate) fn ledger_diagnostics_multi(
     ledger_state: &LedgerState,
-    primary_file_id: Option<u16>,
-    primary_parse: &ParseResult,
-    overlay: &[(u16, &[Spanned<Directive>])],
+    view: &[(u16, &ParseResult)],
     targets: &[FileDiagTarget<'_>],
     encoding: PositionEncoding,
 ) -> Vec<Vec<Diagnostic>> {
@@ -1219,30 +1402,17 @@ pub(crate) fn ledger_diagnostics_multi(
     };
 
     // Plugin set for the shared validation and the per-file plugin NOTES
-    // (E8006). Start from the ledger's stored plugins, and replace the
-    // primary (edited) file's plugins with its fresh parse ONLY when that file
-    // is part of the ledger AND parsed cleanly — mirroring the directive
-    // overlay's clean-parse guard. A broken current parse recovers a partial
-    // (or empty) `.plugins` list; injecting it would DROP the current file's
-    // plugins from the whole-ledger validation the clean unopened files run
-    // against, producing spurious diagnostics there (e.g. auto_accounts
-    // dropped ⇒ phantom E1001s). When the current buffer isn't a ledger file
-    // at all, its plugins must not be injected either. In both cases keep the
-    // ledger's stored plugins, matching the old per-file path (where the
-    // current file was never the primary in the unopened files' validations).
-    let merged_plugins: Vec<Plugin> = match primary_file_id {
-        Some(fid) if primary_parse.errors.is_empty() => {
-            let primary_fid = fid as usize;
-            ledger
-                .plugins
-                .iter()
-                .filter(|p| p.file_id != primary_fid)
-                .cloned()
-                .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
-                .collect()
-        }
-        _ => ledger.plugins.clone(),
-    };
+    // (E8006): the ledger's stored plugins, with each file in the view
+    // declaring the plugins of ITS parse instead. Which parse that is per file
+    // (and so whether a broken buffer's recovered plugin lines, such as an
+    // unterminated `plugin "auto_acc` swallowing the next line, ever reach
+    // another file, #1813) is the caller's rule, the same one as for the
+    // directives. See `MainLoopState::publish_diagnostics`.
+    let merged_plugins = view_plugins(&ledger.plugins, view);
+    let overlay: Vec<(u16, &[Spanned<Directive>])> = view
+        .iter()
+        .map(|(fid, parsed)| (*fid, parsed.directives.as_slice()))
+        .collect();
     let plugin_ctx = if merged_plugins.is_empty() {
         None
     } else {
@@ -1254,19 +1424,17 @@ pub(crate) fn ledger_diagnostics_multi(
     };
 
     // ---- ONE whole-ledger book + validate, but ONLY if some target will use
-    // it. When every target fails `validation_would_run` (all have parse
-    // errors, or all exceed the size cap), the whole-ledger book + plugin +
+    // it. When every target fails `validation_would_run` (all exceed the
+    // size cap), the whole-ledger book + plugin +
     // validate would be thrown away, so skip it entirely rather than block the
     // main loop on discarded work (Copilot review). The expensive directive
     // overlay is built inside this branch too. ----
-    let any_target_validates = targets
-        .iter()
-        .any(|t| validation_would_run(t.source, t.parse));
+    let any_target_validates = targets.iter().any(|t| validation_would_run(t.source));
     let validation = if any_target_validates {
         // Raw, not processed, as in `all_diagnostics` (#2654).
         let full_directives_raw = ledger_state.raw_directives();
         let booked_directives: Vec<Spanned<Directive>> =
-            if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
+            if let Some(owned) = build_live_directive_overlay(&overlay, full_directives_raw) {
                 owned
             } else if let Some(full) = full_directives_raw {
                 full.to_vec()
@@ -1290,12 +1458,15 @@ pub(crate) fn ledger_diagnostics_multi(
         }
     };
 
+    // The option diagnostics, mapped once for every target.
+    let option_errors = rustledger_loader::option_warnings_to_errors(&ledger.options.warnings);
+
     // ---- Map each target from the shared validation ----
     targets
         .iter()
         .map(|t| {
             let mut diags = parse_errors_to_diagnostics(t.parse, t.source, encoding);
-            if validation_would_run(t.source, t.parse) {
+            if validation_would_run(t.source) {
                 diags.extend(map_validation_to_diagnostics(
                     &validation,
                     t.source,
@@ -1303,39 +1474,27 @@ pub(crate) fn ledger_diagnostics_multi(
                     plugin_ctx.as_ref(),
                     encoding,
                 ));
-            } else if t.parse.errors.is_empty() && t.source.len() > MAX_VALIDATION_FILE_SIZE {
+            } else {
                 // Parity with `all_diagnostics`: the only human signal that a
-                // clean-but-too-large file silently skipped validation.
+                // too-large file silently skipped validation.
                 tracing::debug!(
                     "Skipping validation for large file ({} bytes > {} limit)",
                     t.source.len(),
                     MAX_VALIDATION_FILE_SIZE
                 );
             }
-            // Option warnings (E7001–E7011) are shown only in the main file to
-            // avoid duplication across open documents.
-            if t.file_id == 0 {
-                for warning in ledger.options.warnings.as_slice() {
-                    diags.push(Diagnostic {
-                        range: Range {
-                            start: Position::new(0, 0),
-                            end: Position::new(0, 0),
-                        },
-                        // Same rule as the single-file path above. This is
-                        // the SECOND site publishing option warnings, and
-                        // fixing only one would have left the multi-file path
-                        // still reporting warnings as errors.
-                        severity: Some(option_warning_severity(warning)),
-                        code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
-                        source: Some("rustledger".to_string()),
-                        message: warning.message.clone(),
-                        related_information: None,
-                        tags: None,
-                        code_description: None,
-                        data: None,
-                    });
-                }
-            }
+            // Option warnings (E7001–E7011), each in the file its option is
+            // in and on its line (#2925), and load errors, each include
+            // failure on its `include` line (#2959); one with no location
+            // goes in the main file. Each lands in exactly one target, so
+            // none is published twice across open documents.
+            diags.extend(ledger_errors_in_file(
+                option_errors.iter().chain(ledger_state.load_errors()),
+                &ledger.source_map,
+                t.file_id,
+                t.source,
+                encoding,
+            ));
             // Per-file import-review diagnostics.
             diags.extend(super::import::import_diagnostics(
                 &t.parse.directives,
@@ -1351,6 +1510,63 @@ pub(crate) fn ledger_diagnostics_multi(
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// A view's plugins: each file in the view declares its parse's plugins
+    /// in place of its stored ones; files outside the view keep theirs; and
+    /// all are in the loader's order, by `file_id` and then declaration,
+    /// whatever order the view lists its files in, including a view file
+    /// that had none stored and sits between two that did.
+    #[test]
+    fn test_view_plugins_replaces_each_view_files_plugins_in_place() {
+        let stored = parse_result_to_plugins(&parse("plugin \"a\"\nplugin \"b\"\n").plugins, 0)
+            .into_iter()
+            .chain(parse_result_to_plugins(&parse("plugin \"x\"\n").plugins, 1))
+            .collect::<Vec<_>>();
+        let main = parse("plugin \"m\"\n");
+        let c = parse("plugin \"c\"\n");
+        let between = parse("plugin \"y1\"\nplugin \"y2\"\n");
+        let late = parse("plugin \"z\"\n");
+        let stored_gap = parse_result_to_plugins(&parse("plugin \"a\"\n").plugins, 0)
+            .into_iter()
+            .chain(parse_result_to_plugins(&parse("plugin \"x\"\n").plugins, 2))
+            .collect::<Vec<_>>();
+        let gap_names = |view: &[(u16, &ParseResult)]| {
+            view_plugins(&stored_gap, view)
+                .into_iter()
+                .map(|p| (p.name, p.file_id))
+                .collect::<Vec<_>>()
+        };
+        let expected: [(String, usize); 5] = [
+            ("m".into(), 0),
+            ("y1".into(), 1),
+            ("y2".into(), 1),
+            ("x".into(), 2),
+            ("z".into(), 3),
+        ];
+        assert_eq!(
+            gap_names(&[(3, &late), (1, &between), (0, &main)]),
+            expected
+        );
+        assert_eq!(
+            gap_names(&[(0, &main), (1, &between), (3, &late)]),
+            expected
+        );
+        let names = |plugins: Vec<Plugin>| {
+            plugins
+                .into_iter()
+                .map(|p| (p.name, p.file_id))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(view_plugins(&stored, &[])),
+            [("a".into(), 0), ("b".into(), 0), ("x".into(), 1)]
+        );
+        assert_eq!(
+            names(view_plugins(&stored, &[(2, &c), (0, &main)])),
+            [("m".into(), 0), ("x".into(), 1), ("c".into(), 2)]
+        );
+    }
 
     /// #1648: the multi-file path must apply the ledger's `inferred_tolerance_default`,
     /// not just `name_*` — otherwise the LSP reports residual errors `check` does not.
@@ -2933,14 +3149,7 @@ plugin "auto_accounts"
             })
             .collect();
 
-        let per_file = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &parses[0],
-            &[],
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let per_file = ledger_diagnostics_multi(&ls, &[], &targets, PositionEncoding::Utf16);
 
         let severity_of = |code: &str| {
             per_file
@@ -3024,14 +3233,7 @@ plugin "auto_accounts"
         // Measure validation runs on THIS thread across the call (thread-local
         // counter, so parallel tests don't interfere).
         let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
-        let per_file = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &parses[0],
-            &[],
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let per_file = ledger_diagnostics_multi(&ls, &[], &targets, PositionEncoding::Utf16);
         let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
 
         assert_eq!(
@@ -3048,14 +3250,17 @@ plugin "auto_accounts"
         );
 
         // ...and ZERO validations when every target fails `validation_would_run`
-        // (here: all targets have parse errors), since the result would be
-        // discarded anyway (Copilot review).
-        let bad_source: SourceText = "this is not valid @@@ beancount\n".into();
-        let bad_parse = parse(&bad_source);
+        // (here: all targets exceed the size cap; a parse error no longer stops
+        // validation, #2949), since the result would be discarded anyway
+        // (Copilot review).
+        let bad_source: SourceText = "; padding\n"
+            .repeat(MAX_VALIDATION_FILE_SIZE / 10 + 1)
+            .into();
         assert!(
-            !bad_parse.errors.is_empty(),
-            "fixture must have parse errors"
+            bad_source.len() > MAX_VALIDATION_FILE_SIZE,
+            "fixture must be too large"
         );
+        let bad_parse = parse(&bad_source);
         let bad_targets: Vec<FileDiagTarget<'_>> = files
             .iter()
             .map(|(fid, _)| FileDiagTarget {
@@ -3065,29 +3270,23 @@ plugin "auto_accounts"
             })
             .collect();
         let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
-        let _ = ledger_diagnostics_multi(
-            &ls,
-            Some(0),
-            &bad_parse,
-            &[],
-            &bad_targets,
-            PositionEncoding::Utf16,
-        );
+        let _ = ledger_diagnostics_multi(&ls, &[], &bad_targets, PositionEncoding::Utf16);
         let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
         assert_eq!(
             after - before,
             0,
-            "no target can use validation (all have parse errors), so it must not run"
+            "no target can use validation (all are too large), so it must not run"
         );
     }
 
-    /// #1813 review: when the CURRENT file's fresh parse is broken, its plugins
-    /// must NOT be dropped from the whole-ledger validation the clean unopened
-    /// files run against. Otherwise `auto_accounts` (declared in the current
-    /// file) vanishes and the unopened files get phantom E1001s that neither
-    /// the old per-file path nor `rledger check` produce.
+    /// A parse error in the CURRENT file does not stop the whole-ledger
+    /// validation of it (#2949): what parsed in the buffer is validated, as
+    /// `rledger check` validates a file with a parse error, so the buffer's
+    /// unbalanced transaction is reported beside its parse error. (Which view
+    /// the OTHER files are validated against is `MainLoopState`'s rule, tested
+    /// there.)
     #[test]
-    fn broken_current_parse_keeps_stored_plugins_for_cross_file_validation() {
+    fn current_parse_error_still_validates_the_ledger() {
         let dir = tempfile::tempdir().expect("tempdir");
         let main = dir.path().join("main.beancount");
         // b (unopened) uses accounts with no explicit `open`; auto_accounts
@@ -3102,54 +3301,39 @@ plugin "auto_accounts"
 
         let mut ls = LedgerState::new();
         ls.load(&main).expect("load ledger");
-        // Confirm the ledger recorded auto_accounts.
-        assert!(
-            ls.ledger()
-                .expect("ledger")
-                .plugins
-                .iter()
-                .any(|p| p.name == "auto_accounts"),
-            "fixture must record the auto_accounts plugin"
-        );
-        let (b_id, b_source): (u16, SourceText) = ls
-            .ledger()
-            .expect("ledger")
-            .source_map
-            .files()
-            .iter()
-            .find(|f| f.path.ends_with("b.beancount"))
-            .map(|f| (f.id as u16, f.source.clone()))
-            .expect("b in ledger");
 
-        // The current file (main, id 0) parses BROKEN — its recovered plugin
-        // list is empty, so injecting it would drop auto_accounts.
-        let broken_main = parse("@@@ not valid beancount\n");
-        assert!(!broken_main.errors.is_empty(), "fixture must be broken");
-        assert!(
-            broken_main.plugins.is_empty(),
-            "broken parse must recover no plugins (else the test proves nothing)"
-        );
+        // The current file (main, id 0), edited: a line that does not parse,
+        // and an unbalanced transaction after it.
+        let main_source = "plugin \"auto_accounts\"\ninclude \"b.beancount\"\ngarbage\n\
+                           2024-01-03 * \"y\"\n  Assets:New  5 USD\n  \
+                           Equity:Opening-Balances  -4 USD\n";
+        let main_parse = parse(main_source);
+        assert!(!main_parse.errors.is_empty(), "fixture must be broken");
 
-        let b_parse = parse(&b_source);
         let targets = [FileDiagTarget {
-            file_id: b_id,
-            source: &b_source,
-            parse: &b_parse,
+            file_id: 0,
+            source: main_source,
+            parse: &main_parse,
         }];
         let per_file = ledger_diagnostics_multi(
             &ls,
-            Some(0),
-            &broken_main,
-            &[],
+            &[(0u16, &main_parse)],
             &targets,
             PositionEncoding::Utf16,
         );
 
-        let b_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
+        let main_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
         assert!(
-            !b_codes.iter().any(|c| c == "E1001"),
-            "auto_accounts (from the ledger) must still synthesize opens for the \
-             unopened file even when the current file's parse is broken — got {b_codes:?}"
+            main_codes.iter().any(|c| c.starts_with('P')),
+            "the parse error is reported: {main_codes:?}"
+        );
+        assert!(
+            main_codes.iter().any(|c| c == "E3001"),
+            "the unbalanced transaction after it is validated: {main_codes:?}"
+        );
+        assert!(
+            !main_codes.iter().any(|c| c == "E1001"),
+            "auto_accounts, declared in the buffer, opens its accounts: {main_codes:?}"
         );
     }
 
@@ -3461,14 +3645,9 @@ plugin "auto_accounts"
     type Located = (String, String, u32);
 
     /// `(code, file, line)` of every diagnostic the multi-file path gives
-    /// for the journal `files[0]` includes, with the files at `open` open
-    /// and the one at `primary` the current buffer; and the same of what
-    /// the loader (`rledger check`) reports.
-    fn multi_file_vs_check(
-        files: &[(&str, &str)],
-        primary: usize,
-        open: &[usize],
-    ) -> (Vec<Located>, Vec<Located>) {
+    /// for the journal `files[0]` includes, with the files at `open` open;
+    /// and the same of what the loader (`rledger check`) reports.
+    fn multi_file_vs_check(files: &[(&str, &str)], open: &[usize]) -> (Vec<Located>, Vec<Located>) {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in files {
             std::fs::write(dir.path().join(name), text).unwrap();
@@ -3508,18 +3687,10 @@ plugin "auto_accounts"
                 parse,
             })
             .collect();
-        let overlay: Vec<(u16, &[Spanned<Directive>])> = open
-            .iter()
-            .map(|&i| (sources[i].0, parses[i].directives.as_slice()))
-            .collect();
-        let per_file = ledger_diagnostics_multi(
-            &state,
-            Some(sources[primary].0),
-            &parses[primary],
-            &overlay,
-            &targets,
-            PositionEncoding::Utf16,
-        );
+        let overlay: Vec<(u16, &ParseResult)> =
+            open.iter().map(|&i| (sources[i].0, &parses[i])).collect();
+        let per_file =
+            ledger_diagnostics_multi(&state, &overlay, &targets, PositionEncoding::Utf16);
         let mut lsp: Vec<Located> = per_file
             .iter()
             .enumerate()
@@ -3554,7 +3725,7 @@ plugin "auto_accounts"
                  Expenses:Yyyyyyyyyyyy\n",
             ),
         ];
-        let (lsp, check) = multi_file_vs_check(&files, 0, &[0, 1]);
+        let (lsp, check) = multi_file_vs_check(&files, &[0, 1]);
         assert_eq!(lsp, check);
     }
 
@@ -3576,7 +3747,7 @@ plugin "auto_accounts"
                 "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD}\n  Assets:Cash\n",
             ),
         ];
-        let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
+        let (lsp, check) = multi_file_vs_check(&files, &[0]);
         assert!(!check.is_empty(), "check refuses the sale");
         assert_eq!(lsp, check);
     }
@@ -3592,8 +3763,7 @@ plugin "auto_accounts"
     /// for them here. (`NotBooked` needs an unbooked ledger handed to
     /// validation, which no file can produce; its code is pinned in
     /// rustledger-validate.) `CostPriceCurrencyMismatch` is not here either: a
-    /// file can only reach it with the parse error for the same posting, and
-    /// the LSP holds back booking while a file has parse errors; see
+    /// file can only reach it with the parse error for the same posting; see
     /// `a_written_cost_price_currency_mismatch_buy_one_error_sale_two`.
     #[test]
     fn every_booking_failure_has_one_code_on_both_surfaces() {
@@ -3752,9 +3922,8 @@ plugin "auto_accounts"
     /// gets the parse error alone, as in beancount. In `rledger check` a sale
     /// gets it and the booking note that rledger did not book the sale
     /// (#2571), the only message saying why a later balance assertion fails.
-    /// The LSP holds back booking and validation while a file has parse
-    /// errors, so there the sale has the parse error alone (and no balance
-    /// assertion failure to explain).
+    /// The LSP books and validates a file with a parse error as `check` does
+    /// (#2949), so it reports the same two.
     #[test]
     fn a_written_cost_price_currency_mismatch_buy_one_error_sale_two() {
         let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
@@ -3765,9 +3934,9 @@ plugin "auto_accounts"
         let sale = "2024-02-01 * \"sell\"\n  Assets:Stock  -5 HOOL {100 USD} @ 90 EUR\n  \
                     Assets:Cash  450 EUR\n  Income:Gains\n\
                     2024-03-01 balance Assets:Stock 5 HOOL\n";
-        for (label, body, expected, expected_lsp) in [
-            ("buy", buy_bad.to_string(), 1, 1),
-            ("sale", format!("{buy_ok}{sale}"), 2, 1),
+        for (label, body, expected) in [
+            ("buy", buy_bad.to_string(), 1),
+            ("sale", format!("{buy_ok}{sale}"), 2),
         ] {
             let source = format!("{head}{body}");
             let dir = tempfile::tempdir().expect("temp dir");
@@ -3831,10 +4000,7 @@ plugin "auto_accounts"
                         || d.message.contains("not booked: its price currency")
                 })
                 .count();
-            assert_eq!(
-                lsp, expected_lsp,
-                "{label}: the LSP's diagnostics: {diags:?}"
-            );
+            assert_eq!(lsp, expected, "{label}: the LSP's diagnostics: {diags:?}");
         }
     }
 
@@ -3968,12 +4134,312 @@ plugin "auto_accounts"
         }];
         let _ = ledger_diagnostics_multi(
             &state,
-            Some(main_fid),
-            &main_parse,
-            &[(main_fid, main_parse.directives.as_slice())],
+            &[(main_fid, &main_parse)],
             &targets,
             PositionEncoding::Utf16,
         );
         assert_eq!(late_prices(), 1, "ledger_diagnostics_multi");
+    }
+
+    /// A BOM-led invalid token where a directive's argument belongs is one
+    /// `P0026`, and its range is the token's (#2928), not the whole
+    /// directive: the squiggle sits on the BOM, where "Remove BOM" is offered.
+    #[test]
+    fn test_parse_errors_to_diagnostics_bom_led_argument_ranges_over_the_token() {
+        let source = "2024-01-01 commodity USD\n2024-01-02 price USD 1 \u{FEFF}EUR\n  src: \"x\"\n";
+        let result = parse(source);
+        let diagnostics = parse_errors_to_diagnostics(&result, source, PositionEncoding::Utf16);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let d = &diagnostics[0];
+        assert_eq!(
+            d.code,
+            Some(lsp_types::NumberOrString::String("P0026".to_string()))
+        );
+        // `<BOM>EUR` on line 1: the BOM is one UTF-16 unit, at column 23.
+        assert_eq!(
+            d.range,
+            Range {
+                start: Position::new(1, 23),
+                end: Position::new(1, 27),
+            }
+        );
+    }
+
+    /// Drift guard (#2925): every option diagnostic is published in the file
+    /// its option is in, on its line, exactly where the loader locates it,
+    /// which is what `rledger check` prints. An included file's go on that
+    /// file, not the main one, and none is published twice.
+    #[test]
+    fn option_diagnostics_are_located_like_check() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.beancount"),
+            "option \"title\" \"a\"\ninclude \"sub.beancount\"\noption \"title\" \"b\"\n\
+             2024-01-01 open Assets:A\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sub.beancount"),
+            "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"   ; a \"quoted; note\"\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.beancount");
+        let name_of = |path: &str| {
+            std::path::Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let ledger = rustledger_loader::load(&main, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let mut check: Vec<Located> = ledger
+            .options
+            .warnings
+            .iter()
+            .map(|w| {
+                let site = w.site.as_ref().expect("located");
+                (w.code.to_string(), name_of(&site.file), site.line as u32)
+            })
+            .collect();
+        check.sort();
+        let expected: Vec<Located> = vec![
+            ("E7003".into(), "main.beancount".into(), 3),
+            ("E7008".into(), "sub.beancount".into(), 1),
+            ("E7009".into(), "sub.beancount".into(), 2),
+        ];
+        assert_eq!(check, expected);
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let sources: Vec<(u16, String, SourceText)> = state
+            .ledger()
+            .unwrap()
+            .source_map
+            .files()
+            .iter()
+            .map(|f| {
+                let name = name_of(&f.path.display().to_string());
+                (f.id as u16, name, f.source.clone())
+            })
+            .collect();
+        let parses: Vec<ParseResult> = sources.iter().map(|(_, _, src)| parse(src)).collect();
+        let targets: Vec<FileDiagTarget<'_>> = sources
+            .iter()
+            .zip(&parses)
+            .map(|((file_id, _, source), parse)| FileDiagTarget {
+                file_id: *file_id,
+                source,
+                parse,
+            })
+            .collect();
+        let per_file = ledger_diagnostics_multi(
+            &state,
+            &[(0u16, &parses[0])],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        let option_diags = |i: usize, diags: &[Diagnostic]| -> Vec<(Located, Range)> {
+            diags
+                .iter()
+                .filter(|d| get_code(d).starts_with("E70"))
+                .map(|d| {
+                    (
+                        (get_code(d), sources[i].1.clone(), d.range.start.line + 1),
+                        d.range,
+                    )
+                })
+                .collect()
+        };
+        let multi: Vec<(Located, Range)> = per_file
+            .iter()
+            .enumerate()
+            .flat_map(|(i, diags)| option_diags(i, diags))
+            .collect();
+        let mut lsp: Vec<Located> = multi.iter().map(|(l, _)| l.clone()).collect();
+        lsp.sort();
+        assert_eq!(lsp, check, "ledger_diagnostics_multi");
+        // The range covers the option directive on its line, not a trailing
+        // `; comment` or the whitespace before it.
+        let booking = multi
+            .iter()
+            .find(|(l, _)| l.0 == "E7009")
+            .map(|(_, r)| *r)
+            .unwrap();
+        assert_eq!(
+            booking,
+            Range {
+                start: Position::new(1, 0),
+                end: Position::new(1, 30),
+            }
+        );
+
+        // `all_diagnostics` with the ledger, each file as the current one.
+        let mut single: Vec<Located> = Vec::new();
+        for (i, (file_id, name, source)) in sources.iter().enumerate() {
+            let diags = all_diagnostics(
+                &parses[i],
+                source,
+                Some(&state),
+                Some(*file_id),
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            single.extend(
+                diags
+                    .iter()
+                    .filter(|d| get_code(d).starts_with("E70"))
+                    .map(|d| (get_code(d), name.clone(), d.range.start.line + 1)),
+            );
+        }
+        single.sort();
+        assert_eq!(single, check, "all_diagnostics");
+    }
+
+    /// With no ledger, the single-file fallback puts each option diagnostic
+    /// on its option's line in the buffer (#2925), as `check` on that file.
+    #[test]
+    fn single_file_option_diagnostics_are_on_their_lines() {
+        let source = "2024-01-01 open Assets:A\noption \"nosuch\" \"x\"\n\
+                      option \"title\" \"a\"\noption \"title\" \"b\"\n";
+        let diags = all_diagnostics(
+            &parse(source),
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let located: Vec<(String, u32)> = diags
+            .iter()
+            .filter(|d| get_code(d).starts_with("E70"))
+            .map(|d| (get_code(d), d.range.start.line + 1))
+            .collect();
+        assert_eq!(
+            located,
+            [("E7001".to_string(), 2), ("E7003".to_string(), 4)]
+        );
+    }
+
+    /// A buffer the loaded ledger does not include (`current_file_id` is
+    /// `None`) gets its own options' diagnostics, never the ledger's drawn on
+    /// its lines (#2925 review): the ledger's E7003 at line 3 of its main
+    /// file used to underline this buffer's third line.
+    #[test]
+    fn a_buffer_outside_the_ledger_gets_only_its_own_option_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "option \"title\" \"a\"\n2024-01-01 open Assets:A\noption \"title\" \"b\"\n",
+        )
+        .unwrap();
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        assert!(
+            state
+                .ledger()
+                .unwrap()
+                .options
+                .warnings
+                .iter()
+                .any(|w| w.code == "E7003"),
+            "fixture: the ledger has an option diagnostic"
+        );
+
+        let scratch = "2024-01-01 open Assets:First\n2024-01-02 open Assets:Second\n\
+                       2024-01-03 open Assets:Third\n";
+        let diags = all_diagnostics(
+            &parse(scratch),
+            scratch,
+            Some(&state),
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let options: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| get_code(d).starts_with("E70"))
+            .collect();
+        assert!(options.is_empty(), "{options:?}");
+
+        // Its own options are still checked, at their own lines.
+        let own = "2024-01-01 open Assets:First\noption \"nosuch\" \"x\"\n";
+        let diags = all_diagnostics(
+            &parse(own),
+            own,
+            Some(&state),
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let located: Vec<(String, u32)> = diags
+            .iter()
+            .filter(|d| get_code(d).starts_with("E70"))
+            .map(|d| (get_code(d), d.range.start.line + 1))
+            .collect();
+        assert_eq!(located, [("E7001".to_string(), 2)]);
+    }
+
+    #[test]
+    fn test_option_line_extent_stops_at_a_comment_outside_strings() {
+        assert_eq!(directive_line_extent("option \"a\" \"b\""), 14);
+        assert_eq!(directive_line_extent("option \"a\" \"b\"   ; note"), 14);
+        assert_eq!(directive_line_extent("option \"a\" \"b;c\" ; x"), 16);
+        assert_eq!(directive_line_extent("option \"a\" \"b\\\";c\""), 18);
+        assert_eq!(directive_line_extent("option \"a\" \"b\"  \r"), 14);
+    }
+}
+
+/// The LSP side of the drift guard for which findings every diagnostic
+/// surface reports (#2937): the editor's diagnostics are exactly what
+/// `rledger check`, WASM and the FFI report on the same ledgers. The LSP
+/// showed E1004 (closing an account with a balance), which `check` and
+/// bean-check do not report.
+#[cfg(test)]
+mod surface_agreement {
+    include!("../../../rustledger-loader/tests/surface_agreement/cases.rs");
+
+    use super::*;
+    use rustledger_parser::parse;
+
+    #[test]
+    fn diagnostics_report_the_shared_findings() {
+        for case in SURFACE_CASES {
+            let result = parse(case.source);
+            let diagnostics = all_diagnostics(
+                &result,
+                case.source,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let mut got: Vec<(String, u32, String)> = diagnostics
+                .iter()
+                .map(|d| {
+                    let code = match &d.code {
+                        Some(lsp_types::NumberOrString::String(s)) => s.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (code, d.range.start.line + 1, d.message.clone())
+                })
+                .collect();
+            got.sort();
+            let mut want: Vec<&Finding> = case.findings.iter().collect();
+            want.sort_by_key(|f| (f.code, f.line));
+            let context = format!("{}: {got:?}", case.name);
+            assert_eq!(got.len(), want.len(), "{context}");
+            for ((code, line, message), finding) in got.iter().zip(&want) {
+                assert_eq!(code, finding.code, "{context}");
+                assert_eq!(*line, finding.line, "{context}");
+                assert!(message.starts_with(finding.message), "{context}");
+            }
+        }
     }
 }

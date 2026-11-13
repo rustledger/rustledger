@@ -179,7 +179,7 @@ fn bom_removal_actions(
     let title = if edits.len() == 1 {
         "Remove BOM (U+FEFF)".to_string()
     } else {
-        format!("Remove {} BOM bytes (U+FEFF)", edits.len())
+        format!("Remove {} BOMs (U+FEFF)", edits.len())
     };
 
     #[allow(clippy::mutable_key_type)]
@@ -815,6 +815,62 @@ mod tests {
             )],
             "only the stray BOM is removed"
         );
+    }
+
+    /// A mid-line BOM starts an invalid run to the next blank (#2928), so
+    /// its error token is longer than the BOM: `<BOM>"x"`, `<BOM>#!d`,
+    /// `x<BOM>"y"`. The "Remove BOM" quick fix still finds each BOM inside
+    /// that token, and deletes exactly it.
+    #[test]
+    #[allow(clippy::mutable_key_type)]
+    fn test_bom_removal_actions_find_bom_inside_longer_error_token() {
+        use lsp_types::{
+            CodeActionContext, PartialResultParams, TextDocumentIdentifier, Uri,
+            WorkDoneProgressParams,
+        };
+        let uri: Uri = "file:///test.bean".parse().unwrap();
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range::new(Position::new(0, 0), Position::new(100, 0)),
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        for header in [
+            "2024-01-02 * \u{FEFF}\"x\"",
+            "2024-01-02 * \u{FEFF}\u{FEFF}\"x\"",
+            "2024-01-02 * \"x\" \u{FEFF}#!d",
+            "2024-01-02 * \"x\" \u{FEFF}#+x",
+            "2024-01-02 * \"x\" x\u{FEFF}\"y\"",
+            "2024-01-02 open \u{FEFF}Assets:C",
+            "2024-01-02 open \u{FEFF}\u{FEFF}Assets:C",
+        ] {
+            let source = format!("{header}\n  Assets:A  1 USD\n  Assets:B\n");
+            let result = parse(&source);
+            let mut edits: Vec<Range> = Vec::new();
+            for action in handle_code_actions(&params, &source, &result, PositionEncoding::Utf8)
+                .unwrap_or_default()
+            {
+                if let lsp_types::CodeActionOrCommand::CodeAction(action) = action
+                    && action.title.contains("BOM")
+                {
+                    let changes = action.edit.and_then(|e| e.changes).expect("changes");
+                    edits.extend(changes[&uri].iter().map(|e| {
+                        assert!(e.new_text.is_empty(), "{source:?}: a deletion");
+                        e.range
+                    }));
+                }
+            }
+            edits.sort_by_key(|r| r.start.character);
+            let want: Vec<Range> = source
+                .match_indices('\u{FEFF}')
+                .map(|(i, _)| {
+                    let i = u32::try_from(i).expect("small");
+                    Range::new(Position::new(0, i), Position::new(0, i + 3))
+                })
+                .collect();
+            assert_eq!(edits, want, "{source:?}");
+        }
     }
 
     #[test]

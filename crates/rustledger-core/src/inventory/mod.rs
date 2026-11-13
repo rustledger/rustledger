@@ -109,6 +109,102 @@ pub enum ReductionScope {
     CostBearingOnly,
 }
 
+/// A cost stated on an AVERAGE sale that its pool refuses: what
+/// [`average_claim_mismatch`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AverageClaimMiss {
+    /// The number the claim states: the per-unit cost, or the total for a
+    /// total or compound claim.
+    pub stated: Decimal,
+    /// The pool, exactly, in the claim's form: its average per unit, or what
+    /// the units sold cost at it.
+    pub exact: bigdecimal::BigDecimal,
+    /// Whether the claim is a total (`{{T}}`, `{a # b}`) rather than a
+    /// per-unit cost.
+    pub total: bool,
+}
+
+/// Whether a cost `written` on an AVERAGE sale of `reduction` units holds for
+/// the `pool` it sells from (#2603): `None` when it does, else what refutes
+/// it.
+///
+/// `pool` is the exact `(units, total)` [`Inventory::reduction_pool_exact`]
+/// sums. A claim holds when it is a correct rounding of the pool's exact
+/// value at the precision written ([`crate::written_allowance`]), inclusive
+/// of the half-way case:
+///
+/// * a per-unit cost `{v}`: `|v - average| <= w(v)`;
+/// * a total `{{T}}` is compared as a total, not divided first:
+///   `|T - average × units sold| <= w(T)`;
+/// * a compound `{a # b}` states `a × units + b`, each part rounded to its
+///   own places: `|a × units + b - average × units| <= units × w(a) + w(b)`.
+///
+/// The average is never rounded: the claim is compared as
+/// `|claim × units − total × denominator| <= allowance × |units|` in
+/// `BigDecimal`.
+///
+/// THE one rule for an AVERAGE claim. Booking refuses a sale whose claim this
+/// rejects (`check_average_spec` in rustledger-booking), and
+/// [`Inventory::is_booking_reduction`] reads a cost the pool accepts as
+/// naming the pool (#2958). Two copies of it would let booking accept a
+/// claim the reduction rule then reads as something else.
+#[must_use]
+pub fn average_claim_mismatch(
+    written: crate::CostNumber,
+    reduction: Decimal,
+    pool: &(bigdecimal::BigDecimal, bigdecimal::BigDecimal),
+) -> Option<AverageClaimMiss> {
+    use crate::{CostNumber, to_bigdecimal as big, written_allowance};
+    use bigdecimal::BigDecimal;
+    let reduction = reduction.abs();
+    let (pool_units, pool_total) = pool;
+    if reduction.is_zero() || pool_units == &BigDecimal::from(0) {
+        return None;
+    }
+    let r = big(reduction);
+    // The claim is `numerator / denominator` per unit; `allowance` is the one
+    // its written precision gives it, on the numerator (per unit, or on the
+    // total for a total or compound claim), and `stated` what a refusal
+    // quotes.
+    let (numerator, denominator, allowance, stated) = match written {
+        CostNumber::PerUnit { value } => (big(value), None, big(written_allowance(value)), value),
+        CostNumber::Total { value } => (big(value), Some(r), big(written_allowance(value)), value),
+        // Not something a ledger writes; booking's own output.
+        CostNumber::PerUnitFromTotal(booked) => (
+            big(booked.total),
+            Some(r),
+            big(written_allowance(booked.total)),
+            booked.total,
+        ),
+        CostNumber::Compound { per_unit, total } => {
+            let combined = big(per_unit) * &r + big(total);
+            let allowance = &r * big(written_allowance(per_unit)) + big(written_allowance(total));
+            // Booking already refused a compound whose combined total leaves
+            // `Decimal`'s range (`cost_overflow`), so this is the value it
+            // booked; the fallback only keeps the message total-shaped.
+            let stated = reduction
+                .checked_mul(per_unit)
+                .and_then(|v| v.checked_add(total))
+                .unwrap_or(total);
+            (combined, Some(r), allowance, stated)
+        }
+    };
+    let scale = denominator.clone().unwrap_or_else(|| BigDecimal::from(1));
+    let off = (&numerator * pool_units - pool_total * &scale).abs();
+    if off <= allowance * pool_units.abs() {
+        return None;
+    }
+    let exact = match &denominator {
+        None => pool_total / pool_units,
+        Some(r) => pool_total * r / pool_units,
+    };
+    Some(AverageClaimMiss {
+        stated,
+        exact,
+        total: denominator.is_some(),
+    })
+}
+
 /// Result of a booking operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookingResult {
@@ -2280,6 +2376,19 @@ impl Inventory {
     /// a positive amount: the units merge into it and take its acquisition
     /// date, backdating them. This books a new lot at the transaction date,
     /// with the same units and cost basis.
+    ///
+    /// Under `AVERAGE` the opposite side is one pool, and a sale's cost is a
+    /// claim about the pool's average, not a lot filter
+    /// ([`crate::average_claim_mismatch`], #2603). So there a spec also
+    /// matches the opposite side when the pool accepts it as a claim, and the
+    /// posting reduces (#2958). This is what keeps the answer the same for a
+    /// booked posting: booking writes the pool's average into an `AVERAGE`
+    /// sale's cost, and that average can equal the cost of a lot on the
+    /// sale's own side. Holding a short at 101 beside longs at 100 and 102,
+    /// `-1 X {}` reduces the longs and books as `-1 X {101 USD}`; read by
+    /// lots, that booked posting matched the short and no long, and became a
+    /// new short. Beancount has no `AVERAGE` booking, so there is no answer
+    /// of its to follow.
     #[must_use]
     pub fn is_booking_reduction(
         &self,
@@ -2320,15 +2429,18 @@ impl Inventory {
             self.is_reduced_by_scan(units, ReductionScope::CostBearingOnly),
             "the cached sign counts disagree with a scan of positions",
         );
-        opposite && !(own && self.adds_to_its_own_side(units, spec))
+        opposite && !(own && self.adds_to_its_own_side(units, spec, method))
     }
 
-    /// Whether `spec` matches a lot of `units`' own sign and no lot of the
-    /// opposite sign; see [`Self::is_booking_reduction`].
+    /// Whether `spec` matches a lot of `units`' own sign and nothing on the
+    /// opposite side: no lot there and, under `AVERAGE`, not the opposite
+    /// pool either, which a cost names when the pool accepts it as a claim
+    /// about its average ([`Self::average_pool_accepts`], #2958); see
+    /// [`Self::is_booking_reduction`].
     ///
     /// O(lots) of the currency. The caller gates it on the account holding
     /// cost-bearing lots of both signs, the only case it can be `true`.
-    fn adds_to_its_own_side(&self, units: &Amount, spec: &CostSpec) -> bool {
+    fn adds_to_its_own_side(&self, units: &Amount, spec: &CostSpec, method: BookingMethod) -> bool {
         // `{*}` is an operation on the whole pool (#2068), never this shape.
         //
         // And only a spec that NAMES a per-unit cost: that cost is what says
@@ -2371,6 +2483,53 @@ impl Inventory {
             }
         }
         own_side_match
+            && !(method == BookingMethod::Average && self.average_pool_accepts(units, spec))
+    }
+
+    /// Whether `spec`, on an `AVERAGE` sale of `units`, is a cost the pool it
+    /// faces accepts as a claim about its average (#2958); see
+    /// [`Self::is_booking_reduction`].
+    ///
+    /// The pool is the one `AVERAGE`'s reduction takes
+    /// ([`Self::reduction_pool_exact`]), and the claim is held to it by
+    /// [`crate::average_claim_mismatch`], the rule booking refuses a sale by,
+    /// so a cost booking accepts on a sale is one this reads as naming the
+    /// pool.
+    ///
+    /// Only a spec an `AVERAGE` sale can carry: no date or label, which the
+    /// pool, one undated and unlabeled lot, does not have (#2627). A spec
+    /// with one stays a lot filter, so a booked augmentation, whose date
+    /// booking filled in, keeps its answer. And only a pool held in the
+    /// spec's cost currency: the pool's lots in another currency are not
+    /// what the spec names, and a pool mixing currencies has no average.
+    fn average_pool_accepts(&self, units: &Amount, spec: &CostSpec) -> bool {
+        let Some(number) = spec.number else {
+            return false;
+        };
+        if spec.date.is_some() || spec.label.is_some() {
+            return false;
+        }
+        let positive = units.number.is_sign_positive();
+        let mut pool_currency: Option<&Currency> = spec.currency.as_ref();
+        for lot in self.positions.iter() {
+            let Some(cost) = lot.cost.as_ref() else {
+                continue;
+            };
+            if lot.units.currency != units.currency
+                || lot.units.number.is_zero()
+                || lot.units.number.is_sign_positive() == positive
+            {
+                continue;
+            }
+            match pool_currency {
+                Some(currency) if *currency != cost.currency => return false,
+                Some(_) => {}
+                None => pool_currency = Some(&cost.currency),
+            }
+        }
+        self.reduction_pool_exact(units).is_some_and(|pool| {
+            crate::average_claim_mismatch(number, units.number, &pool).is_none()
+        })
     }
 
     /// Get the total book value (cost basis) for a currency.
@@ -6312,6 +6471,141 @@ mod tests {
         assert!(!inv.is_booking_reduction(&buy, Some(&spec), BookingMethod::Strict));
     }
 
+    /// An inventory holding a short of 1 X at `short_cost` beside longs of
+    /// 5 X at 100 USD and 5 X at `other_long` (the #2958 shape).
+    fn short_beside_longs(short_cost: Decimal, other_long: (Decimal, &str)) -> Inventory {
+        let mut inv = Inventory::new();
+        for (units, cost, currency) in [
+            (dec!(5), dec!(100), "USD"),
+            (dec!(5), other_long.0, other_long.1),
+            (dec!(-1), short_cost, "USD"),
+        ] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "X"),
+                Cost::new(cost, currency).with_date(date(2024, 1, 5)),
+            ))
+            .expect("fixture fits in Decimal");
+        }
+        inv
+    }
+
+    fn per_unit(value: Decimal, currency: &str) -> CostSpec {
+        CostSpec::empty()
+            .with_number(crate::CostNumber::PerUnit { value })
+            .with_currency(currency)
+    }
+
+    /// Under AVERAGE a sale's cost is a claim about the pool's average, so a
+    /// cost the pool accepts reduces it even when a lot on the sale's own side
+    /// carries that cost too (#2958). Booking writes the pool's average into
+    /// an AVERAGE sale it books, so this is what keeps the booked posting
+    /// reading as the reduction it was.
+    #[test]
+    fn is_booking_reduction_average_reads_a_pool_claim_as_a_reduction_2958() {
+        let inv = short_beside_longs(dec!(101), (dec!(102), "USD"));
+        let sell = Amount::new(dec!(-1), "X");
+        // The longs average exactly 101: the claim holds, so it sells them.
+        assert!(inv.is_booking_reduction(
+            &sell,
+            Some(&per_unit(dec!(101), "USD")),
+            BookingMethod::Average
+        ));
+        // Written to more places, still the pool's average.
+        assert!(inv.is_booking_reduction(
+            &sell,
+            Some(&per_unit(dec!(101.00), "USD")),
+            BookingMethod::Average
+        ));
+        // Lot-matching methods have no pool: 101 names the short, and the
+        // sale adds to it (#2384), as before.
+        for method in [
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Hifo,
+            BookingMethod::Strict,
+        ] {
+            assert!(
+                !inv.is_booking_reduction(&sell, Some(&per_unit(dec!(101), "USD")), method),
+                "{method:?}"
+            );
+        }
+        // A date or label is not something the pool has: the spec stays a lot
+        // filter, which is what a booked augmentation (dated by booking) is.
+        let dated = per_unit(dec!(101), "USD").with_date(date(2024, 1, 6));
+        assert!(!inv.is_booking_reduction(&sell, Some(&dated), BookingMethod::Average));
+        let labeled = per_unit(dec!(101), "USD").with_label("lot");
+        assert!(!inv.is_booking_reduction(&sell, Some(&labeled), BookingMethod::Average));
+    }
+
+    /// A cost that is not the pool's average still adds to its own side under
+    /// AVERAGE (#2384), and a pool in another cost currency, or mixing two,
+    /// accepts no claim (#2958).
+    #[test]
+    fn is_booking_reduction_average_keeps_the_own_side_exception_2958() {
+        let sell = Amount::new(dec!(-1), "X");
+        // The short at 105: the longs average 101, so 105 names the short.
+        let inv = short_beside_longs(dec!(105), (dec!(102), "USD"));
+        assert!(!inv.is_booking_reduction(
+            &sell,
+            Some(&per_unit(dec!(105), "USD")),
+            BookingMethod::Average
+        ));
+        // Mixed cost currencies on the long side: no average to claim, and
+        // the short at 101 USD is what 101 USD names.
+        let mixed = short_beside_longs(dec!(101), (dec!(102), "EUR"));
+        assert!(!mixed.is_booking_reduction(
+            &sell,
+            Some(&per_unit(dec!(101), "USD")),
+            BookingMethod::Average
+        ));
+        // A pool held in another currency is not named by the claim.
+        let mut eur = Inventory::new();
+        for (units, cost, currency) in [(dec!(5), dec!(101), "EUR"), (dec!(-1), dec!(101), "USD")] {
+            eur.add(Position::with_cost(
+                Amount::new(units, "X"),
+                Cost::new(cost, currency).with_date(date(2024, 1, 5)),
+            ))
+            .expect("fixture fits in Decimal");
+        }
+        assert!(!eur.is_booking_reduction(
+            &sell,
+            Some(&per_unit(dec!(101), "USD")),
+            BookingMethod::Average
+        ));
+    }
+
+    /// A pool whose average does not terminate: booking writes it rounded to
+    /// `Decimal`'s digits, and that rounded average, on a short beside the
+    /// longs, must still read as naming the longs (#2958).
+    #[test]
+    fn is_booking_reduction_average_accepts_its_own_rounded_average_2958() {
+        let mut inv = Inventory::new();
+        // 1 at 100 and 2 at 101: the average is 100.666…
+        for (units, cost) in [(dec!(1), dec!(100)), (dec!(2), dec!(101))] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "X"),
+                Cost::new(cost, "USD").with_date(date(2024, 1, 5)),
+            ))
+            .expect("fixture fits in Decimal");
+        }
+        let rounded = dec!(302) / dec!(3);
+        assert!(
+            crate::fills_decimal(rounded),
+            "the average is rounded: {rounded}"
+        );
+        inv.add(Position::with_cost(
+            Amount::new(dec!(-1), "X"),
+            Cost::new(rounded, "USD").with_date(date(2024, 1, 5)),
+        ))
+        .expect("fixture fits in Decimal");
+        let sell = Amount::new(dec!(-1), "X");
+        assert!(inv.is_booking_reduction(
+            &sell,
+            Some(&per_unit(rounded, "USD")),
+            BookingMethod::Average
+        ));
+    }
+
     /// An account name whose `Borrow<str>` counts its calls: a `BTreeSet`
     /// query reaches a key's name only through it, so the count is how many
     /// keys a query read.
@@ -6336,6 +6630,19 @@ mod tests {
     /// query: a filtered scan of every key, correct or not, fails the bound.
     #[test]
     fn for_each_strict_subaccount_visits_exactly_the_strict_subtree() {
+        // Shrunk under Miri, whose per-step cost made the full size outrun
+        // the weekly job's 40-minute budget: the oracle below filters every
+        // name per query, so the test is quadratic in the set (about 1,240
+        // queries over 8,655 names natively, 10.7 million prefix checks).
+        // Under Miri the tree is three levels deep with full fan-out only
+        // under each level's first parent: 830 names, still with every
+        // segment shape and root, so a filtered scan still reads over four
+        // times the 200-key bound. Every 23rd name is a query (41 in all).
+        let (depth, wide, step, min_names) = if cfg!(miri) {
+            (3, 1, 23, 800)
+        } else {
+            (4, 12, 7, 5_000)
+        };
         let roots = ["Assets", "Assets2", "Assets-X", "Liabilities", "Équité"];
         let segments = [
             "A", "AB", "A-B", "A_B", "A0", "Ab", "Café", "日本", "Ünï", "Z",
@@ -6344,12 +6651,12 @@ mod tests {
         for root in roots {
             names.insert(root.to_string());
             let mut frontier = vec![root.to_string()];
-            for _depth in 0..4 {
+            for _depth in 0..depth {
                 let mut next = Vec::new();
                 for (i, parent) in frontier.iter().enumerate() {
                     // Keep the tree large but bounded: every segment under
                     // the first parents, fewer further along.
-                    let take = if i < 12 { segments.len() } else { 3 };
+                    let take = if i < wide { segments.len() } else { 3 };
                     for segment in &segments[..take] {
                         let child = format!("{parent}:{segment}");
                         names.insert(child.clone());
@@ -6361,10 +6668,10 @@ mod tests {
         }
         let index: std::collections::BTreeSet<CountedName> =
             names.iter().cloned().map(CountedName).collect();
-        assert!(index.len() > 5_000, "{}", index.len());
+        assert!(index.len() > min_names, "{}", index.len());
 
         // Every name in the set, and names that are not in it.
-        let mut queries: Vec<String> = names.iter().step_by(7).cloned().collect();
+        let mut queries: Vec<String> = names.iter().step_by(step).cloned().collect();
         queries.extend(["Assets:A:Missing", "Assets:Ä", "Nope", "Assets:"].map(String::from));
 
         let mut reads = 0;

@@ -374,4 +374,29 @@ mod tests {
             "posting range must end at its content, not the hardcoded col 50"
         );
     }
+
+    /// #2932: an invalid token after the payee keeps the entry in the outline
+    /// under its payee, with no narration, where the payee was shown as the
+    /// narration.
+    #[test]
+    fn test_document_symbols_invalid_token_after_payee_keeps_the_payee() {
+        let source = "2024-01-15 * \"Cafe\" \u{11}\"x\"\n  Assets:Bank  -5 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        assert_eq!(result.errors.len(), 1, "the invalid token is reported");
+        let params = DocumentSymbolParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let Some(DocumentSymbolResponse::Nested(symbols)) =
+            handle_document_symbols(&params, source, &result, PositionEncoding::Utf16)
+        else {
+            panic!("expected nested symbols");
+        };
+        assert_eq!(symbols.len(), 1, "the transaction is kept");
+        assert_eq!(symbols[0].name, "2024-01-15 Cafe");
+        assert_eq!(symbols[0].detail, None, "no narration, not the payee");
+    }
 }

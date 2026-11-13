@@ -12,7 +12,7 @@ use rustledger_plugin::PluginManager;
 // The canonical advisory-only predicate lives in `rustledger-validate` so that
 // `check` (which hides these, mirroring bean-check) and `lint` share one source
 // of truth for which codes are advisory.
-use rustledger_plugin::escape_untrusted_text;
+use rustledger_plugin::{escape_untrusted_line, escape_untrusted_text};
 use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -340,6 +340,18 @@ pub fn run_with_writer<W: Write>(
                 let errors = &errors[..];
 
                 if json_mode {
+                    // A deliberate copy of
+                    // `rustledger_loader::parse_errors_to_ledger_errors`, which
+                    // the FFI reports parse errors through: the same code,
+                    // phase, message and character line and column, rendered
+                    // here inline because `check` re-reads the file and filters
+                    // by rule before rendering. The `parse-error-in-include`
+                    // case of `tests/ffi_check_parity/cases.rs` pins the two
+                    // to agree (code, line, column, message). Revisit, and
+                    // call the loader function here instead, if this arm gains
+                    // a field that function does not produce, or if `check`
+                    // stops re-reading the file (review of #2946).
+                    //
                     // One line-start table per file: `line_col_in` per span
                     // rescanned the file from byte 0, so a file with
                     // thousands of parse errors took seconds (#2632).
@@ -432,7 +444,10 @@ pub fn run_with_writer<W: Write>(
                 }
                 error_count += 1;
             }
-            LoadError::IncludeCycle { cycle } => {
+            LoadError::IncludeCycle {
+                cycle,
+                include_site,
+            } => {
                 // Delegate to the canonical Display impl on
                 // `LoadError::IncludeCycle` so the wording lives in
                 // exactly one place (the `#[error(...)]` attribute on
@@ -448,12 +463,32 @@ pub fn run_with_writer<W: Write>(
                 // diagnostic must not change the exit code.
                 let shown = rules.keep("E0002");
                 if json_mode && shown {
+                    // At the `include` that closed the cycle, as for an
+                    // unreadable include above and as the loader's `LOAD`
+                    // error (and so the LSP) locates it (#2959).
+                    let (file, line, column, end_line, end_column) = include_site
+                        .as_ref()
+                        .and_then(|site| {
+                            let map = &load_result.source_map;
+                            let start = map.locate(site.file_id, site.span.start)?;
+                            let end = map.locate(site.file_id, site.span.end)?;
+                            Some((
+                                site.file.display().to_string(),
+                                start.line,
+                                start.column,
+                                end.line,
+                                end.column,
+                            ))
+                        })
+                        .unwrap_or_else(|| {
+                            (cycle.first().cloned().unwrap_or_default(), 1, 1, 1, 1)
+                        });
                     diagnostics.push(JsonDiagnostic {
-                        file: cycle.first().cloned().unwrap_or_default(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
+                        file,
+                        line,
+                        column,
+                        end_line,
+                        end_column,
                         severity: "error".to_string(),
                         phase: "parse".to_string(),
                         code: "E0002".to_string(),
@@ -689,23 +724,35 @@ pub fn run_with_writer<W: Write>(
     let main_file_str = file.display().to_string();
     let mut option_error_count = 0;
     let mut option_warning_count = 0;
-    for warning in &load_result.options.warnings {
-        let is_error = warning.is_error();
+    // Through the loader's canonical mapping, which the LSP, WASM and the FFI
+    // read too: severity, code, phase and location are decided there.
+    for option_error in rustledger_loader::option_warnings_to_errors(&load_result.options.warnings)
+    {
+        let is_error = option_error.severity == rustledger_loader::ErrorSeverity::Error;
         let severity = if is_error { "error" } else { "warning" };
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.
-        let shown = rules.keep(warning.code);
+        let shown = rules.keep(&option_error.code);
+        // At the option's own file and line, as bean-check reports it
+        // (#2925); the top of the main file only for an option with no site.
+        let site = option_error
+            .location
+            .as_ref()
+            .map(|loc| (loc.file.display().to_string(), loc.line, loc.column));
         if json_mode && shown {
+            let (site_file, site_line, site_column) = site
+                .clone()
+                .unwrap_or_else(|| (main_file_str.clone(), 1, 1));
             diagnostics.push(JsonDiagnostic {
-                file: main_file_str.clone(),
-                line: 1,
-                column: 1,
-                end_line: 1,
-                end_column: 1,
+                file: site_file,
+                line: site_line,
+                column: site_column,
+                end_line: site_line,
+                end_column: site_column,
                 severity: severity.to_string(),
-                phase: warning.phase().to_string(),
-                code: warning.code.to_string(),
-                message: warning.message.clone(),
+                phase: option_error.phase.clone(),
+                code: option_error.code.clone(),
+                message: option_error.message.clone(),
                 hint: None,
                 context: None,
             });
@@ -714,11 +761,16 @@ pub fn run_with_writer<W: Write>(
             }
         } else if !args.quiet && shown {
             // An option's message quotes its value from the ledger (#2538).
+            // `file:line: severity[code]: message`, the compact form the
+            // other located diagnostics take when no snippet is rendered.
+            let location = site.map_or_else(String::new, |(site_file, site_line, _)| {
+                format!("{}:{site_line}: ", escape_untrusted_line(&site_file))
+            });
             writeln!(
                 stdout,
-                "{severity}[{}]: {}",
-                warning.code,
-                escape_untrusted_text(&warning.message)
+                "{location}{severity}[{}]: {}",
+                option_error.code,
+                escape_untrusted_text(&option_error.message)
             )?;
         }
         if is_error {
@@ -1348,6 +1400,32 @@ mod tests {
             code, failure,
             "an unreadable ledger must not report success"
         );
+    }
+
+    /// #2959: JSON places an include cycle on the `include` that closes it,
+    /// in the file that holds it, as the loader's `LOAD` error and the LSP
+    /// do, where it gave line 1 of the first file of the cycle.
+    #[test]
+    fn json_locates_an_include_cycle_at_its_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.beancount");
+        let b = dir.path().join("b.beancount");
+        std::fs::write(&a, "include \"b.beancount\"\n").unwrap();
+        std::fs::write(&b, "2024-01-01 open Assets:B\ninclude \"a.beancount\"\n").unwrap();
+
+        let (_, out) = check_exit(&a, &["--format", "json"]);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        let cycle = v["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .find(|d| d["code"] == "E0002")
+            .expect("the cycle");
+        assert!(
+            cycle["file"].as_str().unwrap().ends_with("b.beancount"),
+            "{cycle}"
+        );
+        assert_eq!((&cycle["line"], &cycle["column"]), (&2.into(), &1.into()));
     }
 
     /// A flag that silently does nothing in one output format is worse than a

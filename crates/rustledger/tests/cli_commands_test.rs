@@ -1966,6 +1966,180 @@ fn test_check_multi_entity_include_duplicate_option_ok() {
     );
 }
 
+/// Issue #2925: an invalid option in an included file is its converter's
+/// error at the included file's line, exit 1, as bean-check reports it; a
+/// valid one is the E7009 warning at its line. Drift guard: `check`'s JSON
+/// and text put every option diagnostic exactly where the loader locates it
+/// (`OptionWarning::site`), the same sites the LSP and WASM drift guards
+/// (`option_diagnostics_are_located_like_check`,
+/// `ledger_option_errors_are_located_like_check`) compare against.
+#[test]
+fn test_check_option_diagnostics_are_located_like_the_loader() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.beancount");
+    let sub = dir.path().join("sub.beancount");
+    std::fs::write(
+        &main,
+        "option \"title\" \"a\"\ninclude \"sub.beancount\"\noption \"title\" \"b\"\n\
+         2024-01-01 open Assets:A\n",
+    )
+    .expect("write main");
+    std::fs::write(
+        &sub,
+        "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"\n\
+         option \"inferred_tolerance_default\" \"USD:-0.01\"\n",
+    )
+    .expect("write sub");
+
+    let ledger =
+        rustledger_loader::load(&main, &rustledger_loader::LoadOptions::default()).expect("load");
+    let loader: Vec<(String, String, u64)> = ledger
+        .options
+        .warnings
+        .iter()
+        .map(|w| {
+            let site = w.site.as_ref().expect("a loaded option has a site");
+            (w.code.to_string(), site.file.clone(), site.line as u64)
+        })
+        .collect();
+    let (m, s) = (main.display().to_string(), sub.display().to_string());
+    assert_eq!(
+        loader,
+        [
+            ("E7003".to_string(), m.clone(), 3),
+            ("E7008".to_string(), s.clone(), 1),
+            ("E7009".to_string(), s.clone(), 2),
+            ("E7002".to_string(), s.clone(), 3),
+        ]
+    );
+
+    let output = Command::new(&rledger)
+        .args(["check", "--format", "json", "--no-cache"])
+        .arg(&main)
+        .output()
+        .expect("Failed to run rledger check");
+    assert_eq!(output.status.code(), Some(1), "two included errors: exit 1");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check --format json is JSON");
+    let json_located: Vec<(String, String, u64)> = json["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .filter(|d| d["code"].as_str().is_some_and(|c| c.starts_with("E70")))
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap().to_string(),
+                d["file"].as_str().unwrap().to_string(),
+                d["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(json_located, loader, "check --format json");
+
+    let output = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .arg(&main)
+        .output()
+        .expect("Failed to run rledger check");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        format!("{m}:3: warning[E7003]: "),
+        format!("{s}:1: error[E7008]: "),
+        format!("{s}:2: warning[E7009]: "),
+        format!("{s}:3: error[E7002]: "),
+    ] {
+        assert!(
+            stdout.lines().any(|l| l.starts_with(&line)),
+            "missing {line:?} in:\n{stdout}"
+        );
+    }
+
+    // Only valid values in the include: E7009 warnings, exit 0.
+    std::fs::write(&sub, "option \"booking_method\" \"FIFO\"\n").expect("rewrite sub");
+    std::fs::write(
+        &main,
+        "include \"sub.beancount\"\n2024-01-01 open Assets:A\n",
+    )
+    .expect("rewrite main");
+    let output = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .arg(&main)
+        .output()
+        .expect("Failed to run rledger check");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with(&format!("{s}:1: warning[E7009]: "))),
+        "{stdout}"
+    );
+}
+
+/// `rledger query` prints the option diagnostics with their file and line,
+/// through the same mapping as `check` (#2925).
+#[test]
+fn test_query_option_diagnostics_are_located() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.beancount");
+    let sub = dir.path().join("sub.beancount");
+    std::fs::write(
+        &main,
+        "include \"sub.beancount\"\n2024-01-01 open Assets:A\n",
+    )
+    .expect("write main");
+    std::fs::write(&sub, "\noption \"name_equity\" \"capital\"\n").expect("write sub");
+    let output = Command::new(&rledger)
+        .args(["query", "--no-cache"])
+        .arg(&main)
+        .arg("SELECT account")
+        .output()
+        .expect("Failed to run rledger query");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let want = format!("{}:2: E7008: ", sub.display());
+    assert!(
+        stderr.lines().any(|l| l.starts_with(&want)),
+        "missing {want:?} in:\n{stderr}"
+    );
+}
+
+/// `rledger query` escapes an option diagnostic's message, which quotes the
+/// ledger's option value, before a terminal reads it, as the diagnostics
+/// sink's `Diagnostic::to_line` does (#2538, #2925).
+#[test]
+fn test_query_option_diagnostic_message_is_escaped() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.beancount");
+    std::fs::write(
+        &main,
+        "option \"name_equity\" \"cap\u{1b}[31mital\"\n2024-01-01 open Assets:A\n",
+    )
+    .expect("write main");
+    let output = Command::new(&rledger)
+        .args(["query", "--no-cache"])
+        .arg(&main)
+        .arg("SELECT account")
+        .output()
+        .expect("Failed to run rledger query");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("E7008: "))
+        .unwrap_or_else(|| panic!("no E7008 line in:\n{stderr}"));
+    assert!(
+        line.contains("cap\\u{1b}[31mital"),
+        "the value is not escaped in {line:?}"
+    );
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "a raw escape reached stderr:\n{stderr}"
+    );
+}
+
 /// Conversely, a single non-repeatable option must NOT be flagged (no false
 /// positive on the deliberate E7003 strictness).
 #[test]

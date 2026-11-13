@@ -96,6 +96,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import resource
 import selectors
 import signal
 import subprocess
@@ -305,6 +306,10 @@ def _spawn(items):
         # so the child never returns into the parent's code.
         code = 3
         try:
+            # No core file. beancount segfaults on some inputs (see the module
+            # doc), and the harness records those as `crash`, so a core is pure
+            # waste: 50-70 MB each, and fuzz runs wrote thousands of them.
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             _worker(items, w)
             code = 0
         finally:

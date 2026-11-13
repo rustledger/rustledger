@@ -4,7 +4,7 @@ use std::path::Path;
 use wasm_bindgen::prelude::*;
 
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+use rustledger_loader::{LoadError, LoadOptions, Loader, VirtualFileSystem, process};
 use rustledger_parser::{ParseResult as ParserResult, parse as parse_beancount};
 
 use crate::types::{Error, LedgerOptions, Severity};
@@ -13,20 +13,103 @@ use crate::utils::LineLookup;
 /// Convert a parser [`rustledger_parser::ParseError`] into the rich WASM
 /// [`Error`]: stable code (`P####`), `phase: "parse"`, hint, and the full
 /// source span (start + end line/column).
+///
+/// Located through the loader's [`rustledger_loader::LineIndex`], so the
+/// columns count characters as `rledger check` counts them; they counted
+/// bytes, and read high after a BOM or a multi-byte character (#2946).
 pub fn parse_error_to_wasm(
     e: &rustledger_parser::ParseError,
-    lookup: &LineLookup,
+    index: &rustledger_loader::LineIndex<'_>,
     file: Option<String>,
 ) -> Error {
-    Error::new(e.to_string())
+    parse_error_fields(e).with_file(file).with_span(
+        line_col_u32(index.line_col(e.span.start)),
+        line_col_u32(index.line_col(e.span.end)),
+    )
+}
+
+/// A parse error's message, code (`P` and its four-digit kind code), phase
+/// (`parse`) and hint, unlocated: WASM's one mapping of them, which
+/// [`parse_error_to_wasm`] and the multi-file
+/// [`crate::api::load_errors_to_errors`] both build on.
+///
+/// For the single-source surfaces (`parse`, `format`, `validateSource`,
+/// `ParsedLedger`) only: a deliberate copy of the loader's
+/// [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the FFI),
+/// not a call to it, because that wants a `LoadError` and its `SourceMap`,
+/// which those surfaces never build. The multi-file surfaces have both, so
+/// they call the loader's function and locate the result with
+/// [`ledger_error_to_wasm`] (#2961, #2964). That function points back here,
+/// and `parse_error_mapping_parity` below pins the single-source and
+/// multi-file surfaces and the loader to agree on every field (message,
+/// code, phase, hint, file, line, column, end, severity). Revisit if the
+/// single-source surfaces come to build a `LoadError` and `SourceMap`, at
+/// which point they should map through the loader's function too.
+pub fn parse_error_fields(e: &rustledger_parser::ParseError) -> Error {
+    Error::new(e.message())
         .with_code(format!("P{:04}", e.kind_code()))
         .with_phase("parse")
         .with_hint(e.hint.clone())
-        .with_file(file)
-        .with_span(
-            lookup.byte_to_line_col(e.span.start),
-            lookup.byte_to_line_col(e.span.end),
-        )
+}
+
+/// Every parse error of `source` as [`parse_error_to_wasm`] reports it. The
+/// line index is built only when there is an error to locate.
+pub fn parse_errors_to_wasm<'e>(
+    errors: impl IntoIterator<Item = &'e rustledger_parser::ParseError>,
+    source: &str,
+) -> Vec<Error> {
+    let mut index = None;
+    errors
+        .into_iter()
+        .map(|e| {
+            let index = index.get_or_insert_with(|| rustledger_loader::LineIndex::new(source));
+            parse_error_to_wasm(e, index, None)
+        })
+        .collect()
+}
+
+/// A loader `(line, column)` as the WASM `Error`'s `u32`s.
+fn line_col_u32((line, column): (usize, usize)) -> (u32, u32) {
+    (
+        u32::try_from(line).unwrap_or(u32::MAX),
+        u32::try_from(column).unwrap_or(u32::MAX),
+    )
+}
+
+/// A loader [`rustledger_loader::LedgerError`] as the WASM [`Error`], placed
+/// through `source_map` (the load's): every field of `From<LedgerError>`
+/// (message, code, phase, hint, severity, and the start the loader located),
+/// plus the end of `source_span`, located in `file_id` by the loader's
+/// canonical [`rustledger_loader::SourceMap::locate`].
+///
+/// What every surface holding the load's `SourceMap` converts a loader error
+/// with. The multi-file surfaces converted through `From<LedgerError>`
+/// alone, which cannot locate the end, so a validation finding, a booking
+/// error or an include's `LOAD` error had a null end there and an end on
+/// `validateSource` (#2964).
+///
+/// The end stays null where the error has no span or no start, and where
+/// `file_id` is not a source file of the map (a placeholder location, such
+/// as a plugin's `<auto_accounts>`, has a line and no text to end in).
+pub fn ledger_error_to_wasm(
+    e: rustledger_loader::LedgerError,
+    source_map: &rustledger_loader::SourceMap,
+) -> Error {
+    let end = match (e.location.as_ref(), e.source_span, e.file_id) {
+        (Some(_), Some((_, end)), Some(file_id))
+            if source_map.get(usize::from(file_id)).is_some() =>
+        {
+            source_map.locate(file_id, end)
+        }
+        _ => None,
+    };
+    let mut out = Error::from(e);
+    if let Some(end) = end {
+        let (end_line, end_column) = line_col_u32((end.line, end.column));
+        out.end_line = Some(end_line);
+        out.end_column = Some(end_column);
+    }
+    out
 }
 
 /// Convert a [`rustledger_validate::ValidationError`] into the rich WASM
@@ -34,9 +117,14 @@ pub fn parse_error_to_wasm(
 /// note, else context), and the source span when present. When the error has
 /// no span, falls back to `fallback_line` (the directive's date→line) to
 /// preserve the prior location behavior.
+///
+/// The span is located in `source_map` (the load's, holding the source as
+/// file 0) through the loader's canonical, [`rustledger_loader::SourceMap::locate`],
+/// so the line and column are the ones `rledger check` and the FFI report;
+/// the column counted bytes before (#2946).
 pub fn validation_error_to_wasm(
     e: &rustledger_validate::ValidationError,
-    lookup: &LineLookup,
+    source_map: &rustledger_loader::SourceMap,
     file: Option<String>,
     fallback_line: Option<u32>,
 ) -> Error {
@@ -61,10 +149,23 @@ pub fn validation_error_to_wasm(
         .with_file(file);
     // A span is a place in the one source text (file id 0) only; one a
     // plugin's directive carries (a placeholder id) says nothing about it.
-    if let Some(span) = e.span.filter(|_| e.file_id.is_none_or(|id| id == 0)) {
+    // The FFI component's `semantic_validation_errors`
+    // (`rustledger-ffi-component/src/convert.rs`) applies the same file-id
+    // rule and points back here; change both together (#2935). The location
+    // is not a copy: both read it from `SourceMap::locate`.
+    let located = e
+        .span
+        .filter(|_| e.file_id.is_none_or(|id| id == 0))
+        .and_then(|span| {
+            Some((
+                source_map.locate(0, span.start)?,
+                source_map.locate(0, span.end)?,
+            ))
+        });
+    if let Some((start, end)) = located {
         out = out.with_span(
-            lookup.byte_to_line_col(span.start),
-            lookup.byte_to_line_col(span.end),
+            line_col_u32((start.line, start.column)),
+            line_col_u32((end.line, end.column)),
         );
     } else {
         out.line = fallback_line;
@@ -82,19 +183,32 @@ pub struct ProcessedLedger {
     /// placeholder locations plugins gave the directives they created, so a
     /// query resolves both (#2825). Empty when the source did not load.
     pub source_map: rustledger_loader::SourceMap,
+    /// The transactions booking refused, as indices into `directives`
+    /// ([`rustledger_loader::Ledger::booking_refused`]): [`run_validation`]
+    /// sets them aside as the validating loader does. Empty when the source
+    /// did not load.
+    pub booking_refused: Vec<usize>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
     /// `errors` on purpose.
     ///
-    /// `errors` is what [`has_fatal`] gates on, and that gate means "the
-    /// directive stream is unsound to work with" — a parse or booking failure.
-    /// An invalid option does not make directives unsound, so folding these in
-    /// here would make [`run_validation`] skip, and a ledger with a typo'd
-    /// option would silently stop reporting its real validation errors (the
-    /// exact drop #2292 fixed for plugin warnings). Surfaces that *report*
-    /// diagnostics merge this in; surfaces that gate on soundness do not.
+    /// `errors` is what [`has_fatal`] gates on: whether a surface may work
+    /// with the directive stream, and whether a ledger is valid. An invalid
+    /// option is reported but does not make the directives unsound, so it is
+    /// kept out of that gate. ([`run_validation`] no longer gates on `errors`
+    /// at all: it validates whatever loaded, as `rledger check` does, #2937.)
+    /// Surfaces that *report* diagnostics merge this in; surfaces that gate on
+    /// soundness do not.
     pub option_errors: Vec<Error>,
+    /// The option diagnostics a query lists
+    /// ([`rustledger_loader::Ledger::query_option_errors`], the rule every
+    /// query surface shares with the FFI's): `option_errors` with a rejected
+    /// `booking_method`'s E7002 replaced by the refusal that says why the
+    /// query does not answer (#2911, #2929). `option_errors` itself where the
+    /// source did not load (a load or processing failure; a parse error no
+    /// longer stops the load, #2949), as no option refuses then.
+    pub query_option_errors: Vec<Error>,
     /// Whether a query over the source refuses: it failed to parse, a
     /// transaction failed to book
     /// ([`rustledger_loader::LedgerError::blocks_queries`], the rule the
@@ -129,6 +243,18 @@ impl ProcessedLedger {
         all.extend(self.option_errors.iter().cloned());
         all
     }
+
+    /// What a query over the source lists: load diagnostics plus option
+    /// diagnostics as a query lists them ([`Self::query_option_errors`]), so a
+    /// rejected `booking_method`'s E7002 is the refusal that says why the
+    /// query does not answer, as the FFI's query surfaces list it (#2929).
+    /// [`Self::reported_errors`] for every surface that reports the load.
+    #[must_use]
+    pub fn reported_query_errors(&self) -> Vec<Error> {
+        let mut all = self.errors.clone();
+        all.extend(self.query_option_errors.iter().cloned());
+        all
+    }
 }
 
 /// Parse, book, and process a Beancount source string.
@@ -141,30 +267,10 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    // If there are parse errors, return early without processing
-    if !parse_result.errors.is_empty() {
-        let errors: Vec<Error> = parse_result
-            .errors
-            .iter()
-            .map(|e| parse_error_to_wasm(e, &lookup, None))
-            .collect();
-
-        let options = extract_options(&parse_result.options);
-        let option_errors = validate_option_tuples(&parse_result.options);
-
-        return ProcessedLedger {
-            directives: Vec::new(),
-            directive_spans: Vec::new(),
-            source_map: rustledger_loader::SourceMap::new(),
-            options,
-            errors,
-            option_errors,
-            // A parse error refuses a query (#1908).
-            query_blocked: true,
-            parse_result,
-            lookup,
-        };
-    }
+    // A parse error does not stop the load: the loader keeps every entry that
+    // did parse, and `process` books them (and `run_validation` validates
+    // them), as `rledger check` and bean-check do (#2949). This used to return
+    // here with no directives, so one syntax error hid every other finding.
 
     // Use Loader with a single-file VFS to produce a LoadResult
     let mut vfs = VirtualFileSystem::new();
@@ -173,17 +279,19 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     vfs.add_file("<string>", source);
     let mut loader = Loader::new().with_filesystem(Box::new(vfs));
 
-    let raw = match loader.load(Path::new("<string>")) {
+    let mut raw = match loader.load(Path::new("<string>")) {
         Ok(raw) => raw,
         Err(e) => {
             let options = extract_options(&parse_result.options);
-            let option_errors = validate_option_tuples(&parse_result.options);
+            let option_errors = validate_option_tuples(&parse_result.options, &lookup);
             return ProcessedLedger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
+                booking_refused: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
+                query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
                 parse_result,
@@ -198,7 +306,20 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // loader ran, so these already exist — the single-source path used to drop
     // them on the floor here, which is why E7001/E7002 were invisible on every
     // entry point built on this function (#2299).
-    let option_errors = option_warnings_to_errors(&raw.options.warnings);
+    let option_errors = without_files(option_warnings_to_errors(&raw.options.warnings));
+
+    // The parse errors, reported one by one with their code, line and span
+    // (`parse_errors_to_wasm`, so at character columns), and kept out of `process`
+    // (`LoadResult::take_parse_errors`).
+    let parse_failures = raw.take_parse_errors();
+    let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
+    let parse_errors = parse_errors_to_wasm(
+        parse_failures.iter().flat_map(|e| match e {
+            LoadError::ParseErrors { errors, .. } => errors.as_slice(),
+            _ => &[],
+        }),
+        source,
+    );
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → book → regular-plugins → finalize
@@ -215,7 +336,18 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             // The whole query rule (`Ledger::blocks_queries`), read before the
             // fields move out: a blocking error, or a rejected
             // `booking_method` (#2911), whose E7002 is in `option_errors`.
-            let query_blocked = ledger.blocks_queries();
+            let query_blocked = parse_blocks_queries || ledger.blocks_queries();
+            // The option diagnostics as a query lists them, through the
+            // canonical (`Ledger::query_option_errors`), as the FFI lists them:
+            // the rejected `booking_method`'s E7002 is the refusal.
+            let query_option_errors = without_files(
+                ledger
+                    .query_option_errors()
+                    .into_iter()
+                    .map(Error::from)
+                    .collect(),
+            );
+            let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
@@ -223,31 +355,45 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
-            let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
+            let mut errors = parse_errors;
+            errors.extend(
+                ledger
+                    .errors
+                    .into_iter()
+                    .map(|e| ledger_error_to_wasm(e, &source_map)),
+            );
 
             ProcessedLedger {
                 directives,
                 directive_spans,
                 source_map,
+                booking_refused,
                 options,
                 errors,
                 option_errors,
+                query_option_errors,
                 query_blocked,
                 parse_result,
                 lookup,
             }
         }
-        Err(e) => ProcessedLedger {
-            directives: Vec::new(),
-            directive_spans: Vec::new(),
-            source_map: rustledger_loader::SourceMap::new(),
-            options,
-            errors: vec![Error::new(format!("Processing error: {e}"))],
-            option_errors,
-            query_blocked: true,
-            parse_result,
-            lookup,
-        },
+        Err(e) => {
+            let mut errors = parse_errors;
+            errors.push(Error::new(format!("Processing error: {e}")));
+            ProcessedLedger {
+                directives: Vec::new(),
+                directive_spans: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
+                booking_refused: Vec::new(),
+                options,
+                errors,
+                query_option_errors: option_errors.clone(),
+                option_errors,
+                query_blocked: true,
+                parse_result,
+                lookup,
+            }
+        }
     }
 }
 
@@ -260,18 +406,45 @@ pub fn has_fatal(errors: &[Error]) -> bool {
     errors.iter().any(|e| e.severity == Severity::Error)
 }
 
+/// A validating load's errors as WASM [`Error`]s, leaving out the
+/// advisory-only ones ([`rustledger_validate::is_advisory_only_code`]: E1004,
+/// closing an account with a balance), which `rledger check` and bean-check
+/// do not report either; `rledger lint closed-nonempty` does (#2937). For the
+/// surfaces that validate through the loader (`validateMultiFile`,
+/// `validateWithHost`, `Ledger.fromFiles`, `queryMultiFile`);
+/// [`run_validation`] leaves them out the same way. Each is placed through
+/// `source_map`, the load's ([`ledger_error_to_wasm`]).
+pub fn reported_ledger_errors(
+    errors: Vec<rustledger_loader::LedgerError>,
+    source_map: &rustledger_loader::SourceMap,
+) -> Vec<Error> {
+    errors
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(|e| ledger_error_to_wasm(e, source_map))
+        .collect()
+}
+
 /// Run validation on a loaded ledger and return validation errors.
+///
+/// Which errors stop validation is `rledger check`'s rule, the validating
+/// loader's: none do. A transaction booking refused is set aside
+/// ([`rustledger_loader::Ledger::booking_refused`]): Early sees it as written
+/// and Late does not, and the session reports the account errors Early held
+/// for it, as `process` does. This used to return nothing on any
+/// severity-error in `load.errors`, so a STRICT ledger with an ambiguous
+/// reduction reported its booking error and not the `Balance failed` that
+/// follows it, which `check` and bean-check both report (#2937). A parse
+/// error does not stop it either: the entries that parsed are validated, as
+/// `check` and bean-check validate them (#2949). A source that failed to load
+/// at all has no directives here, so nothing is validated for it.
+///
+/// Advisory-only diagnostics
+/// ([`rustledger_validate::ErrorCode::is_advisory_only`]: E1004, closing an
+/// account with a balance) are left out, as `check` and bean-check leave them
+/// out; `rledger lint closed-nonempty` reports them (#2937).
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     use rustledger_validate::ValidationSession;
-
-    // Skip validation only when loading produced a genuine *error* (parse or
-    // booking failure) — those make the directive stream unsound to validate.
-    // A warning must NOT skip validation, or real diagnostics (E1001, balance
-    // residuals, …) would be silently dropped for any ledger that also emits a
-    // plugin warning.
-    if has_fatal(&load.errors) {
-        return Vec::new();
-    }
 
     // Build date→line mapping from parse result for error locations
     let mut date_to_line: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -303,25 +476,36 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // With the kept spans, as `rledger check` and the FFI validate: the pad
     // rule reads them as beancount's line order, so an "Attempt to pad an
     // entry with cost" lists tied positions as they do (#2901).
-    let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
-        let spanned = spanned_directives(&load.directives, &load.directive_spans);
-        let (session, mut errors) = session.run_early_spanned(&spanned, today);
-        let (session, late_errs) = session.run_late_spanned(&spanned, today);
-        errors.extend(late_errs);
-        (session, errors)
-    } else {
-        let (session, mut errors) = session.run_early(&load.directives, today);
-        let (session, late_errs) = session.run_late(&load.directives, today);
-        errors.extend(late_errs);
-        (session, errors)
-    };
+    let refused = |index: &usize| load.booking_refused.binary_search(index).is_ok();
+    // `load_and_book` keeps one span per directive (it unzips them from the
+    // loader's stream), so the spans always line up; the refused indices are
+    // positions in that same stream, and a refused transaction is noted by its
+    // span, so a stream without them could not be validated as `check` does.
+    debug_assert_eq!(
+        load.directive_spans.len(),
+        load.directives.len(),
+        "load_and_book keeps one span per directive"
+    );
+    let spanned = spanned_directives(&load.directives, &load.directive_spans);
+    let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
+    let mut booked = Vec::with_capacity(spanned.len());
+    for (index, directive) in spanned.into_iter().enumerate() {
+        if refused(&index) {
+            session.note_refused_by_booking(&directive);
+        } else {
+            booked.push(directive);
+        }
+    }
+    let (session, late_errs) = session.run_late_spanned(&booked, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
 
     errors
         .iter()
+        .filter(|err| !err.code.is_advisory_only())
         .map(|err| {
             let fallback_line = date_to_line.get(&err.date.to_string()).copied();
-            validation_error_to_wasm(err, &load.lookup, None, fallback_line)
+            validation_error_to_wasm(err, &load.source_map, None, fallback_line)
         })
         .collect()
 }
@@ -359,43 +543,34 @@ pub fn account_types_from_raw(
     options_from_raw(options).to_account_types()
 }
 
-/// Option warnings as WASM [`Error`]s, carrying the severity, code, and phase
-/// `rledger check` gives them.
+/// Option warnings as WASM [`Error`]s, through the loader's canonical
+/// [`rustledger_loader::option_warnings_to_errors`] and the
+/// `From<LedgerError>` every other loader error takes.
 ///
-/// Severity, code, and phase are all read off the warning rather than decided
-/// here — `is_error()`, `code`, `phase()` — because each one, when a surface
-/// decided it locally instead, drifted:
+/// Nothing about an option diagnostic is decided here: severity, code,
+/// phase, message and location all come from the loader's mapping, which
+/// `rledger check` and the LSP read too (#2291, #2297, #2298, #2299, #2925;
+/// the history is on the loader function).
 ///
-/// - E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
-///   to go out from here as errors, under a comment claiming parity with
-///   `check` and the LSP, so a ledger the CLI called clean arrived carrying
-///   errors (#2291). `is_error` moved onto the warning in #2292.
-/// - The code used to survive only as an `[E7009] ` prefix on the message, so a
-///   consumer wanting to branch on it had to parse it back out of the text that
-///   [`Error::code`] exists to save them from reading (#2297). It moved into the
-///   `code` field, and the prefix was dropped, so the message text now matches
-///   the CLI's for the same warning exactly.
-/// - `phase` was then written as a `"parse"` literal on each surface, which is
-///   the same shape one field over; it moved onto `phase()` in #2298.
-///
-/// Shared, finally, rather than copied: this used to be a private function in
-/// `parsed_ledger.rs` serving only the multi-file path, which is why the
-/// single-source path had nothing to call and reported no option diagnostics at
-/// all (#2299).
+/// The location is a point, as on every `LedgerError`-derived error: `file`,
+/// `line` and `column` (1) are set when the option has a site, and
+/// `end_line` / `end_column` are null. A multi-file ledger names the file
+/// each option is in, an included one among them; the single-source entry
+/// points drop it with [`without_files`], as their other errors carry none
+/// (see [`Error::file`]).
 ///
 /// [`OptionWarning`]: rustledger_loader::OptionWarning
 pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
-    warnings
-        .iter()
-        .map(|w| {
-            let base = if w.is_error() {
-                Error::new(w.message.clone())
-            } else {
-                Error::warning(w.message.clone())
-            };
-            base.with_code(w.code).with_phase(w.phase())
-        })
+    rustledger_loader::option_warnings_to_errors(warnings)
+        .into_iter()
+        .map(Error::from)
         .collect()
+}
+
+/// `errors` with no `file`, for the single-source entry points, whose errors
+/// name no file (the source is `<string>`); the line stays.
+pub fn without_files(errors: Vec<Error>) -> Vec<Error> {
+    errors.into_iter().map(|e| e.with_file(None)).collect()
 }
 
 /// Validate raw parsed `option` tuples and return the resulting diagnostics.
@@ -408,15 +583,24 @@ pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) 
 ///
 /// [`Options`]: rustledger_loader::Options
 /// [`Options::set`]: rustledger_loader::Options::set
-pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Span)]) -> Vec<Error> {
+pub fn validate_option_tuples(
+    options: &[(String, String, rustledger_parser::Span)],
+    lookup: &LineLookup,
+) -> Vec<Error> {
     let mut opts = rustledger_loader::Options::new();
-    for (key, value, _span) in options {
-        opts.set(key, value);
+    for (key, value, span) in options {
+        // Each option's line, as the loader gives it; the file is not named
+        // on these single-source entry points.
+        let site = rustledger_loader::OptionSite {
+            file: String::new(),
+            line: lookup.byte_to_line(span.start) as usize,
+        };
+        opts.set_scoped_at(key, value, true, Some(site));
     }
     // E7010, which needs every option set first, as the loader raises it.
     let rooted = opts.rooted_leaf_warnings();
     opts.warnings.extend(rooted);
-    option_warnings_to_errors(&opts.warnings)
+    without_files(option_warnings_to_errors(&opts.warnings))
 }
 
 /// The effective booking method of a single-source ledger, read from its raw
@@ -666,14 +850,111 @@ mod warning_severity_tests {
     #[test]
     fn validation_severity_follows_code() {
         use rustledger_validate::{ErrorCode, ValidationError};
-        let lookup = LineLookup::new("x");
+        let map = rustledger_loader::SourceMap::new();
         let date = rustledger_core::naive_date(2020, 1, 1).unwrap();
         let mk = |code| ValidationError::new(code, "m", date);
         // FutureDate is a warning code; AccountNotOpen (E1001) is an error.
-        let warn = validation_error_to_wasm(&mk(ErrorCode::FutureDate), &lookup, None, Some(1));
+        let warn = validation_error_to_wasm(&mk(ErrorCode::FutureDate), &map, None, Some(1));
         assert_eq!(warn.severity, Severity::Warning);
-        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
+        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &map, None, Some(1));
         assert_eq!(err.severity, Severity::Error);
+    }
+
+    /// #2946: a validation finding and a parse error are at their CHARACTER
+    /// columns, as `rledger check` reports them: a BOM (three bytes) and an
+    /// `Ü` (two) each count once. They counted bytes (4 and 27).
+    #[test]
+    fn test_error_columns_count_characters() {
+        let load =
+            load_and_book("\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n");
+        let mut got: Vec<_> = run_validation(&load)
+            .into_iter()
+            .map(|e| (e.code, e.line, e.column))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (Some("E1001".to_string()), Some(1), Some(2)),
+                (Some("E2001".to_string()), Some(1), Some(2)),
+            ]
+        );
+
+        let load = load_and_book("2024-01-03 open Assets:Ü 10\n");
+        let got: Vec<_> = load.errors.iter().map(|e| (e.line, e.column)).collect();
+        assert_eq!(got, [(Some(1), Some(26))]);
+    }
+
+    /// The end of a parse error's and of a finding's span is where the span
+    /// really ends, counted in characters, not a copy of its start.
+    #[test]
+    fn test_error_end_positions_are_where_the_span_ends() {
+        let load =
+            load_and_book("\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n");
+        let mut got: Vec<_> = run_validation(&load)
+            .into_iter()
+            .map(|e| (e.code, e.line, e.column, e.end_line, e.end_column))
+            .collect();
+        got.sort();
+        // The finding is the balance directive: its span runs to the start of
+        // the next line, past its newline.
+        assert_eq!(
+            got,
+            [
+                (
+                    Some("E1001".to_string()),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(1)
+                ),
+                (
+                    Some("E2001".to_string()),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(1)
+                ),
+            ]
+        );
+
+        let load = load_and_book("2024-01-03 open Assets:Ü 10\n");
+        let got: Vec<_> = load
+            .errors
+            .iter()
+            .map(|e| (e.line, e.column, e.end_line, e.end_column))
+            .collect();
+        // The unexpected `10`, up to just past it: column 28 in characters,
+        // 29 in bytes.
+        assert_eq!(got, [(Some(1), Some(26), Some(1), Some(28))]);
+    }
+
+    /// A finding on a plugin's directive (a placeholder file id) is not
+    /// placed in the source text: its span says nothing about it. The FFI's
+    /// `test_a_plugin_directives_finding_maps_to_no_source_line`
+    /// (`rustledger-ffi-component/src/convert.rs`) pins the same rule there.
+    #[test]
+    fn test_a_plugin_directives_finding_maps_to_no_source_line() {
+        const SOURCE: &str = "plugin \"beancount.plugins.check_closing\"\n\
+             2024-01-01 open Assets:A\n\
+             2024-01-01 open Income:X\n\
+             2024-01-02 * \"x\"\n  Assets:A  10 USD\n    closing: TRUE\n  Income:X\n";
+        let load = load_and_book(SOURCE);
+        let errors = run_validation(&load);
+        let balance = errors
+            .iter()
+            .find(|e| e.message.starts_with("Balance failed for Assets:A"))
+            .unwrap_or_else(|| panic!("check_closing's balance fails: {errors:?}"));
+        assert_eq!(
+            (
+                balance.line,
+                balance.column,
+                balance.end_line,
+                balance.file.as_deref()
+            ),
+            (None, None, None, None),
+            "{balance:?}"
+        );
     }
 }
 
@@ -742,10 +1023,10 @@ mod option_diagnostic_tests {
         );
     }
 
-    /// The trap in the obvious fix. `run_validation` skips when
-    /// `has_fatal(&load.errors)`, so folding option errors into `errors` would
-    /// make a typo'd option silently swallow every real validation error —
-    /// the same drop #2292 fixed for plugin warnings.
+    /// An invalid option must not cost the ledger its real validation errors,
+    /// the drop #2292 fixed for plugin warnings. `run_validation` used to skip
+    /// on any error in `load.errors`; it no longer gates on them (#2937), and
+    /// this pins that the option error does not suppress validation either way.
     #[test]
     fn an_invalid_option_does_not_suppress_validation() {
         let load = load_and_book(BAD_OPTION_AND_BAD_ACCOUNT);
@@ -765,15 +1046,16 @@ mod option_diagnostic_tests {
     #[test]
     fn validate_option_tuples_raises_on_an_unknown_option() {
         let parsed = parse_beancount(BAD_OPTION);
-        let errors = validate_option_tuples(&parsed.options);
+        let errors = validate_option_tuples(&parsed.options, &LineLookup::new(BAD_OPTION));
         assert!(codes(&errors).contains(&"E7001"), "got {errors:?}");
     }
 
     #[test]
     fn validate_option_tuples_is_quiet_on_a_valid_option() {
-        let parsed = parse_beancount("option \"title\" \"My Ledger\"\n");
+        let src = "option \"title\" \"My Ledger\"\n";
+        let parsed = parse_beancount(src);
         assert!(
-            validate_option_tuples(&parsed.options).is_empty(),
+            validate_option_tuples(&parsed.options, &LineLookup::new(src)).is_empty(),
             "a valid option must not produce a diagnostic"
         );
     }
@@ -785,6 +1067,15 @@ mod option_diagnostic_tests {
     /// raised on a *value*, which is a different arm than E7001's unknown key.
     #[test]
     fn both_paths_agree_for_every_option_code() {
+        // The line too: both paths give each option diagnostic its option's
+        // line (#2925), and neither names a file on this single-source path.
+        type Seen = (
+            Option<String>,
+            String,
+            Severity,
+            Option<u32>,
+            Option<String>,
+        );
         let cases: &[(&str, &str)] = &[
             ("E7001", "option \"nonsense_option\" \"x\"\n"),
             ("E7002", "option \"booking_method\" \"not_a_method\"\n"),
@@ -794,16 +1085,25 @@ mod option_diagnostic_tests {
             ("none", "option \"title\" \"t\"\n"),
         ];
 
-        let seen = |errors: &[Error]| -> Vec<(Option<String>, String, Severity)> {
+        let seen = |errors: &[Error]| -> Vec<Seen> {
             errors
                 .iter()
-                .map(|e| (e.code.clone(), e.message.clone(), e.severity))
+                .map(|e| {
+                    (
+                        e.code.clone(),
+                        e.message.clone(),
+                        e.severity,
+                        e.line,
+                        e.file.clone(),
+                    )
+                })
                 .collect()
         };
 
         for (expected, opt) in cases {
             let src = format!("{opt}2024-01-01 open Assets:Cash USD\n");
-            let recomputed = validate_option_tuples(&parse_beancount(&src).options);
+            let recomputed =
+                validate_option_tuples(&parse_beancount(&src).options, &LineLookup::new(&src));
             let from_loader = load_and_book(&src).option_errors;
 
             assert_eq!(
@@ -820,14 +1120,19 @@ mod option_diagnostic_tests {
                     "fixture must actually raise {expected}; got {:?}",
                     codes(&recomputed)
                 );
+                assert!(
+                    recomputed.iter().all(|e| e.line.is_some_and(|l| l >= 1)),
+                    "every option diagnostic has its line: {recomputed:?}"
+                );
             }
         }
     }
 
     /// `reported_errors` is what every reporting surface reads and `errors` is
     /// what every soundness gate reads. If option diagnostics ever leak into
-    /// the second, `run_validation` starts skipping; if they ever fall out of
-    /// the first, surfaces go silent again. Both directions, pinned.
+    /// the second, a typo'd option makes a ledger unsound to work with; if they
+    /// ever fall out of the first, surfaces go silent again. Both directions,
+    /// pinned.
     #[test]
     fn option_diagnostics_are_reported_but_do_not_gate() {
         let load = load_and_book(BAD_OPTION);
@@ -845,6 +1150,253 @@ mod option_diagnostic_tests {
         assert!(
             !has_fatal(&load.errors),
             "an invalid option must not read as an unsound directive stream"
+        );
+    }
+}
+
+/// The drift guard of [`parse_error_fields`]' deliberate copy of the
+/// loader's [`rustledger_loader::parse_errors_to_ledger_errors`] (behind the
+/// FFI and, inline, `rledger check`), and of the multi-file surfaces against
+/// the single-source ones (#2961, #2964).
+///
+/// The same parse errors, through the loader's mapping, the multi-file
+/// [`crate::api::load_errors_to_errors`] and the single-source
+/// [`parse_errors_to_wasm`], agree on every field: message (with no path
+/// prefix, #2961), code, phase, hint, file, line, column, end and severity.
+/// After a BOM and a multi-byte character, so the columns count characters
+/// on every side. And on the same ledgers, `validateSource`,
+/// `validateMultiFile` and `Ledger.fromFiles` report every finding (parse
+/// errors, booking errors, validation findings) at the same start and end
+/// (#2964: the multi-file surfaces gave a loader finding a null end).
+#[cfg(test)]
+mod parse_error_mapping_parity {
+    use super::*;
+
+    /// Message, code, phase, hint, file, line, column, end line, end column,
+    /// severity.
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        String,
+    );
+
+    const MAIN: &str = "main.beancount";
+    const SOURCE: &str = "\u{FEFF}2024-01-01 open Assets:A\n\
+        2024-01-03 open Assets:Ü 10\n\
+        \x20 2024-01-04 open Assets:B\n\
+        2024-01-05 open\n\
+        2024-01-06 * \u{FEFF}\"ab\"\n";
+
+    fn wasm_row(e: Error) -> Row {
+        (
+            e.message,
+            e.code,
+            e.phase,
+            e.hint,
+            e.file,
+            e.line,
+            e.column,
+            e.end_line,
+            e.end_column,
+            format!("{:?}", e.severity),
+        )
+    }
+
+    fn vfs(source: &str) -> VirtualFileSystem {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(MAIN, source);
+        vfs
+    }
+
+    #[test]
+    fn test_parse_error_mapping_agrees_with_the_loaders() {
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs(SOURCE)))
+            .load(Path::new(MAIN))
+            .expect("loads");
+        let failure = raw
+            .errors
+            .iter()
+            .find(|e| matches!(e, LoadError::ParseErrors { .. }))
+            .expect("the source fails to parse");
+
+        // The loader's own fields, the end located from its `source_span`
+        // by the canonical rule.
+        let canonical: Vec<Row> =
+            rustledger_loader::parse_errors_to_ledger_errors(failure, &raw.source_map)
+                .into_iter()
+                .map(|e| {
+                    let location = e.location.expect("located");
+                    let end = raw
+                        .source_map
+                        .locate(e.file_id.expect("file id"), e.source_span.expect("span").1)
+                        .expect("end located");
+                    (
+                        e.message,
+                        Some(e.code),
+                        Some(e.phase),
+                        e.hint,
+                        Some(location.file.display().to_string()),
+                        u32::try_from(location.line).ok(),
+                        u32::try_from(location.column).ok(),
+                        u32::try_from(end.line).ok(),
+                        u32::try_from(end.column).ok(),
+                        format!("{:?}", crate::types::Severity::Error),
+                    )
+                })
+                .collect();
+        // Sharp enough to catch a drift: several errors, one with a hint.
+        assert!(
+            canonical.len() >= 3 && canonical.iter().any(|row| row.3.is_some()),
+            "{canonical:?}"
+        );
+
+        let multi_file: Vec<Row> =
+            crate::api::load_errors_to_errors(std::slice::from_ref(failure), &raw.source_map)
+                .into_iter()
+                .map(wasm_row)
+                .collect();
+        assert_eq!(multi_file, canonical, "load_errors_to_errors");
+
+        let single_source: Vec<Row> = parse_errors_to_wasm(&parse_beancount(SOURCE).errors, SOURCE)
+            .into_iter()
+            .map(|mut e| {
+                // The single-source surfaces name no file.
+                assert_eq!(e.file, None);
+                e.file = Some(MAIN.to_string());
+                wasm_row(e)
+            })
+            .collect();
+        assert_eq!(single_source, canonical, "parse_errors_to_wasm");
+    }
+
+    /// Code, severity, line, column, end line, end column.
+    type Place = (
+        String,
+        String,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+    );
+
+    /// `errors`' places, sorted.
+    fn places(errors: Vec<Error>) -> Vec<Place> {
+        let mut places: Vec<Place> = errors
+            .into_iter()
+            .map(|e| {
+                (
+                    e.code.unwrap_or_default(),
+                    format!("{:?}", e.severity),
+                    e.line,
+                    e.column,
+                    e.end_line,
+                    e.end_column,
+                )
+            })
+            .collect();
+        places.sort();
+        places
+    }
+
+    /// The same ledgers, through `validateSource`, `validateMultiFile` and
+    /// `Ledger.fromFiles`: each finding at the same start and end, so a
+    /// loader finding has its end on the multi-file surfaces too (#2964).
+    /// Parse errors, booking errors and validation findings, after a BOM or
+    /// a multi-byte character.
+    #[test]
+    fn test_multi_file_findings_are_placed_as_validate_source_places_them() {
+        let cases = [
+            // E1001 and E2001 on a balance that runs to the start of line 2.
+            "\u{FEFF}2024-01-02 balance Assets:X 1 USD\n2024-01-01 open Assets:Y\n",
+            // An unbalanced transaction (E3001).
+            "2024-01-01 open Assets:A\n2024-01-01 open Expenses:Ü\n\
+             2024-01-02 * \"ü\"\n  Assets:A  -1 USD\n  Expenses:Ü  2 USD\n",
+            // A booking error (E4003, an ambiguous reduction) and the
+            // balance it leaves failing.
+            "2024-01-01 open Assets:S\n2024-01-01 open Assets:C\n\
+             2024-01-01 * \"buy\"\n  Assets:S  10 HOOL {100 USD}\n  Assets:C\n\
+             2024-01-02 * \"buy\"\n  Assets:S  10 HOOL {110 USD}\n  Assets:C\n\
+             2024-01-03 * \"sell\"\n  Assets:S  -5 HOOL {}\n  Assets:C  500 USD\n\
+             2024-01-04 balance Assets:C 0 USD\n",
+            // A parse error after a multi-byte character, and a finding
+            // after it.
+            "2024-01-03 open Assets:Ü 10\n2024-01-04 balance Assets:X 1 USD\n",
+        ];
+        for source in cases {
+            let load = load_and_book(source);
+            let mut single = load.reported_errors();
+            single.extend(run_validation(&load));
+            let single = places(single);
+            assert!(
+                !single.is_empty() && single.iter().all(|p| p.4.is_some()),
+                "every finding has an end on validateSource: {source:?} {single:?}"
+            );
+
+            let multi =
+                places(crate::api::validate_with_filesystem(Box::new(vfs(source)), MAIN).errors);
+            assert_eq!(multi, single, "validateMultiFile, {source:?}");
+
+            let files = std::collections::HashMap::from([(MAIN.to_string(), source.to_string())]);
+            let ledger = crate::parsed_ledger::Ledger::from_file_map(files, MAIN).expect("loads");
+            assert_eq!(
+                places(ledger.error_list().to_vec()),
+                single,
+                "Ledger.fromFiles, {source:?}"
+            );
+        }
+    }
+
+    /// A loader finding's hint reaches the multi-file surfaces, as `rledger
+    /// check` prints it (`help:`): E8001's documents-folder hint (#2650),
+    /// which they dropped (#2964). The in-memory ledger is a relative path,
+    /// and the document check reads the real disk from the working
+    /// directory, which `cargo test` sets to this crate's: so the document
+    /// the folder holds is a real file (`src/lib.rs`), and none is next to
+    /// the ledger.
+    #[test]
+    fn test_multi_file_surfaces_keep_a_loader_findings_hint() {
+        let main = MAIN.to_string();
+        let source = "option \"documents\" \"src\"\n\
+            2024-01-01 open Assets:A\n\
+            2024-01-02 document Assets:A \"./lib.rs\"\n";
+        let want = Some(
+            "a file with that name is in src/lib.rs; document paths are relative to the file \
+             they are written in, not to the documents folder, so write \"src/lib.rs\""
+                .to_string(),
+        );
+        let e8001 = |errors: &[Error]| -> Vec<(Option<String>, Option<u32>, Option<u32>)> {
+            errors
+                .iter()
+                .filter(|e| e.code.as_deref() == Some("E8001"))
+                .map(|e| (e.hint.clone(), e.line, e.end_line))
+                .collect()
+        };
+
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(&main, source);
+        let result = crate::api::validate_with_filesystem(Box::new(vfs), &main);
+        assert_eq!(
+            e8001(&result.errors),
+            [(want.clone(), Some(3), Some(4))],
+            "validateMultiFile: {:?}",
+            result.errors
+        );
+
+        let files = std::collections::HashMap::from([(main.clone(), source.to_string())]);
+        let ledger = crate::parsed_ledger::Ledger::from_file_map(files, &main).expect("loads");
+        assert_eq!(
+            e8001(ledger.error_list()),
+            [(want, Some(3), Some(4))],
+            "Ledger.fromFiles: {:?}",
+            ledger.error_list()
         );
     }
 }

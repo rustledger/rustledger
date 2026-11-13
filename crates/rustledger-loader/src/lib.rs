@@ -99,10 +99,10 @@ pub fn is_glob_pattern(path: &str) -> bool {
 pub use process::{
     BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
     LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
-    process,
+    option_warnings_to_errors, parse_errors_to_ledger_errors, process,
 };
 #[cfg(feature = "plugins")]
-pub use process::{PluginPass, run_plugins};
+pub use process::{PluginPass, plugin_error_to_ledger_error, run_plugins};
 
 use rustledger_core::{Directive, DisplayContext};
 use rustledger_parser::{ParseError, Span, Spanned};
@@ -178,6 +178,11 @@ pub enum LoadError {
         /// entries), and it's the one quoted in the `"Duplicate
         /// filename parsed:"` prefix.
         cycle: Vec<String>,
+        /// The `include` that closed the cycle: the directive, in the last
+        /// file of the cycle, that names a file already being loaded. Set by
+        /// the include walk ([`LoadError::at_include`]); `None` only for an
+        /// error built without one.
+        include_site: Option<IncludeSite>,
     },
 
     /// The same file was reached twice in the include graph without forming a
@@ -321,12 +326,17 @@ impl LoadError {
 
     /// Attach the `include` site that caused this failure.
     ///
-    /// Only [`LoadError::Io`] carries an include site today — other variants
-    /// either already embed enough context or are not produced from an
-    /// include walk. Non-IO errors are returned unchanged.
+    /// [`LoadError::Io`] (an included file that could not be read) and
+    /// [`LoadError::IncludeCycle`] (an include of a file already being
+    /// loaded) carry an include site, so a surface can report them at the
+    /// `include` line that caused them (#2959). Other variants are returned
+    /// unchanged.
     #[must_use]
     pub fn at_include(mut self, site: IncludeSite) -> Self {
         if let Self::Io {
+            include_site: slot, ..
+        }
+        | Self::IncludeCycle {
             include_site: slot, ..
         } = &mut self
         {
@@ -339,7 +349,9 @@ impl LoadError {
     #[must_use]
     pub const fn include_site(&self) -> Option<&IncludeSite> {
         match self {
-            Self::Io { include_site, .. } => include_site.as_ref(),
+            Self::Io { include_site, .. } | Self::IncludeCycle { include_site, .. } => {
+                include_site.as_ref()
+            }
             _ => None,
         }
     }
@@ -379,6 +391,28 @@ pub struct LoadResult {
     pub errors: Vec<LoadError>,
     /// Display context for formatting numbers (tracks precision per currency).
     pub display_context: DisplayContext,
+}
+
+impl LoadResult {
+    /// Take the parse errors ([`LoadError::ParseErrors`]) out of
+    /// [`Self::errors`], for a surface to report one by one, each with its
+    /// code, line and span, before it hands the rest of the load to
+    /// [`process`](fn@crate::process).
+    ///
+    /// A parse error does not stop validation: `process` validates the
+    /// entries that did parse, as `rledger check` (which reports the load
+    /// errors itself, then runs `process` with them cleared) and bean-check
+    /// do (#2949). Left in, `process` reports each file's parse errors as one
+    /// line-less `parse errors in <path>`. Whether they refuse a query is
+    /// still [`LoadError::blocks_queries`], asked of what this returns.
+    #[must_use]
+    pub fn take_parse_errors(&mut self) -> Vec<LoadError> {
+        let (parse_errors, rest) = std::mem::take(&mut self.errors)
+            .into_iter()
+            .partition(|e| matches!(e, LoadError::ParseErrors { .. }));
+        self.errors = rest;
+        parse_errors
+    }
 }
 
 /// A plugin directive.
@@ -611,8 +645,9 @@ impl Loader {
         // reported a missing document root that was present, and the same
         // ledger checked clean from inside `sub/` (#1999).
         let base_dir = source_map.files().first().map(SourceFile::dir);
-        let doc_warnings =
+        let mut doc_warnings =
             process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
+        options.locate(&mut doc_warnings);
         options.warnings.extend(doc_warnings);
         // E7010: an account option written as a full name. Here, once every
         // option is set, because `name_*` can follow the account options in
@@ -658,7 +693,11 @@ impl Loader {
                 .map(|p| p.display().to_string())
                 .chain(std::iter::once(path.display().to_string()))
                 .collect();
-            return Err(LoadError::IncludeCycle { cycle });
+            // The caller's include loop attaches the site (`at_include`).
+            return Err(LoadError::IncludeCycle {
+                cycle,
+                include_site: None,
+            });
         }
 
         // Check if already loaded. Beancount reports this and carries on with
@@ -723,8 +762,9 @@ impl Loader {
         // books or what counts as balanced (#2151).
         let top_level = self.include_stack.len() == 1;
         for (key, value, span) in result.options {
-            // Where the option is, so a rejection that refuses queries
-            // (`Options::query_refusal`) can name its line.
+            // Where the option is: every diagnostic it raises carries this
+            // file and line, as beancount's do (#2925), and so does a
+            // rejection that refuses queries (`Options::query_refusal`).
             let site = source_map.get(file_id).map(|file| OptionSite {
                 file: file.path.display().to_string(),
                 line: file.line_col(span.start).0,
@@ -1057,6 +1097,7 @@ mod tests {
             },
             LoadError::IncludeCycle {
                 cycle: vec!["a".into(), "b".into(), "a".into()],
+                include_site: None,
             },
             LoadError::DuplicateInclude { path: "a".into() },
             LoadError::ParseErrors {
@@ -1303,6 +1344,115 @@ include "level2.beancount"
         // Should have 2 open directives from nested includes
         assert_eq!(result.directives.len(), 2);
         assert!(result.errors.is_empty());
+    }
+
+    /// Plugins are collected in `file_id` order, each file's in declaration
+    /// order: a file gets its id and pushes its plugins in one step, before
+    /// its includes are followed (even a plugin declared after an include).
+    /// The LSP relies on this to order a view's plugins as this loader would
+    /// (`view_plugins` in `rustledger-lsp`, #2949), so this pins it.
+    #[test]
+    fn test_load_plugins_are_collected_in_file_id_order() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "plugin \"m1\"\ninclude \"a.beancount\"\nplugin \"m2\"\ninclude \"c.beancount\"\n",
+        );
+        vfs.add_file(
+            "a.beancount",
+            "plugin \"a1\"\ninclude \"a_child.beancount\"\nplugin \"a2\"\n",
+        );
+        vfs.add_file("a_child.beancount", "plugin \"ac\"\n");
+        vfs.add_file("c.beancount", "plugin \"c\"\n");
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let got: Vec<(&str, usize)> = result
+            .plugins
+            .iter()
+            .map(|p| (p.name.as_str(), p.file_id))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1", 0),
+                ("m2", 0),
+                ("a1", 1),
+                ("a2", 1),
+                ("ac", 2),
+                ("c", 3)
+            ]
+        );
+        assert!(result.plugins.is_sorted_by_key(|p| p.file_id));
+    }
+
+    /// [`test_load_plugins_are_collected_in_file_id_order`] on disk, through
+    /// the parallel pre-parse branch of `load_recursive`: that branch is
+    /// taken for ONE include that resolves to more than one file (a glob)
+    /// on a filesystem that `supports_parallel_read`, which the
+    /// `VirtualFileSystem` does not. Pre-parsing the siblings out of order
+    /// must not change the order their ids and plugins are given in: the
+    /// first sibling's nested include still comes before the second sibling,
+    /// and a plugin after the include still belongs to its own file.
+    #[test]
+    fn test_load_plugins_are_collected_in_file_id_order_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("sub/deep")).expect("mkdir");
+        std::fs::write(
+            dir.join("main.beancount"),
+            "plugin \"m1\"\ninclude \"sub/*.beancount\"\nplugin \"m2\"\n",
+        )
+        .expect("write main");
+        std::fs::write(
+            dir.join("sub/a.beancount"),
+            "plugin \"a1\"\ninclude \"deep/ac.beancount\"\nplugin \"a2\"\n",
+        )
+        .expect("write a");
+        std::fs::write(dir.join("sub/deep/ac.beancount"), "plugin \"ac\"\n").expect("write ac");
+        std::fs::write(dir.join("sub/b.beancount"), "plugin \"b\"\n").expect("write b");
+
+        let result = Loader::new()
+            .load(&dir.join("main.beancount"))
+            .expect("load");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let got: Vec<(&str, usize)> = result
+            .plugins
+            .iter()
+            .map(|p| (p.name.as_str(), p.file_id))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1", 0),
+                ("m2", 0),
+                ("a1", 1),
+                ("a2", 1),
+                ("ac", 2),
+                ("b", 3)
+            ]
+        );
+        assert!(result.plugins.is_sorted_by_key(|p| p.file_id));
+        let names: Vec<_> = result
+            .source_map
+            .files()
+            .iter()
+            .map(|f| f.path.file_name().expect("file name").to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "main.beancount",
+                "a.beancount",
+                "ac.beancount",
+                "b.beancount"
+            ]
+        );
     }
 
     #[test]

@@ -730,12 +730,31 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     which are unknown options now. An older blob would keep serving the
 ///     old values, and be read at the wrong offsets.
 ///
+/// v71: LOADER OUTPUT changed, no archived layout moved (#2925). A `documents`
+///     option in an included file is ignored with the `E7009` warning, as in
+///     beancount, which keeps only the top-level file's roots: its directory
+///     is no longer scanned, so the `document` entries found under it are
+///     gone. A v69 blob of a ledger whose include sets an existing
+///     `documents` root would keep serving those entries with no `E7009`.
+///     (v70 and v72 were held by #2931 and never released: it changes the
+///     parser's output only for an input with a parse error, which no cache
+///     blob is saved for, so it needs no loader version.)
+///
+/// v73: PARSER OUTPUT changed, no archived layout moved (#2932). An invalid
+///     token after a lone header string moves it to no other field:
+///     `* "p" <bad>` keeps payee `p` and an empty narration, where `p` loaded
+///     as the narration with no payee. Every such header is a parse error,
+///     and this cache is saved only for a load with no errors (`rledger`'s
+///     `loadcache`), so no blob holds the old fields; the bump only keeps the
+///     convention that a parser output change bumps both caches, which
+///     `rustledger-wasm` pins.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 69;
+pub const CACHE_VERSION: u32 = 73;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -984,8 +1003,15 @@ pub fn load_cache_entry_in(main_file: &Path, env: &CacheEnv) -> Option<CacheEntr
         return None;
     }
 
-    // Read data
-    let mut data = vec![0u8; header.data_len as usize];
+    // Read data, straight into a buffer aligned for every archived type.
+    // `rkyv::from_bytes` reads the archive in place, and `ArchivedMetaValue`
+    // (every `custom` value and metadata entry) needs 8-byte alignment. A
+    // `Vec<u8>` promises only 1; it worked because the system allocator
+    // happens to hand back 16-aligned blocks, which nothing guarantees (the
+    // WASM cache, whose archive sits after its header, failed on exactly this:
+    // #2934). The file format is unchanged.
+    let mut data = rkyv::util::AlignedVec::<16>::new();
+    data.resize(usize::try_from(header.data_len).ok()?, 0);
     file.read_exact(&mut data).ok()?;
 
     // Deserialize
@@ -1087,16 +1113,24 @@ pub fn save_cache_entry_in(
 }
 
 /// Serialize directives to bytes using rkyv (for benchmarking).
+///
+/// Returns the aligned buffer `rkyv::to_bytes` writes, not a `Vec<u8>`
+/// (alignment 1): [`deserialize_directives`] reads it in place, and
+/// `ArchivedMetaValue` needs 8-byte alignment (#2934).
 #[cfg(test)]
-fn serialize_directives(directives: &Vec<Spanned<Directive>>) -> Result<Vec<u8>, std::io::Error> {
+fn serialize_directives(
+    directives: &Vec<Spanned<Directive>>,
+) -> Result<rkyv::util::AlignedVec, std::io::Error> {
     rkyv::to_bytes::<rkyv::rancor::Error>(directives)
-        .map(|v| v.to_vec())
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Deserialize directives from bytes using rkyv (for benchmarking).
+///
+/// `from_bytes` reads the archive in place, so this takes the aligned buffer
+/// [`serialize_directives`] returns rather than any byte slice (#2934).
 #[cfg(test)]
-fn deserialize_directives(data: &[u8]) -> Option<Vec<Spanned<Directive>>> {
+fn deserialize_directives(data: &rkyv::util::AlignedVec) -> Option<Vec<Spanned<Directive>>> {
     rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(data).ok()
 }
 
@@ -1326,6 +1360,45 @@ mod tests {
         assert_eq!(loaded.plugins[0].name, "test_plugin");
         assert_eq!(loaded.plugins[0].config, Some("config".to_string()));
         assert_eq!(loaded.files.len(), 1);
+    }
+
+    /// `custom` values and metadata, which archive `MetaValue` (8-byte
+    /// aligned), survive a save and a load (#2934). The WASM cache failed on
+    /// exactly these; this one reads its archive into an aligned buffer so it
+    /// cannot, whatever the allocator hands back.
+    #[test]
+    fn test_save_load_cache_entry_custom_and_metadata() {
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
+        let beancount_file = temp_dir.path().join("custom.beancount");
+        let source = "2024-01-01 open Assets:Bank USD\n  text: \"s\"\n  int: 42\n  day: 2024-01-02\n\
+2024-01-02 custom \"budget\" Assets:Bank \"monthly\" 2024-02-01 TRUE 42 2.5 1.00 USD\n";
+        fs::write(&beancount_file, source).expect("write the ledger");
+
+        let (directives, errors) = rustledger_parser::parse_directives(source);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            directives
+                .iter()
+                .any(|d| matches!(d.value, Directive::Custom(_))),
+            "the fixture must hold a custom directive"
+        );
+        let entry = CacheEntry {
+            directives,
+            options: CachedOptions::from(&Options::new()),
+            plugins: vec![],
+            files: vec![beancount_file.to_string_lossy().to_string()],
+        };
+
+        save_cache_entry_in(&beancount_file, &entry, &no_env()).expect("save failed");
+        let loaded = load_cache_entry_in(&beancount_file, &no_env()).expect("load failed");
+
+        let values = |e: &CacheEntry| {
+            e.directives
+                .iter()
+                .map(|d| d.value.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&loaded), values(&entry));
     }
 
     #[test]
@@ -1560,7 +1633,11 @@ mod tests {
         // encoding moves, so the arrays still hold.
         // v69 (#2925) drops two fields from `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 69;
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived encoding moves, so the arrays still hold.
+        // v73 (#2932) keeps a header string in its own field; no `CostNumber`
+        // encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 73;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1713,7 +1790,11 @@ mod tests {
         // the hash below is unchanged.
         // v69 (#2925) drops two fields from `CachedOptions`, not from
         // `MetaValue`; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 69;
+        // v71 (#2925) stops scanning an included `documents` root; no
+        // archived layout moves, so the hash below is unchanged.
+        // v73 (#2932) keeps a header string in its own field; the hash below
+        // is unchanged.
+        const FIXTURE_VERSION: u32 = 73;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

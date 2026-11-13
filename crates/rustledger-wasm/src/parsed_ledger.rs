@@ -251,6 +251,11 @@ pub struct ParsedLedger {
     /// not stop a query from running. Reported by `isValid`, `getErrors`, and
     /// `getParseErrors`; invisible to the gates.
     option_errors: Vec<Error>,
+    /// The option diagnostics a query lists
+    /// ([`crate::helpers::ProcessedLedger::query_option_errors`], through the
+    /// canonical `Ledger::query_option_errors`): a rejected `booking_method`'s
+    /// E7002 is the refusal that says why the query does not answer (#2929).
+    query_option_errors: Vec<Error>,
     /// Validation errors.
     validation_errors: Vec<Error>,
     /// Whether a query refuses: the load reported a parse error or a booking
@@ -275,9 +280,8 @@ impl ParsedLedger {
     #[wasm_bindgen(constructor)]
     pub fn new(source: &str) -> Self {
         let load = load_and_book(source);
-        // Before merging option diagnostics in: `run_validation` gates on
-        // `load.errors`, and an invalid option must not stop a ledger's real
-        // validation errors from being reported (#2299).
+        // Validation runs whatever loaded, as `rledger check` does (#2937); an
+        // invalid option, kept in `option_errors`, does not stop it (#2299).
         let validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
 
@@ -291,6 +295,7 @@ impl ParsedLedger {
             query_directives: std::cell::OnceCell::new(),
             options: load.options,
             parse_errors: load.errors,
+            query_option_errors: load.query_option_errors,
             option_errors: load.option_errors,
             validation_errors,
             query_refused: load.query_blocked,
@@ -373,14 +378,15 @@ impl ParsedLedger {
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
         if self.query_refused {
             // The load's errors and option diagnostics, as the free `query`
-            // refuses with them (`reported_errors`).
+            // refuses with them (`reported_query_errors`): a rejected
+            // `booking_method`'s E7002 is the refusal (#2929).
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
                 errors: self
                     .parse_errors
                     .iter()
-                    .chain(&self.option_errors)
+                    .chain(&self.query_option_errors)
                     .cloned()
                     .collect(),
             };
@@ -410,7 +416,7 @@ impl ParsedLedger {
             &self.created_tables,
             self.parse_errors
                 .iter()
-                .chain(&self.option_errors)
+                .chain(&self.query_option_errors)
                 .cloned()
                 .collect(),
         )
@@ -566,6 +572,7 @@ impl ParsedLedger {
             options: self.options.clone(),
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
+            query_option_errors: self.query_option_errors.clone(),
             validation_errors: self.validation_errors.clone(),
             query_refused: self.query_refused,
         };
@@ -608,6 +615,7 @@ impl ParsedLedger {
             options: payload.options,
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
+            query_option_errors: payload.query_option_errors,
             validation_errors: payload.validation_errors,
             query_refused: payload.query_refused,
             editor_cache,
@@ -679,8 +687,14 @@ pub struct Ledger {
     /// measures a balance's tolerance with (#2901). Persisted in the cache
     /// payload, like `account_types`.
     tolerance_multiplier: rustledger_core::Decimal,
-    /// Processing errors (load, booking, validation).
+    /// Processing errors (load, booking, validation), then the option
+    /// diagnostics: what `getErrors` reports.
     errors: Vec<Error>,
+    /// What a query lists: the processing errors, then the option diagnostics
+    /// as a query lists them (`Ledger::query_option_errors`, the canonical the
+    /// FFI's query surfaces read): a rejected `booking_method`'s E7002 is the
+    /// refusal that says why the query does not answer (#2929).
+    query_errors: Vec<Error>,
     /// Whether `errors` holds one that stops a query from answering
     /// (`LedgerError::blocks_queries`, #2861: a parse error, a file that
     /// could not be read or decrypted, a booking failure), or the load or
@@ -712,13 +726,21 @@ impl Ledger {
         self.errors.iter().map(|e| e.message.clone()).collect()
     }
 
+    /// The errors `getErrors` answers with.
+    #[cfg(test)]
+    pub(crate) fn error_list(&self) -> &[Error] {
+        &self.errors
+    }
+
     /// [`Ledger::from_files`] once the files are a map: the load, as the CLI
     /// runs it. Plain Rust, so native tests build a `Ledger` too.
     pub(crate) fn from_file_map(
         file_map: HashMap<String, String>,
         entry_point: &str,
     ) -> Result<Self, String> {
-        use rustledger_loader::{FileSystem, LoadOptions, Loader, VirtualFileSystem, process};
+        use rustledger_loader::{
+            FileSystem, LoadError, LoadOptions, Loader, VirtualFileSystem, process,
+        };
 
         let vfs = VirtualFileSystem::from_files(file_map);
 
@@ -730,7 +752,7 @@ impl Ledger {
 
         let mut loader = Loader::new().with_filesystem(Box::new(vfs));
 
-        let load_result = match loader.load(Path::new(entry_point)) {
+        let mut load_result = match loader.load(Path::new(entry_point)) {
             Ok(result) => result,
             Err(e) => {
                 return Ok(Self {
@@ -746,6 +768,7 @@ impl Ledger {
                     booking_method: LoadOptions::default().booking_method,
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                     tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+                    query_errors: vec![Error::new(format!("Load error: {e}"))],
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                     query_refused: true,
@@ -763,6 +786,16 @@ impl Ledger {
             rustledger_query::executor::SummaryAccounts::from_options(&load_result.options);
         let tolerance_multiplier = load_result.options.inferred_tolerance_multiplier;
 
+        // The parse errors, reported one by one with their code and line, as
+        // `rledger check` and `validateMultiFile` report them, rather than
+        // folded by `process` into one line-less `parse errors in <path>`
+        // (`LoadResult::take_parse_errors`). `process` validates whatever
+        // parsed (#2949).
+        let parse_failures = load_result.take_parse_errors();
+        let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
+        let parse_errors =
+            crate::api::load_errors_to_errors(&parse_failures, &load_result.source_map);
+
         let load_options = LoadOptions {
             validate: true,
             ..Default::default()
@@ -772,6 +805,9 @@ impl Ledger {
         let booking_method = load_result
             .options
             .effective_booking_method(load_options.booking_method);
+        // The option diagnostics, read before `process` consumes the options,
+        // so both arms below report them, as `validate_with_filesystem` does.
+        let option_errors = option_warnings_to_errors(&load_result.options.warnings);
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
@@ -781,7 +817,14 @@ impl Ledger {
                 // rejected `booking_method` (#2911; its E7002 is among the
                 // option errors below); every other error is reported beside
                 // the rows. Read before the fields move out.
-                let query_refused = ledger.blocks_queries();
+                let query_refused = parse_blocks_queries || ledger.blocks_queries();
+                // The option diagnostics as a query lists them, through the
+                // canonical, read before the fields move out.
+                let query_option_errors: Vec<Error> = ledger
+                    .query_option_errors()
+                    .into_iter()
+                    .map(Error::from)
+                    .collect();
                 let balance_discrepancies = ledger.balance_discrepancies;
                 let source_map = ledger.source_map;
                 let (directives, directive_spans): (Vec<Directive>, Vec<_>) = ledger
@@ -794,8 +837,16 @@ impl Ledger {
                 // cache payload so a restored ledger pads alike.
                 let directive_positions =
                     crate::helpers::source_positions(&directive_spans, &source_map);
-                let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-                errors.extend(option_warnings_to_errors(&ledger.options.warnings));
+                let mut errors = parse_errors;
+                errors.extend(crate::helpers::reported_ledger_errors(
+                    ledger.errors,
+                    &source_map,
+                ));
+                // What a query lists: the parse errors too, so built after
+                // they are in `errors`, then the option diagnostics as a
+                // query lists them.
+                let query_errors = errors.iter().cloned().chain(query_option_errors).collect();
+                errors.extend(option_errors);
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
@@ -812,6 +863,7 @@ impl Ledger {
                     summary_accounts,
                     tolerance_multiplier,
                     errors,
+                    query_errors,
                     editor_cache,
                     query_refused,
                     created_tables: std::cell::RefCell::default(),
@@ -830,7 +882,17 @@ impl Ledger {
                 booking_method,
                 summary_accounts,
                 tolerance_multiplier,
-                errors: vec![Error::new(format!("Processing error: {e}"))],
+                query_errors: parse_errors
+                    .iter()
+                    .cloned()
+                    .chain([Error::new(format!("Processing error: {e}"))])
+                    .chain(option_errors.iter().cloned())
+                    .collect(),
+                errors: parse_errors
+                    .into_iter()
+                    .chain([Error::new(format!("Processing error: {e}"))])
+                    .chain(option_errors)
+                    .collect(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: true,
                 created_tables: std::cell::RefCell::default(),
@@ -916,7 +978,7 @@ impl Ledger {
             return to_js(&QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: self.errors.clone(),
+                errors: self.query_errors.clone(),
             });
         }
         let expanded = query_directives(
@@ -938,7 +1000,7 @@ impl Ledger {
             },
             query_str,
             &self.created_tables,
-            self.errors.clone(),
+            self.query_errors.clone(),
         )
     }
 
@@ -1017,6 +1079,7 @@ impl Ledger {
                 self.summary_accounts.conversion_currency.clone(),
             ],
             errors: self.errors.clone(),
+            query_errors: self.query_errors.clone(),
             query_refused: self.query_refused,
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
@@ -1115,6 +1178,7 @@ impl Ledger {
             summary_accounts,
             tolerance_multiplier,
             errors: payload.errors,
+            query_errors: payload.query_errors,
             editor_cache,
             query_refused: payload.query_refused,
             created_tables: std::cell::RefCell::default(),
@@ -1123,7 +1187,7 @@ impl Ledger {
 }
 
 #[cfg(test)]
-mod option_warning_severity_tests {
+pub mod option_warning_severity_tests {
     use super::*;
     use crate::types::Severity;
     use rustledger_loader::OptionWarning;
@@ -1134,6 +1198,7 @@ mod option_warning_severity_tests {
             message: "msg".to_string(),
             option: "title".to_string(),
             value: "v".to_string(),
+            site: None,
         }
     }
 
@@ -1213,6 +1278,7 @@ mod option_warning_severity_tests {
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
+            query_errors: Vec::new(),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),
@@ -1241,6 +1307,7 @@ mod option_warning_severity_tests {
             tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
+            query_errors: Vec::new(),
             editor_cache: editor::EditorCache::from_directives(&[]),
             query_refused: false,
             created_tables: std::cell::RefCell::default(),
@@ -1285,6 +1352,7 @@ mod option_warning_severity_tests {
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
+                query_errors: Vec::new(),
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: false,
                 created_tables: std::cell::RefCell::default(),
@@ -1426,8 +1494,9 @@ mod option_warning_severity_tests {
     }
 
     /// And the option error must not cost the ledger its real diagnostics:
-    /// `run_validation` is gated on `load.errors`, so an option folded in
-    /// there would silently swallow the undefined-account error below.
+    /// `run_validation` used to skip on any error in `load.errors`, so an
+    /// option folded in there swallowed the undefined-account error below; it
+    /// validates whatever loaded now (#2937), and this pins that it still runs.
     #[test]
     fn an_invalid_option_does_not_hide_a_real_validation_error() {
         let src = "option \"nonsense_option\" \"x\"\n\
@@ -1485,6 +1554,351 @@ mod option_warning_severity_tests {
         assert!(
             parsed.is_valid(),
             "a warning-only ledger is valid; `rledger check` exits 0 on it"
+        );
+    }
+
+    /// Two files: an E7003 in the main file at line 3, and in the included
+    /// one an invalid `name_equity` (E7008, line 1) and a valid
+    /// `booking_method` (E7009, line 2) (#2925).
+    pub fn included_option_files() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                "main.beancount".to_string(),
+                "option \"title\" \"a\"\ninclude \"sub.beancount\"\noption \"title\" \"b\"\n\
+                 2024-01-01 open Assets:A\n"
+                    .to_string(),
+            ),
+            (
+                "sub.beancount".to_string(),
+                "option \"name_equity\" \"capital\"\noption \"booking_method\" \"FIFO\"\n"
+                    .to_string(),
+            ),
+        ])
+    }
+
+    /// `(code, file, line)` of every option diagnostic, in the loader's
+    /// order, as the loader locates them: what `rledger check` prints.
+    pub fn loader_located(
+        files: HashMap<String, String>,
+    ) -> Vec<(Option<String>, Option<String>, Option<u32>)> {
+        let mut loader = rustledger_loader::Loader::new().with_filesystem(Box::new(
+            rustledger_loader::VirtualFileSystem::from_files(files),
+        ));
+        let load = loader.load(Path::new("main.beancount")).expect("load");
+        load.options
+            .warnings
+            .iter()
+            .map(|w| {
+                let site = w.site.as_ref().expect("a loaded option has a site");
+                (
+                    Some(w.code.to_string()),
+                    Some(site.file.clone()),
+                    u32::try_from(site.line).ok(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drift guard (#2925): the multi-file `Ledger` reports each option
+    /// diagnostic at the file and line the loader gives it, which is what
+    /// `rledger check` prints, an included file's among them.
+    #[test]
+    fn ledger_option_errors_are_located_like_check() {
+        let ledger =
+            Ledger::from_file_map(included_option_files(), "main.beancount").expect("ledger");
+        let located: Vec<_> = ledger
+            .errors
+            .iter()
+            .filter(|e| e.code.as_deref().is_some_and(|c| c.starts_with("E70")))
+            .map(|e| (e.code.clone(), e.file.clone(), e.line))
+            .collect();
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            located,
+            [
+                (s("E7003"), s("main.beancount"), Some(3)),
+                (s("E7008"), s("sub.beancount"), Some(1)),
+                (s("E7009"), s("sub.beancount"), Some(2)),
+            ]
+        );
+        assert_eq!(located, loader_located(included_option_files()));
+        assert!(
+            !ledger.is_valid(),
+            "E7008 in an include is an error, exit 1"
+        );
+    }
+}
+
+/// Every directive type, and every value a `custom` directive or a metadata
+/// entry can hold, survives `serialize` / `fromCache` on both cached types
+/// (#2934).
+///
+/// A `custom` directive or any metadata entry archives a `MetaValue`, whose
+/// `Int(i64)` variant gives it 8-byte alignment. The blob's 12-byte header
+/// left the archive at offset 12, so every such value sat 4 bytes off its
+/// alignment and `fromCache` threw `Deserialization failed: unaligned
+/// pointer`. The round trip only ever ran on ledgers without either, so
+/// nothing caught it.
+///
+/// These run natively under `cargo test` and in node under `wasm-pack test
+/// --node`, where the bytes reach `fromCache` through a JS `Uint8Array`.
+#[cfg(test)]
+mod cache_round_trip_tests {
+    use super::*;
+
+    /// One ledger per directive type, per metadata value type and per
+    /// `custom` value type, and ledgers with each kind of error.
+    const CASES: &[(&str, &str)] = &[
+        ("empty", ""),
+        (
+            "open and close",
+            "2024-01-01 open Assets:Bank USD,EUR \"FIFO\"\n2024-12-31 close Assets:Bank\n",
+        ),
+        (
+            "commodity",
+            "2024-01-01 commodity USD\n  name: \"US Dollar\"\n",
+        ),
+        (
+            "transaction",
+            "2024-01-01 open Assets:Bank USD\n2024-01-01 open Assets:Stock\n\
+2024-01-01 open Expenses:Food USD\n\
+2024-01-02 * \"Shop\" \"Lunch\" #trip ^receipt-1\n  Expenses:Food  5.00 USD\n  Assets:Bank\n\
+2024-01-03 ! \"Broker\"\n  Assets:Stock  10 HOOL {100.00 USD} @ 101.00 USD\n  Assets:Bank  -1000.00 USD\n",
+        ),
+        (
+            "balance and pad",
+            "2024-01-01 open Assets:Bank USD\n2024-01-01 open Equity:Opening\n\
+2024-01-01 pad Assets:Bank Equity:Opening\n2024-01-02 balance Assets:Bank 100.00 USD\n",
+        ),
+        (
+            "price",
+            "2024-01-01 commodity HOOL\n2024-01-02 price HOOL 101.50 USD\n",
+        ),
+        (
+            "note, document, event, query",
+            "2024-01-01 open Assets:Bank\n2024-01-02 note Assets:Bank \"called them\"\n\
+2024-01-03 document Assets:Bank \"statement.pdf\"\n2024-01-04 event \"location\" \"Paris\"\n\
+2024-01-05 query \"cash\" \"SELECT account\"\n",
+        ),
+        ("custom with no values", "2024-01-01 custom \"budget\"\n"),
+        (
+            "custom string",
+            "2024-01-01 custom \"budget\" \"monthly\"\n",
+        ),
+        ("custom date", "2024-01-01 custom \"budget\" 2024-02-01\n"),
+        ("custom bool", "2024-01-01 custom \"budget\" TRUE\n"),
+        ("custom number", "2024-01-01 custom \"budget\" 2.5\n"),
+        ("custom integer", "2024-01-01 custom \"budget\" 42\n"),
+        ("custom amount", "2024-01-01 custom \"budget\" 100.00 USD\n"),
+        (
+            "custom account",
+            "2024-01-01 open Expenses:Food\n2024-01-01 custom \"budget\" Expenses:Food\n",
+        ),
+        (
+            "custom every value",
+            // `concat!` rather than `\` continuations, which would strip the
+            // indentation that makes a line metadata.
+            concat!(
+                "2024-01-01 open Expenses:Food\n",
+                "2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 2024-02-01 TRUE 42 2.5 ",
+                "100.00 USD\n",
+                "  memo: \"meta on a custom\"\n",
+            ),
+        ),
+        (
+            "metadata every value",
+            concat!(
+                "2024-01-01 open Assets:Bank USD\n",
+                "  text: \"s\"\n",
+                "  acct: Assets:Bank\n",
+                "  cur: USD\n",
+                "  tag: #t\n",
+                "  day: 2024-01-02\n",
+                "  num: 2.5\n",
+                "  int: 42\n",
+                "  flag: FALSE\n",
+                "  amt: 1.00 USD\n",
+                "  empty:\n",
+                "2024-01-02 * \"x\"\n",
+                "  txn: 1\n",
+                "  Assets:Bank  1.00 USD\n",
+                "    post: \"p\"\n",
+                "  Assets:Bank  -1.00 USD\n",
+            ),
+        ),
+        (
+            "validation error",
+            "2024-01-01 open Assets:Bank USD\n2024-01-02 balance Assets:Bank 5.00 USD\n\
+2024-01-03 custom \"budget\" Assets:Bank 1.00 USD\n",
+        ),
+        (
+            "parse error",
+            "2024-01-01 open Assets:Bank USD\n  note: \"x\"\n2024-13-45 open Assets:Bad\n\
+2024-01-02 custom \"budget\" 1\n",
+        ),
+        (
+            "option error",
+            "option \"nonsense_option\" \"x\"\n2024-01-01 custom \"budget\" \"x\"\n",
+        ),
+    ];
+
+    /// `src` restores from cache as both `ParsedLedger` and `Ledger`, with the
+    /// same directives, errors and options as the ledger that wrote it.
+    fn assert_round_trips(name: &str, src: &str) {
+        let fresh = ParsedLedger::new(src);
+        let bytes = fresh
+            .serialize()
+            .unwrap_or_else(|_| panic!("{name}: ParsedLedger.serialize failed"));
+        // Decode once through the payload function first: its error is a
+        // `String`, which reads natively, where a `JsError` cannot.
+        if let Err(e) = cache::deserialize_parsed(&bytes) {
+            panic!("{name}: ParsedLedger.fromCache: {e}");
+        }
+        let restored = ParsedLedger::from_cache(&bytes, src)
+            .unwrap_or_else(|_| panic!("{name}: ParsedLedger.fromCache failed"));
+        assert_eq!(
+            restored.directives, fresh.directives,
+            "{name}: ParsedLedger directives"
+        );
+        for (what, a, b) in [
+            ("parse errors", &restored.parse_errors, &fresh.parse_errors),
+            (
+                "option errors",
+                &restored.option_errors,
+                &fresh.option_errors,
+            ),
+            (
+                "validation errors",
+                &restored.validation_errors,
+                &fresh.validation_errors,
+            ),
+        ] {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "{name}: ParsedLedger {what}"
+            );
+        }
+        assert_eq!(
+            format!("{:?}", restored.options),
+            format!("{:?}", fresh.options),
+            "{name}: ParsedLedger options"
+        );
+        assert_eq!(
+            restored.query_refused, fresh.query_refused,
+            "{name}: ParsedLedger query_refused"
+        );
+
+        let entry = "main.beancount";
+        let fresh =
+            Ledger::from_file_map(HashMap::from([(entry.to_string(), src.to_string())]), entry)
+                .unwrap_or_else(|e| panic!("{name}: Ledger load: {e}"));
+        let bytes = fresh
+            .serialize()
+            .unwrap_or_else(|_| panic!("{name}: Ledger.serialize failed"));
+        if let Err(e) = cache::deserialize_ledger(&bytes) {
+            panic!("{name}: Ledger.fromCache: {e}");
+        }
+        let restored = Ledger::from_cache(&bytes)
+            .unwrap_or_else(|_| panic!("{name}: Ledger.fromCache failed"));
+        assert_eq!(
+            restored.directives, fresh.directives,
+            "{name}: Ledger directives"
+        );
+        assert_eq!(
+            format!("{:?}", restored.errors),
+            format!("{:?}", fresh.errors),
+            "{name}: Ledger errors"
+        );
+        assert_eq!(
+            restored.directive_positions, fresh.directive_positions,
+            "{name}: Ledger directive positions"
+        );
+        assert_eq!(
+            format!("{:?}", restored.options),
+            format!("{:?}", fresh.options),
+            "{name}: Ledger options"
+        );
+        assert_eq!(
+            restored.query_refused, fresh.query_refused,
+            "{name}: Ledger query_refused"
+        );
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn every_directive_and_value_type_survives_the_cache_round_trip() {
+        for (name, src) in CASES {
+            // A fixture that failed to parse by accident would cover less than
+            // it claims. One with a parse error still loads what parsed, as
+            // `rledger check` does (#2949), so it archives directives too.
+            let parsed = ParsedLedger::new(src);
+            assert_eq!(
+                parsed.parse_errors.is_empty(),
+                *name != "parse error",
+                "{name}: unexpected parse errors {:?}",
+                parsed.parse_errors
+            );
+            assert_eq!(
+                parsed.directives.is_empty(),
+                *name == "empty",
+                "{name}: the fixture must load directives"
+            );
+            assert_round_trips(name, src);
+        }
+    }
+
+    /// Every `.beancount` file in the repository's test corpora round-trips,
+    /// each loaded on its own. Native only: node has no file system to walk.
+    ///
+    /// The walk covers all of `tests/`, so when the gitignored compatibility
+    /// corpora are present (`tests/compatibility-full/`, fetched on demand,
+    /// and `tests/compatibility/synthetic/`, generated by the compat
+    /// workflow) their ledgers are checked too; a fresh checkout checks the
+    /// tracked fixtures.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_corpus_ledger_survives_the_cache_round_trip() {
+        fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().is_some_and(|x| x == "beancount") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        collect(&root.join("tests"), &mut files);
+        collect(&root.join("examples"), &mut files);
+        files.sort();
+        assert!(
+            files.len() > 100,
+            "the corpus is missing: found {} files under {}",
+            files.len(),
+            root.display()
+        );
+
+        let mut with_custom = 0;
+        for path in &files {
+            let bytes =
+                std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            // A few fixtures are deliberately not UTF-8; JS hands `fromCache` a
+            // string, so read them as it would.
+            let src = String::from_utf8_lossy(&bytes);
+            if src.contains(" custom ") {
+                with_custom += 1;
+            }
+            assert_round_trips(&path.display().to_string(), &src);
+        }
+        assert!(
+            with_custom > 0,
+            "the corpus must hold a `custom` directive to cover #2934"
         );
     }
 }

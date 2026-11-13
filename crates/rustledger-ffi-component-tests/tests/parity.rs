@@ -7,8 +7,11 @@
 //!
 //! Requires the component to be built first:
 //!   cargo build -p rustledger-ffi-component --target wasm32-wasip2
-//! The tests skip (rather than fail) when the artifact is absent, so they don't
-//! break a build that hasn't produced the wasip2 binary.
+//! The artifact is looked up under `$CARGO_TARGET_DIR` when that is set (see
+//! `rustledger_ffi_component_tests::component_path`), else the workspace
+//! `target/`. The tests skip (rather than fail) when the artifact is absent,
+//! printing where they looked, so they don't break a build that hasn't
+//! produced the wasip2 binary.
 
 // `bindgen!` generates an undocumented host-bindings module; quiet its lints
 // (this is a test harness, not shipped API).
@@ -16,8 +19,9 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use rustledger_ffi_component_tests::{compiled_component, component_built};
+use wasmtime::Store;
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
@@ -55,14 +59,8 @@ impl rustledger::ledger::host::Host for Host {
     }
 }
 
-fn component_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/debug/rustledger_ffi_component.wasm")
-}
-
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -83,8 +81,7 @@ fn instantiate() -> Result<(Store<Host>, Rustledger)> {
 /// Like [`instantiate`], but grants the guest read access to `host_dir`,
 /// mounted at `/work`, so `load-file` can read files through WASI.
 fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -138,8 +135,7 @@ fn wit_package_api_version() -> String {
 /// is bumped on a WIT change; this test ensures the *runtime* version tracks it.
 #[test]
 fn version_matches_wit_package() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -155,8 +151,7 @@ fn version_matches_wit_package() -> Result<()> {
 
 #[test]
 fn load_entry_count_matches_jsonrpc() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -177,8 +172,7 @@ fn load_entry_count_matches_jsonrpc() -> Result<()> {
 
 #[test]
 fn query_row_count_matches_executor() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -211,8 +205,7 @@ const LEDGER_WITH_HISTORY: &str = "\
 
 #[test]
 fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -238,7 +231,7 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
 
 #[test]
 fn query_expands_pads() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -266,7 +259,7 @@ fn query_expands_pads() -> Result<()> {
 
 #[test]
 fn query_short_circuits_on_parse_error() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -281,12 +274,31 @@ fn query_short_circuits_on_parse_error() -> Result<()> {
         "parse error must surface, not be swallowed"
     );
     assert!(r.rows.is_empty(), "no rows on parse error");
+    // The load goes on past a parse error (#2949), so the entries that did
+    // parse would give rows: the parse error alone must still refuse
+    // (review of #2946).
+    let r = inst.rustledger_ledger_ledger().call_query(
+        &mut store,
+        "2024-01-01 open Assets:A\n2024-01-01 open Income:B\n2024-01-03 open\n\
+         2024-01-04 * \"x\"\n  Assets:A  1 USD\n  Income:B\n",
+        "SELECT account",
+    )?;
+    assert_eq!(
+        r.errors
+            .iter()
+            .map(|e| (e.code.as_deref(), e.line))
+            .collect::<Vec<_>>(),
+        [(Some("P0012"), Some(3))],
+        "{:?}",
+        r.errors
+    );
+    assert!(r.rows.is_empty(), "a parse error refuses: {:?}", r.rows);
     Ok(())
 }
 
 #[test]
 fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -322,7 +334,7 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
 
 #[test]
 fn custom_directive_values_keep_their_type_tag() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -365,7 +377,7 @@ fn custom_directive_values_keep_their_type_tag() -> Result<()> {
 
 #[test]
 fn load_file_reads_and_resolves_includes() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -397,7 +409,7 @@ fn load_file_reads_and_resolves_includes() -> Result<()> {
 
 #[test]
 fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -451,7 +463,7 @@ fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
 
 #[test]
 fn load_file_runs_requested_plugin() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -537,8 +549,7 @@ fn assert_generated_opens(entries: &[rustledger::ledger::types::Directive], surf
 
 #[test]
 fn load_runs_auto_accounts_synth() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -554,8 +565,7 @@ fn load_runs_auto_accounts_synth() -> Result<()> {
 
 #[test]
 fn load_file_runs_auto_accounts_synth() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -591,8 +601,7 @@ const LEDGER_WITH_COST: &str = "\
 /// recorded as broken.
 #[test]
 fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -656,8 +665,7 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
 /// built a fresh executor, so the table was gone by the next.
 #[test]
 fn session_query_keeps_created_tables() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -690,8 +698,7 @@ fn session_query_keeps_created_tables() -> Result<()> {
 /// back to entry-inferred 2dp without).
 #[test]
 fn session_format_honors_display_precision() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -753,8 +760,7 @@ fn session_format_honors_display_precision() -> Result<()> {
 /// can differ by an ULP in the XIRR/TWR iteration.
 #[test]
 fn session_returns_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     const LEDGER: &str = "\
@@ -837,8 +843,7 @@ option \"operating_currency\" \"USD\"
 fn session_clamp_preserves_cost_basis() -> Result<()> {
     use rustledger::ledger::types::{CostNumber, Directive};
 
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -890,8 +895,7 @@ fn session_clamp_preserves_cost_basis() -> Result<()> {
 #[test]
 fn clamp_opening_balance_contra_keeps_cost() -> Result<()> {
     use rustledger::ledger::types::Directive;
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -940,8 +944,7 @@ fn clamp_opening_balance_contra_keeps_cost() -> Result<()> {
 /// re-rendering entries to source.
 #[test]
 fn query_entries_matches_source_query() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -980,8 +983,7 @@ fn query_entries_matches_source_query() -> Result<()> {
 /// and was lost when the FFI surface moved onto the shared pipeline (#1462).
 #[test]
 fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -1022,8 +1024,7 @@ fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
 /// instead of a silent green. Load-vs-validate parity for the balance check.
 #[test]
 fn load_reports_balance_assertion_failure() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1087,8 +1088,7 @@ fn load_reports_balance_assertion_failure() -> Result<()> {
 /// layer had the same bug, fixed in #2238).
 #[test]
 fn same_date_balance_assertions_carry_their_own_diffs() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1141,8 +1141,7 @@ fn same_date_balance_assertions_carry_their_own_diffs() -> Result<()> {
 /// (a standalone-validation safety net) must not duplicate it.
 #[test]
 fn load_oversell_reports_single_error() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1183,8 +1182,7 @@ fn load_oversell_reports_single_error() -> Result<()> {
 /// ciphertext; we assert that plaintext is what gets parsed.
 #[test]
 fn load_file_decrypts_via_host_import() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -1228,8 +1226,7 @@ fn load_file_decrypts_via_host_import() -> Result<()> {
 /// native `rustledger-importer` engine on the result.
 #[test]
 fn importer_extract_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     const CSV: &str =
@@ -1364,8 +1361,7 @@ fn importer_extract_matches_native_engine() -> Result<()> {
 /// compared within a tolerance.
 #[test]
 fn session_budget_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     // A leap February (the denominator that catches a naive 30-day month), a
@@ -1482,8 +1478,7 @@ option \"operating_currency\" \"USD\"
 /// silently-substituted default.
 #[test]
 fn session_budget_rejects_an_empty_or_malformed_window() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1541,7 +1536,7 @@ fn assert_next_query_answers(store: &mut Store<Host>, inst: &Rustledger) -> Resu
 /// the brackets, 12 for `sum(`, 48 for the `+`s.)
 #[test]
 fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1582,7 +1577,7 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
 /// nesting error, and a following query still answers.
 #[test]
 fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1608,6 +1603,133 @@ fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
             "{errors:?}"
         );
         assert_next_query_answers(&mut store, &inst)?;
+    }
+    Ok(())
+}
+
+/// The ledgers `rledger check` is pinned to in
+/// `rustledger/tests/ffi_check_parity_test.rs` (#2929, #2935).
+mod check_parity_cases {
+    include!("../../rustledger/tests/ffi_check_parity/cases.rs");
+}
+use check_parity_cases::{CHECK_PARITY_CASES, CheckParityCase};
+
+/// Code, severity, file, line, column, message.
+type CheckRow = (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    String,
+);
+
+/// Each error as a row, sorted, a file under `/work/` named relative to it.
+fn check_rows(errors: &[rustledger::ledger::types::Error]) -> Vec<CheckRow> {
+    let mut rows: Vec<_> = errors
+        .iter()
+        .map(|e| {
+            (
+                e.code.clone(),
+                e.severity.clone(),
+                e.filename
+                    .as_ref()
+                    .map(|f| f.strip_prefix("/work/").unwrap_or(f).to_string()),
+                e.line,
+                e.column,
+                e.message.clone(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// `case`'s diagnostics as rows, the entry file named `entry_as`.
+fn expected_rows(case: &CheckParityCase, entry_as: &str) -> Vec<CheckRow> {
+    let mut rows: Vec<_> = case
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                Some(d.code.to_string()),
+                d.severity.to_string(),
+                d.file
+                    .map(|f| if f == case.entry { entry_as } else { f }.to_string()),
+                d.line,
+                d.column,
+                d.message.to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Through the built component, `load`, `load-file`, `validate` and
+/// `validate-file` report what `rledger check` reports for the same ledger:
+/// code, severity, file, line and message of the option diagnostics (#2929)
+/// and of the validation findings of a ledger with includes (#2935).
+#[test]
+fn check_parity_through_the_component() -> Result<()> {
+    if !component_built() {
+        return Ok(());
+    }
+    for case in CHECK_PARITY_CASES {
+        let dir = tempfile::tempdir()?;
+        for (path, text) in case.files {
+            std::fs::write(dir.path().join(path), text)?;
+        }
+        let entry = format!("/work/{}", case.entry);
+        let want = expected_rows(case, case.entry);
+        let (mut store, inst) = instantiate_in(dir.path())?;
+        let ledger = inst.rustledger_ledger_ledger();
+
+        let loaded = ledger.call_load_file(&mut store, &entry, false, &[], false)?;
+        assert_eq!(
+            check_rows(&loaded.errors),
+            want,
+            "{} via load-file",
+            case.name
+        );
+        let validated = ledger.call_validate_file(&mut store, &entry)?;
+        assert_eq!(
+            check_rows(&validated.errors),
+            want,
+            "{} via validate-file",
+            case.name
+        );
+        assert!(!validated.valid, "{}", case.name);
+        assert_eq!(
+            (validated.parse_error_count, validated.validate_error_count),
+            case.counts(),
+            "{}",
+            case.name
+        );
+
+        if case.is_single_file() {
+            let source = case.entry_text();
+            let loaded = ledger.call_load(&mut store, source, "main.beancount", false)?;
+            assert_eq!(
+                check_rows(&loaded.errors),
+                expected_rows(case, "main.beancount"),
+                "{} via load",
+                case.name
+            );
+            let validated = ledger.call_validate(&mut store, source)?;
+            assert_eq!(
+                check_rows(&validated.errors),
+                expected_rows(case, "<string>"),
+                "{} via validate",
+                case.name
+            );
+            assert_eq!(
+                (validated.parse_error_count, validated.validate_error_count),
+                case.counts(),
+                "{}",
+                case.name
+            );
+        }
     }
     Ok(())
 }

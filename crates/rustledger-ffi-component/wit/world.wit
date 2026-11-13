@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.18.0;
+package rustledger:ledger@4.0.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -137,10 +137,12 @@ interface types {
     amount: amount,
     tolerance: option<string>,
     // `computed - asserted` in the asserted currency, when the assertion was
-    // checked (present on `load`/`load-file` and `validate`; `none` if load had
-    // parse errors or the account is unknown). Zero means the assertion matched
-    // exactly; non-zero means it failed. Lets UIs render per-assertion pass/fail
-    // without re-deriving the balance. Added in 3.1.0 (#1663).
+    // checked (present on `load`/`load-file` and `validate`, also when the
+    // source has a parse error elsewhere, since the entries that parsed are
+    // validated as `rledger check` validates them; `none` if the assertion was
+    // not checked, e.g. the account is unknown). Zero means the assertion
+    // matched exactly; non-zero means it failed. Lets UIs render per-assertion
+    // pass/fail without re-deriving the balance. Added in 3.1.0 (#1663).
     diff: option<amount>,
     meta: meta,
   }
@@ -198,8 +200,29 @@ interface types {
   }
 
   /// A load / validate / query error.
+  ///
+  /// `filename`, `line` and `column` say where the error is: the file it is
+  /// in, the 1-based line in it, and the 1-based column on that line, counted
+  /// in characters (not bytes, so a BOM or a multi-byte character before it
+  /// counts once), as `rledger check` counts it. On a multi-file load that
+  /// is an included file's own path; for source text, the `filename` given
+  /// to `load`, `<stdin>` for `batch` and a session from source, and
+  /// `<string>` for `validate` and `query`. `code` is the diagnostic code
+  /// `rledger check` reports (`E2001`, `E7002`, `P0012`, ...). Each is
+  /// `none` where the error has none (4.0.0, #2935).
+  ///
+  /// A finding on a directive a plugin made has no place in the text, and
+  /// the surfaces differ on it. The file surfaces (`load-file`,
+  /// `validate-file`, `query-file`, a session from a file) report it as
+  /// `rledger check` does: at the plugin's placeholder name, such as
+  /// `<check_closing>`, and the line the plugin gave it, which is often 0, so
+  /// `line` is not 1-based there, and at `column` 0, as there is no text to
+  /// count in. The source-text surfaces (`load`, `validate`) report it with
+  /// no `filename`, no `line` and no `column`.
   record error {
     message: string,
+    code: option<string>,
+    filename: option<string>,
     line: option<u32>,
     column: option<u32>,
     field: option<string>,
@@ -522,7 +545,7 @@ interface ledger {
     queries: list<query-result>,
   }
 
-  /// The api-version string this component implements (e.g. "3.0"). The WIT
+  /// The api-version string this component implements (e.g. "4.0"). The WIT
   /// contract is itself the versioned wire shape; this exists for runtime
   /// negotiation, replacing the `api_version` field formerly stamped onto every
   /// JSON-RPC response.
@@ -534,6 +557,11 @@ interface ledger {
   /// synthesized `Padding` transactions in the returned entries (sorted by
   /// date, no source location) — balance-computing consumers want this; the
   /// `false`/default keeps the source-faithful stream (#1628).
+  ///
+  /// `errors` ends with the ledger's option diagnostics (E7001 to E7011,
+  /// `severity` `error` or `warning` as `rledger check` reports them, `phase`
+  /// `parse`, at the option's line), after the load's and validation's;
+  /// before 4.0.0 they were never reported (#2929).
   load: func(source: string, filename: string, expand-pads: bool) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
   /// By default the include graph is confined to the entry file's directory
@@ -549,14 +577,36 @@ interface ledger {
   /// names. `expand-pads` materializes `pad` directives into synthesized
   /// `Padding` transactions in the returned entries (see `load`); default
   /// `false` keeps the source-faithful stream (#1628).
+  ///
+  /// `errors` holds what `rledger check` reports for the ledger: the load's,
+  /// the `plugins`', the validation findings (a failed balance assertion,
+  /// at its own line, which is a line of the file it is in), then the option
+  /// diagnostics, as `load` lists them. Before 4.0.0 it held no validation
+  /// finding and no option diagnostic (#2929, #2935). `plugins` run unless the
+  /// load reported an error (a warning, a validation finding or an option
+  /// diagnostic does not stop them; before 4.0.0 a warning did).
   load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>, expand-pads: bool) -> load-result;
 
-  /// Validate source text (parse + semantic checks).
+  /// Validate source text (parse + semantic checks). `errors` ends with the
+  /// option diagnostics, as `load` lists them, counted in neither count, and
+  /// `valid` is false only when an entry has `severity` `error`; before
+  /// 4.0.0 the option diagnostics were missing and a warning made `valid`
+  /// false (#2929).
   validate: func(source: string) -> validate-result;
-  /// Like `validate`, but from a file path.
+  /// Like `validate`, but the ledger is loaded from a file path with its
+  /// includes (confined to the entry file's directory tree, as `query-file`
+  /// confines them) and validated as `rledger check` validates it, each
+  /// finding at its own line. Before 4.0.0 the file's text was validated as
+  /// one source, its includes unread (#2935).
   validate-file: func(path: string) -> validate-result;
 
   /// Run a BQL query against source text.
+  ///
+  /// `errors` lists the option diagnostics too, as `load` does, but a
+  /// rejected `booking_method` whose ledger is booked another way (which
+  /// refuses the query, #2911) is listed as the refusal, which names the
+  /// option, not as its plain E7002. `query-file`, `batch`, `batch-file` and
+  /// `session.query` list them the same way.
   ///
   /// It refuses, with an empty result carrying the load errors, when the
   /// source failed to parse or a transaction failed to book, the rule

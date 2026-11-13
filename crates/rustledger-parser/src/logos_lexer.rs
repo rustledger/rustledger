@@ -17,7 +17,9 @@ use std::ops::Range;
 //
 // No BOM-aware lexer callback, no `Token::Bom` variant, and no
 // BOM regex in the Token enum — but the `Err(()) => ...` arm in
-// `tokenize` DOES contain one mid-file-BOM special case: it preserves
+// `tokenize` DOES contain one mid-file-BOM special case: a BOM that
+// starts its line keeps its own extent (elsewhere it starts an invalid run
+// to the next blank, like any other error; #2928), and it preserves
 // `at_line_start` and advances `last_newline_end` past leading BOM
 // bytes in the error span, so indented content on the same logical
 // line still emits an `Indent` token. That logic lives in the
@@ -134,10 +136,15 @@ pub enum Token<'src> {
     ///
     /// One deliberate difference: a BOM (U+FEFF) does not START an account
     /// here (it may continue one). beancount lexes `\u{feff}Assets:A` as one
-    /// account and rejects the name; here the BOM stays its own
-    /// layout-transparent error token (`apply_err_layout_transparency`), so
+    /// account and rejects the name; here a BOM at the start of a line stays its
+    /// own layout-transparent error token (`apply_err_layout_transparency`), so
     /// the directive of a concatenated file after it still parses, under the
-    /// `BomInDirectiveBody` diagnostic. Both reject the line.
+    /// `BomInDirectiveBody` diagnostic. Anywhere else it starts an invalid run
+    /// to the next blank (#2928), unless an account follows it: then the run
+    /// of BOMs is its own token there too, so it is reported as the stray BOM
+    /// it is, and the account lexes as one (`bom_led_account`).
+    /// beancount reads the BOMs into the account and rejects the name when it
+    /// loads.
     ///
     /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
     /// control and line-separator characters (NBSP U+00A0, LINE SEPARATOR
@@ -691,6 +698,63 @@ pub fn is_valid_account_name_strict(name: &str) -> bool {
         })
 }
 
+/// A run of BOMs that starts `text`, with nothing else: its length. Every BOM
+/// run the lexer and the error recovery look at is trimmed here, so the test
+/// counters see each byte it costs.
+pub(crate) fn leading_bom_run(text: &str) -> usize {
+    let run = text.len() - text.trim_start_matches(crate::bom::BOM_CHAR).len();
+    #[cfg(test)]
+    test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(c.get() + run));
+    run
+}
+
+/// When `text` starts with a run of BOMs that beancount reads as the start of
+/// an account, the run's length and the account's end (both in bytes from
+/// the start of `text`). `None` otherwise.
+///
+/// beancount's account type is `([A-Z]|{UTF-8-ONLY})` followed by its
+/// continuation class, so a BOM, being non-ASCII, may be an account's first
+/// character: `\u{feff}Assets:A`, `\u{feff}assets:A`, `\u{feff}1:A` and
+/// `\u{feff}:A` are each ONE account there, whose name is rejected only
+/// when the file loads. The lexer's own account rule decides it here, on the
+/// word with a stand-in non-ASCII character in the BOMs' place (the run's
+/// other BOMs are continuation characters, which the stand-in covers too).
+///
+/// Linear: it reads only the characters an account may hold (ASCII letters
+/// and digits, `-`, `:` and any non-ASCII character), so it stops at the
+/// first one that ends the account, whatever else the blank-free run holds.
+/// Each byte it reads is one the token it decides (the BOMs and the account
+/// beancount reads them into) then consumes, so a run of BOM-led accounts
+/// (`<BOM>1:A~<BOM>1:A~...`) is read once over, not once per account.
+pub(crate) fn bom_led_account(text: &str) -> Option<(usize, usize)> {
+    const STAND_IN: char = '\u{dc}'; // Ü
+    let run = leading_bom_run(text);
+    if run == 0 {
+        return None;
+    }
+    let after = &text[run..];
+    let in_account = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == ':' || !c.is_ascii();
+    let word = &after[..after.find(|c: char| !in_account(c)).unwrap_or(after.len())];
+    #[cfg(test)]
+    test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(c.get() + word.len()));
+    let stand_in = format!("{STAND_IN}{word}");
+    match Token::lexer(&stand_in).next() {
+        Some(Ok(Token::Account(account))) => Some((run, run + account.len() - STAND_IN.len_utf8())),
+        _ => None,
+    }
+}
+
+/// Whether an account begins right where the BOMs that start `text` end, as
+/// a token of its own (`\u{feff}Assets:A`, but not `\u{feff}assets:A`, which
+/// is an account only with its BOM). See [`bom_led_account`].
+pub(crate) fn account_follows_bom_run(text: &str) -> bool {
+    bom_led_account(text).is_some_and(|(run, end)| {
+        let rest = &text[run..end];
+        let mut lexer = Token::lexer(rest);
+        matches!(lexer.next(), Some(Ok(Token::Account(_)))) && lexer.span().end == rest.len()
+    })
+}
+
 /// Whether `name` lexes to exactly one [`Token::Account`] spanning it.
 fn lexes_as_one_account(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
@@ -870,6 +934,16 @@ impl<'src> TokenIter<'src> {
         }
     }
 
+    /// Tokenize `source` from `from`, a char boundary in the middle of a
+    /// line: no line-start rule (`#` comment, `*` heading, indentation)
+    /// applies to the first token, as none would to a token there.
+    pub(crate) fn new_mid_line(source: &'src str, keep_whitespace: bool, from: usize) -> Self {
+        let mut tokens = Self::new(source, keep_whitespace);
+        tokens.lexer.bump(from);
+        tokens.at_line_start = false;
+        tokens
+    }
+
     /// Replace the lexer with one over `source[..lex_end]`, positioned at
     /// `from`. In tests, count the bytes the new lexer can see, so the
     /// linear-cost guard can tell a restart over the rest of the file from
@@ -885,8 +959,10 @@ impl<'src> TokenIter<'src> {
     /// The first lexer error in the run of non-blank characters that goes on
     /// at `from`, right after a lone capital: its start, and a lexer that has
     /// just produced it. `None`, and the run remembered as clean, when every
-    /// token that starts in the run lexes, or the first error is a `\r` or a
-    /// mid-file BOM (which keep their own extent; see the `Err` arm).
+    /// token that starts in the run lexes, or the first error is a `\r`
+    /// (which keeps its own extent; see the `Err` arm). A BOM is an error
+    /// like any other here: it keeps its own extent only at the start of a
+    /// line, and a run that goes on after a lone capital is never there.
     ///
     /// Lexes on a clone of the lexer, dropped unless it is returned. Linear:
     /// a run with an error becomes one error token, so it is not lexed again,
@@ -910,7 +986,7 @@ impl<'src> TokenIter<'src> {
                 break;
             }
             if result.is_err() {
-                if self.source[at..].starts_with(['\r', crate::bom::BOM_CHAR]) {
+                if self.source[at..].starts_with('\r') {
                     break;
                 }
                 return Some((at, peek));
@@ -1014,6 +1090,11 @@ pub(crate) mod test_counters {
         /// Bytes `TokenIter::error_later_in_run` scanned for the end of a run
         /// after a lone capital, on this thread.
         pub(crate) static CAPITAL_RUN_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+        /// Bytes logos scanned into the error spans the `Err` arm received,
+        /// and bytes the BOM-run and account lookaheads looked at, on this
+        /// thread.
+        pub(crate) static ERROR_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
     }
 }
@@ -1251,15 +1332,50 @@ impl<'src> Iterator for TokenIter<'src> {
                     //
                     // Two errors keep their own extent. A `\r` with more of
                     // its line after it (beancount reads it as a space; see
-                    // `stray_cr_trivia_end`). And a mid-file BOM at the start
-                    // of the error, which is layout-transparent here
+                    // `stray_cr_trivia_end`). And a mid-file BOM that starts
+                    // its line, which is layout-transparent here
                     // (`apply_err_layout_transparency`) so that the directive
                     // of a concatenated file after it still parses, under its
                     // own `BomInDirectiveBody` diagnostic: deliberately not
                     // beancount's `Invalid token: '\ufeff2024-01-01'`.
+                    //
+                    // Only there (#2928). Anywhere else on a line, layout is
+                    // not at stake, and a BOM-led error runs to the next
+                    // blank like any other, as beancount's does: `<BOM>"x"`,
+                    // `<BOM>#!d` and `<BOM>#+x` are each one invalid token,
+                    // so the quote opens no string and the `#!` / `#+` starts
+                    // no token of its own.
                     let text = &source[span.start..];
-                    let end = if text.starts_with(['\r', crate::bom::BOM_CHAR]) {
+                    #[cfg(test)]
+                    test_counters::ERROR_SCANNED_BYTES
+                        .with(|c| c.set(c.get() + (span.end - span.start)));
+                    // `span.start == last_newline_end` is the test that
+                    // matters: on the AST path, which drops whitespace,
+                    // `at_line_start` still holds for a BOM after the
+                    // indentation (`  <BOM>"y"`), which is mid-line. The
+                    // offset test alone would do today, as `last_newline_end`
+                    // moves only where `at_line_start` is set; the flag keeps
+                    // `new_mid_line`'s promise (no line-start rule for its
+                    // first token) without relying on its offset being past 0.
+                    let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
+                        && self.at_line_start
+                        && span.start == self.last_newline_end;
+                    let end = if text.starts_with('\r') || bom_starts_line {
                         span.end
+                    } else if let Some((run, account_end)) = bom_led_account(text) {
+                        // A run of BOMs beancount reads as an account's start
+                        // (`bom_led_account`). When an account of its own
+                        // follows the BOMs (`$x \u{feff}Assets:A`), they are
+                        // one token, as the line-start ones are, and the
+                        // account lexes as one; otherwise (`\u{feff}assets:A`,
+                        // `\u{feff}1:A`) the token ends where beancount's
+                        // account does. Either way the error recovery counts
+                        // it as none of beancount's invalid tokens.
+                        if account_follows_bom_run(text) {
+                            span.start + run
+                        } else {
+                            span.start + account_end
+                        }
                     } else {
                         span.start + text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())
                     };
@@ -1958,6 +2074,206 @@ mod tests {
         );
     }
 
+    /// A long run of BOMs, at the start of a line or in the middle of one, and
+    /// glued to an invalid run or to an account, is lexed and parsed in linear time: no
+    /// BOM makes logos or the account lookahead rescan the BOMs after it, and
+    /// no restart sees the rest of the line again (#2928). A version that let
+    /// a BOM start an account scanned each line-start BOM through every BOM
+    /// after it, and a 1 MB line took over a minute.
+    #[test]
+    fn test_tokenize_long_bom_runs_are_linear() {
+        const SHORT: usize = 20_000;
+        const LONG: usize = 350_000;
+        let bom = crate::bom::BOM;
+        // Each shape at a short run, then at a 1 MB one: the byte counters
+        // (the primary guard) must stay linear in both, and the long one runs
+        // on its own thread under a time budget from the short one's time, as
+        // a backstop for a rescan the counters do not see (a lookahead that
+        // trims the rest of the run itself). Linear, the long run takes about
+        // `LONG / SHORT` times the short one; quadratic, the square of that.
+        // The short run gets four times a BOM-free reference of its size
+        // plus a second (its slowest linear shape takes about 0.6 of the
+        // reference, and the reference slows with the machine), so a version
+        // quadratic on it fails within seconds; the long one gets ten times
+        // the linear ratio plus five seconds. Both run on their own thread,
+        // and fail once their budget runs out instead of hanging.
+        let shapes = |count: usize| {
+            let run = bom.repeat(count);
+            let accounts = format!("~{bom}1:A").repeat(count / 2);
+            vec![
+                format!("x\n{run}a\n"),
+                format!("x\n{run}Assets:A\n"),
+                format!("x {run}a\n"),
+                format!("x {run}Assets:A\n"),
+                format!("x\n{run} a\n"),
+                // A blank-free run of BOM-led accounts, after a BOM-led
+                // account at the start of a line, after an invalid token, and
+                // after a line-start BOM before an account of its own.
+                format!("x\n{bom}assets:A{accounts}\n"),
+                format!("x $x {bom}assets:A{accounts}\n"),
+                format!("x\n{bom}Assets:A{accounts}\n"),
+                // A `<BOM>*` heading rest of `{#` tokens, each resuming the
+                // rest's lexer after its brace.
+                format!("x\n{bom}* H{}\n", " {#t{#$x".repeat(count / 2)),
+            ]
+        };
+        for (short, long) in shapes(SHORT).into_iter().zip(shapes(LONG)) {
+            let shape = long.chars().take(12).collect::<String>();
+            // A BOM-free input of the short run's size, timed just before it,
+            // so the cap scales with the machine's load (the slowest linear
+            // shape takes about 0.6 of it).
+            let reference = linear_bom_run_cost(&format!("x\n{}\n", "a b ".repeat(SHORT)));
+            let short_budget = reference * 4 + std::time::Duration::from_secs(1);
+            let short_took = cost_within(short, short_budget, &shape, "short");
+            let budget = short_took * u32::try_from(10 * LONG / SHORT).expect("a small ratio")
+                + std::time::Duration::from_secs(5);
+            let took = cost_within(long, budget, &shape, "1 MB");
+            assert!(took <= budget, "{shape:?}...: {took:?} over {budget:?}");
+        }
+    }
+
+    /// `linear_bom_run_cost` of `source` on its own thread, failing once
+    /// `budget` runs out rather than waiting on a quadratic run; a panic of
+    /// the worker (a counter assertion, say) is re-raised as the failure.
+    fn cost_within(
+        source: String,
+        budget: std::time::Duration,
+        shape: &str,
+        run: &str,
+    ) -> std::time::Duration {
+        let (done, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let took = linear_bom_run_cost(&source);
+            // The receiver is gone only once the test has failed.
+            let _ = done.send(took);
+        });
+        match wait.recv_timeout(budget) {
+            Ok(took) => took,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => panic!("{shape:?}...: the {run} run sent no time"),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{shape:?}...: the {run} run took over {budget:?}: quadratic")
+            }
+        }
+    }
+
+    /// Lex and parse `source`, check the byte counters stayed linear in its
+    /// length, and return how long it took.
+    fn linear_bom_run_cost(source: &str) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(0));
+        test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
+        let tokens = tokenize_lossless(source);
+        assert!(!tokens.is_empty());
+        // The whole parse too: its error recovery asks about each BOM
+        // token, and a lookahead over the rest of the run per BOM was
+        // quadratic there while the lexer was linear.
+        let result = crate::parse(source);
+        assert!(!result.errors.is_empty());
+        let scanned = test_counters::ERROR_SCANNED_BYTES.with(std::cell::Cell::get);
+        let restarted = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
+        assert!(
+            scanned <= 8 * source.len() && restarted <= 8 * source.len(),
+            "{} bytes: {scanned} scanned in errors, {restarted} seen by restarts",
+            source.len()
+        );
+        started.elapsed()
+    }
+
+    /// The error tokens of `source`, through the lossless (CST) tokenizer.
+    fn error_tokens(source: &str) -> Vec<&str> {
+        tokenize_lossless(source)
+            .into_iter()
+            .filter_map(|(t, _)| match t {
+                Token::Error(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// In the middle of a line, a BOM-led error runs to the next space, tab
+    /// or line ending, as beancount's `<INVALID>[^ \t\n\r]+` does (#2928): a
+    /// `"` after the BOM opens no string, and a `#!` or `#+` starts no token
+    /// of its own. Two BOMs in a row are one run too.
+    #[test]
+    fn test_tokenize_mid_line_bom_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        for (rest, run) in [
+            (format!("{bom}\"x\" USD"), format!("{bom}\"x\"")),
+            (format!("{bom}#!d"), format!("{bom}#!d")),
+            (format!("{bom}#+x\tUSD"), format!("{bom}#+x")),
+            (format!("{bom}{bom}\"x\"\n"), format!("{bom}{bom}\"x\"")),
+            (format!("x{bom}\"y\""), format!("x{bom}\"y\"")),
+        ] {
+            let source = format!("2024-01-02 * \"n\" {rest}");
+            assert_eq!(error_tokens(&source), vec![run.as_str()], "{source:?}");
+        }
+    }
+
+    /// After a lone capital, a BOM is an error like any other: the run from
+    /// the capital on is one error token, so its quote opens no string.
+    #[test]
+    fn test_tokenize_bom_after_lone_capital_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        let source = format!("2024-01-02 * \"n\" A{bom}\"x\" USD\n");
+        assert_eq!(
+            error_tokens(&source),
+            vec![format!("A{bom}\"x\"").as_str()],
+            "{source:?}"
+        );
+    }
+
+    /// At the start of a line a BOM still keeps its own extent (layout
+    /// transparency for concatenated files, #2928 leaves it as it was): the
+    /// date after it lexes, and so does a quote, each BOM being one token.
+    #[test]
+    fn test_tokenize_line_start_bom_keeps_own_extent() {
+        let bom = crate::bom::BOM;
+        for (source, errors) in [
+            (format!("x\n{bom}2024-01-02 open Assets:A\n"), vec![bom]),
+            (format!("x\n{bom}{bom}\"q\"\n"), vec![bom, bom]),
+        ] {
+            let mut want = vec!["x"];
+            want.extend(errors);
+            assert_eq!(error_tokens(&source), want, "{source:?}");
+        }
+        let source = format!("x\n{bom}2024-01-02 open Assets:A\n");
+        assert!(
+            tokenize_lossless(&source)
+                .iter()
+                .any(|(t, _)| matches!(t, Token::Date(_))),
+            "{source:?}"
+        );
+    }
+
+    /// A BOM after a line's indentation is in the middle of the line, so it
+    /// runs to the next blank like any other mid-line BOM. On the AST path
+    /// (`tokenize`, which drops whitespace) `at_line_start` still holds when
+    /// the BOM's error arrives, so only `span.start == last_newline_end`
+    /// tells it from a BOM in column 0: without it, `<BOM>` keeps its own
+    /// extent, is layout, and the `"y"` after it lexes as an indented string.
+    /// (No `Indent` comes before an error token; that is unchanged here.)
+    #[test]
+    fn test_tokenize_indented_bom_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        let source = format!("x\n  {bom}\"y\" z\n");
+        let run = format!("{bom}\"y\"");
+        let tokens: Vec<_> = tokenize(&source).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Error("x"),
+                Token::Newline,
+                Token::Error(run.as_str()),
+                Token::Error("z"),
+                Token::Newline,
+            ],
+            "{source:?}"
+        );
+    }
+
     // ===== Direct tests of `apply_err_layout_transparency` =====
     //
     // These tests exercise the helper independently of logos's
@@ -2439,5 +2755,17 @@ mod tests {
         for name in ["Assets:\u{e9}clair", "Assets:A_b", "Assets", "1A:B"] {
             assert!(!ok(name), "{name}");
         }
+    }
+
+    /// `new_mid_line` lexes from the middle of a line: no line-start rule
+    /// applies to its first token, so the blanks and the word before it are
+    /// not read as an indentation (`Indent`) ahead of the `#t`.
+    #[test]
+    fn test_token_iter_new_mid_line_applies_no_line_start_rule() {
+        let tokens: Vec<_> = TokenIter::new_mid_line(" x #t", true, 3).collect();
+        assert!(
+            matches!(tokens.as_slice(), [(Token::Tag("#t"), _)]),
+            "{tokens:?}"
+        );
     }
 }

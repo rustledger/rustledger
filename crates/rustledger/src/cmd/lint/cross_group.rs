@@ -86,6 +86,8 @@ struct Site {
     /// Why it cannot be told apart from another transaction at its location,
     /// when it cannot.
     unidentified: Option<&'static str>,
+    /// Whether this is a padding entry, whose narration is derived.
+    padding: bool,
 }
 
 fn matches_prefix(account: &str, prefix: &str) -> bool {
@@ -124,7 +126,7 @@ fn parse_groups(values: &[String]) -> Result<BTreeMap<String, BTreeSet<String>>>
                     prefix.contains(':')
                         || !rustledger_parser::is_valid_account_name(&format!("{prefix}:A")),
                     "--group {name}: account prefix {prefix:?} is a bare root; a prefix \
-                     needs a root and at least one component, such as \"{prefix}:{name}\""
+                     needs a root and at least one component, such as \"{prefix}:Example\""
                 );
                 anyhow::ensure!(
                     rustledger_parser::is_valid_account_name(prefix),
@@ -281,8 +283,17 @@ impl<'g> Audit<'g> {
         };
         let accounts: Vec<String> = txn.postings.iter().map(|p| p.account.to_string()).collect();
         if let Some((previous, previous_accounts)) = self.transactions.get(&site.key) {
+            // A padding entry's narration states the padded amount, which
+            // depends on what each input posted before the pad; like a
+            // transaction's amounts, it is not compared. Its accounts are.
+            let same = previous.file == finding.file
+                && previous.line == finding.line
+                && previous.date == finding.date
+                && previous.groups == finding.groups
+                && (site.padding || previous.narration == finding.narration)
+                && previous_accounts == &accounts;
             anyhow::ensure!(
-                previous == &finding && previous_accounts == &accounts,
+                same,
                 "{}:{}: transaction differs between input ledgers",
                 finding.file,
                 finding.line
@@ -297,37 +308,129 @@ impl<'g> Audit<'g> {
 /// Where the padding entry for `pad` and `balance` is: at the `pad`, as
 /// beancount locates it (and as `merge_with_padding_spanned` locates it for
 /// `rledger query`).
-fn padding_site(ledger: &Ledger, pad: &Spanned<Directive>, balance: &Spanned<Directive>) -> Site {
+///
+/// A located pad identifies the entry, together with its balance: by the
+/// balance's location, or, for a balance a plugin inserted with none, by its
+/// date and currency (a pad pads each currency of a balance once). A pad a
+/// plugin inserted with no location cannot be told apart from another: each
+/// such entry gets a key of its own, numbered across the run by
+/// `unlocated_pads`, so unrelated ones are never pooled.
+fn padding_site(
+    ledger: &Ledger,
+    pad: &Spanned<Directive>,
+    balance: &Spanned<Directive>,
+    unlocated_pads: &mut usize,
+) -> Site {
     let source_of = |d: &Spanned<Directive>| ledger.source_map.get(usize::from(d.file_id));
-    if let (Some(pad_source), Some(balance_source)) = (source_of(pad), source_of(balance)) {
+    if let Some(pad_source) = source_of(pad) {
         let (line, _) = pad_source.line_col(pad.span.start);
+        let balance_key = source_of(balance).map_or_else(
+            || {
+                let what = match &balance.value {
+                    Directive::Balance(b) => format!("{} {}", b.date, b.amount.currency),
+                    other => other.date().to_string(),
+                };
+                (PathBuf::from(format!("<unlocated balance {what}>")), 0)
+            },
+            |source| (source.path.clone(), balance.span.start),
+        );
         Site {
-            key: (
-                (pad_source.path.clone(), pad.span.start),
-                Some((balance_source.path.clone(), balance.span.start)),
-            ),
+            key: ((pad_source.path.clone(), pad.span.start), Some(balance_key)),
             file: pad_source.path.display().to_string(),
             line,
             unidentified: None,
+            padding: true,
         }
     } else {
+        *unlocated_pads += 1;
         let (file, line) = ledger.source_map.placeholder(pad.file_id).map_or_else(
             || ("<plugin>".to_string(), 0),
             |(name, line)| (name.display().to_string(), line as usize),
         );
         Site {
             key: (
-                (PathBuf::from(format!("<unlocated pad {file}:{line}>")), 0),
+                (
+                    PathBuf::from(format!("<unlocated pad {}>", *unlocated_pads)),
+                    0,
+                ),
                 None,
             ),
             file,
             line,
             unidentified: Some(
-                "a plugin inserted the pad or balance of this padding entry, \
-                 which has no source location",
+                "a plugin inserted the pad of this padding entry, which has no source location",
             ),
+            padding: true,
         }
     }
+}
+
+/// Record one input's transactions and padding entries, and refuse it when
+/// unidentified transactions at one location together touch two or more
+/// groups.
+fn audit_ledger(
+    audit: &mut Audit<'_>,
+    sites: &mut TransactionSites,
+    unlocated_pads: &mut usize,
+    ledger: &Ledger,
+) -> Result<()> {
+    let mut unidentified = Unidentified::new();
+    let mut ledger_sites = sites.for_ledger(ledger);
+    let mut has_pads = false;
+    for directive in &ledger.directives {
+        match &directive.value {
+            Directive::Open(open) => {
+                audit.classifier.group(open.account.as_str());
+            }
+            Directive::Pad(_) => has_pads = true,
+            Directive::Transaction(txn) => audit.record(
+                txn,
+                || {
+                    let site = ledger_sites.site(directive);
+                    Site {
+                        key: (site.key, None),
+                        file: site.file,
+                        line: site.line,
+                        unidentified: site.unidentified,
+                        padding: false,
+                    }
+                },
+                &mut unidentified,
+            )?,
+            _ => {}
+        }
+    }
+    if has_pads {
+        // The canonical pad expansion; its errors are the validator's,
+        // already in `ledger.errors`.
+        let plain: Vec<Directive> = ledger.directives.iter().map(|d| d.value.clone()).collect();
+        let padding =
+            rustledger_booking::process_pads(&plain, ledger.options.inferred_tolerance_multiplier);
+        for (txn, origin) in padding
+            .padding_transactions
+            .iter()
+            .zip(&padding.padding_origins)
+        {
+            let (pad, balance) = (
+                &ledger.directives[origin.pad],
+                &ledger.directives[origin.balance],
+            );
+            audit.record(
+                txn,
+                || padding_site(ledger, pad, balance, unlocated_pads),
+                &mut unidentified,
+            )?;
+        }
+    }
+    if let Some((file, line, reason, touched)) =
+        unidentified.into_values().find(|(_, _, _, g)| g.len() >= 2)
+    {
+        anyhow::bail!(
+            "{file}:{line}: cannot audit transactions touching groups {}: {reason}",
+            touched.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Run the lint on stdout.
@@ -362,6 +465,7 @@ pub fn run_with_writer<W: std::io::Write>(
         keep_all: args.files.len() > 1,
     };
     let mut sites = TransactionSites::default();
+    let mut unlocated_pads = 0;
     let mut errors = BTreeSet::new();
     for path in &args.files {
         let ledger = load_booked(path)?;
@@ -385,63 +489,7 @@ pub fn run_with_writer<W: std::io::Write>(
                 );
             }
         }
-        let mut unidentified = Unidentified::new();
-        let mut ledger_sites = sites.for_ledger(&ledger);
-        let mut has_pads = false;
-        for directive in &ledger.directives {
-            match &directive.value {
-                Directive::Open(open) => {
-                    audit.classifier.group(open.account.as_str());
-                }
-                Directive::Pad(_) => has_pads = true,
-                Directive::Transaction(txn) => audit.record(
-                    txn,
-                    || {
-                        let site = ledger_sites.site(directive);
-                        Site {
-                            key: (site.key, None),
-                            file: site.file,
-                            line: site.line,
-                            unidentified: site.unidentified,
-                        }
-                    },
-                    &mut unidentified,
-                )?,
-                _ => {}
-            }
-        }
-        if has_pads {
-            // The canonical pad expansion; its errors are the validator's,
-            // already in `ledger.errors`.
-            let plain: Vec<Directive> = ledger.directives.iter().map(|d| d.value.clone()).collect();
-            let padding = rustledger_booking::process_pads(
-                &plain,
-                ledger.options.inferred_tolerance_multiplier,
-            );
-            for (txn, origin) in padding
-                .padding_transactions
-                .iter()
-                .zip(&padding.padding_origins)
-            {
-                let (pad, balance) = (
-                    &ledger.directives[origin.pad],
-                    &ledger.directives[origin.balance],
-                );
-                audit.record(
-                    txn,
-                    || padding_site(&ledger, pad, balance),
-                    &mut unidentified,
-                )?;
-            }
-        }
-        if let Some((file, line, reason, touched)) =
-            unidentified.into_values().find(|(_, _, _, g)| g.len() >= 2)
-        {
-            anyhow::bail!(
-                "{file}:{line}: cannot audit transactions touching groups {}: {reason}",
-                touched.into_iter().collect::<Vec<_>>().join(", ")
-            );
-        }
+        audit_ledger(&mut audit, &mut sites, &mut unlocated_pads, &ledger)?;
     }
     for (_, prefix) in &audit.classifier.prefixes {
         if !audit.classifier.used.contains(prefix) {
@@ -671,7 +719,14 @@ mod tests {
             (
                 &["A=Assets:UnitA", "L=Liabilities"],
                 "--group L: account prefix \"Liabilities\" is a bare root; a prefix needs \
-                 a root and at least one component, such as \"Liabilities:L\"",
+                 a root and at least one component, such as \"Liabilities:Example\"",
+            ),
+            // The suggestion does not use the group name, which may be
+            // lowercase and so not a valid account component.
+            (
+                &["a=Liabilities", "B=Assets:UnitB"],
+                "--group a: account prefix \"Liabilities\" is a bare root; a prefix needs \
+                 a root and at least one component, such as \"Liabilities:Example\"",
             ),
         ] {
             assert_eq!(refusal(groups), want, "{groups:?}");
@@ -1091,5 +1146,163 @@ mod tests {
         let (status, report, _) = inspect(&args).unwrap();
         assert_eq!(status, ExitCode::SUCCESS);
         assert!(report["findings"].as_array().unwrap().is_empty());
+    }
+
+    /// An account matching two prefixes of one group (one nested under the
+    /// other) uses both: neither is reported as matching nothing.
+    #[test]
+    fn test_cross_group_nested_prefixes_in_one_group_are_both_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "main.bean", LEDGER);
+        let mut args = args(vec![file]);
+        args.group = vec![
+            "A=Assets:UnitA,Assets:UnitA:Cash,Expenses:UnitA".into(),
+            "B=Assets:UnitB".into(),
+        ];
+        let (_, report, warnings) = inspect(&args).unwrap();
+        assert!(warnings.is_empty(), "{warnings}");
+        assert_eq!(report["findings"].as_array().unwrap().len(), 1, "{report}");
+    }
+
+    /// The same pad read through two inputs that post different amounts
+    /// before it pads a different amount, so its narration differs; its
+    /// accounts do not, and it is one finding, not a refusal.
+    #[test]
+    fn test_cross_group_padding_amount_may_differ_between_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pad = write(
+            dir.path(),
+            "pad.bean",
+            concat!(
+                "2024-01-01 open Assets:UnitA:Cash USD\n",
+                "2024-01-01 open Assets:UnitB:Cash USD\n",
+                "2024-01-02 pad Assets:UnitA:Cash Assets:UnitB:Cash\n",
+                "2024-01-03 balance Assets:UnitA:Cash 5 USD\n",
+            ),
+        );
+        let root = write(
+            dir.path(),
+            "root.bean",
+            concat!(
+                "2024-01-01 open Equity:Other USD\n",
+                "2024-01-02 * \"deposit\"\n",
+                "  Assets:UnitA:Cash 2 USD\n",
+                "  Equity:Other -2 USD\n",
+                "include \"pad.bean\"\n",
+            ),
+        );
+        let mut args = args(vec![root, pad.clone()]);
+        args.group = vec!["A=Assets:UnitA".into(), "B=Assets:UnitB".into()];
+        let (status, report, _) = inspect(&args).unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            report["findings"],
+            serde_json::json!([{
+                "file": pad.display().to_string(),
+                "line": 3,
+                "date": "2024-01-02",
+                // From the first input, where 2 USD was already there.
+                "narration": "(Padding inserted for Balance of 5 USD for difference 3 USD)",
+                "groups": {"A": ["Assets:UnitA:Cash"], "B": ["Assets:UnitB:Cash"]},
+            }])
+        );
+    }
+
+    /// Audit `content`'s booked ledger after `edit` moves directives to no
+    /// source location (as a plugin inserting them would): the narration
+    /// and line of each finding.
+    fn audit_edited(
+        content: &str,
+        edit: impl Fn(&mut Spanned<Directive>),
+    ) -> Result<Vec<(String, usize)>> {
+        let dir = tempfile::tempdir()?;
+        let file = write(dir.path(), "main.bean", content);
+        let mut ledger = load_booked(&file)?;
+        ledger.directives.iter_mut().for_each(edit);
+        let groups = parse_groups(&["A=Assets:UnitA".into(), "B=Assets:UnitB".into()])?;
+        let mut audit = Audit {
+            classifier: Classifier::new(&groups),
+            transactions: BTreeMap::new(),
+            keep_all: false,
+        };
+        audit_ledger(
+            &mut audit,
+            &mut TransactionSites::default(),
+            &mut 0,
+            &ledger,
+        )?;
+        Ok(audit
+            .transactions
+            .into_values()
+            .filter(|(f, _)| f.groups.len() >= 2)
+            .map(|(f, _)| (f.narration, f.line))
+            .collect())
+    }
+
+    fn unlocate_pads(d: &mut Spanned<Directive>) {
+        if matches!(d.value, Directive::Pad(_)) {
+            d.file_id = rustledger_core::SYNTHESIZED_FILE_ID;
+        }
+    }
+
+    /// Pads a plugin inserted with no location are each their own: one
+    /// padding group A, another group B, are not pooled into a crossing.
+    /// One that crosses on its own is still refused.
+    #[test]
+    fn test_cross_group_unlocated_pads_are_not_pooled() {
+        let separate = concat!(
+            "2024-01-01 open Assets:UnitA:Cash USD\n",
+            "2024-01-01 open Assets:UnitB:Cash USD\n",
+            "2024-01-01 open Equity:Opening USD\n",
+            "2024-01-02 pad Assets:UnitA:Cash Equity:Opening\n",
+            "2024-01-02 pad Assets:UnitB:Cash Equity:Opening\n",
+            "2024-01-03 balance Assets:UnitA:Cash 5 USD\n",
+            "2024-01-03 balance Assets:UnitB:Cash 7 USD\n",
+        );
+        assert_eq!(audit_edited(separate, unlocate_pads).unwrap(), []);
+
+        let error = audit_edited(PAD_LEDGER, unlocate_pads)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "<plugin>:0: cannot audit transactions touching groups A, B: a plugin \
+             inserted the pad of this padding entry, which has no source location"
+        );
+    }
+
+    /// A located pad whose balances a plugin inserted with no location is
+    /// still identified by the pad: each padded currency is a finding at it.
+    #[test]
+    fn test_cross_group_padding_with_unlocated_balance_is_reported_at_the_pad() {
+        let found = audit_edited(
+            concat!(
+                "2024-01-01 open Assets:UnitA:Cash\n",
+                "2024-01-01 open Assets:UnitB:Cash\n",
+                "2024-01-02 pad Assets:UnitA:Cash Assets:UnitB:Cash\n",
+                "2024-01-03 balance Assets:UnitA:Cash 5 USD\n",
+                "2024-01-03 balance Assets:UnitA:Cash 7 EUR\n",
+            ),
+            |d| {
+                if matches!(d.value, Directive::Balance(_)) {
+                    d.file_id = rustledger_core::SYNTHESIZED_FILE_ID;
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            [
+                (
+                    "(Padding inserted for Balance of 7 EUR for difference 7 EUR)".to_string(),
+                    3
+                ),
+                (
+                    "(Padding inserted for Balance of 5 USD for difference 5 USD)".to_string(),
+                    3
+                ),
+            ]
+        );
     }
 }

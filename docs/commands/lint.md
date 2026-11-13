@@ -102,8 +102,12 @@ for each crossing, and the number of distinct unassigned posting accounts.
 Repeated input paths and included files are deduplicated. It reads the booked
 ledger with plugins and validation; validation diagnostics are warnings, not
 proof that the ledger is valid. A transaction that differs between input
-ledgers (a file included by two inputs whose plugins treat it differently) is
-refused.
+ledgers in its date, narration or accounts (a file included by two inputs
+whose plugins treat it differently) is refused. A padding entry is compared
+by its date and accounts only: its narration states the padded amount, which
+depends on what each input posted before the `pad`, so the same `pad` read
+through two inputs is one finding, reported with the first input's
+narration.
 
 Padding counts. A `pad` that a `balance` makes move an amount produces a
 padding entry, as `rledger query` shows it, and a padding entry between two
@@ -125,7 +129,10 @@ error: main.beancount:4: cannot audit transactions touching groups A, B: several
 
 This covers `effective_date` splitting a transaction into two halves in
 different groups, though neither half crosses on its own. Such transactions
-touching at most one group do not affect the answer and are not refused.
+touching at most one group do not affect the answer and are not refused. A
+padding entry whose `pad` a plugin inserted with no location is judged on its
+own, never pooled with another such entry; one whose `balance` alone has no
+location is still reported at its `pad`.
 
 `--fail-on-findings` exits 1 on a crossing; without it findings are advisory.
 Exit 2 means the lint could not answer. This audit detects account-group

@@ -2688,6 +2688,74 @@ mod validation_options_tests {
     }
 }
 
+/// What a finding's fields become in the `LedgerError` `rledger check`
+/// reports (#2972).
+#[cfg(all(test, feature = "validation"))]
+mod validation_error_to_ledger_error_tests {
+    use super::{ErrorSeverity, SourceMap, validation_error_to_ledger_error};
+    use rustledger_parser::Span;
+    use rustledger_validate::{ErrorCode, ValidationError};
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_validation_error_to_ledger_error_folds_the_note_drops_the_context_keeps_the_hint() {
+        let source = "2024-01-01 open Assets:A\n2024-01-03 balance Assets:A 2 USD\n";
+        let mut map = SourceMap::new();
+        let file_id = map.add_file(PathBuf::from("main.beancount"), source.into());
+        let start = source.find("2024-01-03").expect("balance line");
+        let mut finding = ValidationError::new(
+            ErrorCode::BalanceAssertionFailed,
+            "Balance failed",
+            rustledger_core::naive_date(2024, 1, 3).expect("date"),
+        )
+        .with_context("difference: 1, tolerance: 0")
+        .with_note("directive was synthesized by a plugin")
+        .with_hint("assert 1 USD");
+        finding.span = Some(Span::new(start, source.len()));
+        finding.file_id = Some(u16::try_from(file_id).expect("file id"));
+
+        let e = validation_error_to_ledger_error(&finding, &map);
+        assert_eq!(
+            e.message,
+            "Balance failed\n  note: directive was synthesized by a plugin"
+        );
+        assert_eq!(e.hint.as_deref(), Some("assert 1 USD"));
+        assert!(
+            !format!("{e:?}").contains("difference: 1"),
+            "the context is not carried: {e:?}"
+        );
+        assert_eq!(e.code, "E2001");
+        assert_eq!(e.phase, "validate");
+        assert_eq!(e.severity, ErrorSeverity::Error);
+        assert!(e.is_validation_finding());
+        assert_eq!(e.source_span, Some((start, source.len())));
+        let location = e.location.expect("located");
+        assert_eq!(
+            (location.file, location.line, location.column),
+            (PathBuf::from("main.beancount"), 2, 1)
+        );
+
+        // No note: the message is the finding's own; no hint: none is made
+        // up from the context. A parse-phase code is `phase: "parse"`.
+        let bare = ValidationError::new(
+            ErrorCode::InvalidAccountName,
+            "Invalid account name",
+            rustledger_core::naive_date(2024, 1, 1).expect("date"),
+        )
+        .with_context("Foo:Bar");
+        let e = validation_error_to_ledger_error(&bare, &map);
+        assert_eq!(
+            (
+                e.message.as_str(),
+                e.hint,
+                e.phase.as_str(),
+                e.location.is_none()
+            ),
+            ("Invalid account name", None, "parse", true)
+        );
+    }
+}
+
 #[cfg(test)]
 mod option_errors_tests {
     use super::{ErrorSeverity, option_warnings_to_errors};

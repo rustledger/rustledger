@@ -1356,8 +1356,10 @@ mod parse_error_mapping_parity {
     /// `difference: 1, tolerance: 0` as a hint nobody else gives.
     ///
     /// End to end, against the loader: a failing balance (a `context` and no
-    /// hint), and a ledger with an unopened account, an unbalanced
-    /// transaction and a failing balance after a multi-byte character.
+    /// hint), a ledger with an unopened account, an unbalanced transaction
+    /// and a failing balance after a multi-byte character, and an invalid
+    /// root (E1005, a parse-phase code, which these surfaces called
+    /// `validate`).
     ///
     /// Then one finding carrying a note, a context and a hint, through both
     /// conversions. No single-source ledger reaches either: the validator
@@ -1403,7 +1405,22 @@ mod parse_error_mapping_parity {
             loader_findings(several)
         );
 
-        for (name, source) in [("balance", balance), ("several", several)] {
+        // E1005, a parse-phase code: `phase: "parse"` on both.
+        let invalid_root = "2024-01-01 open Foo:Bar\n";
+        let e1005 = loader_findings(invalid_root);
+        assert!(
+            e1005.len() == 1
+                && e1005[0].1.as_deref() == Some("E1005")
+                && e1005[0].2.as_deref() == Some("parse")
+                && e1005[0].3.is_none(),
+            "the loader on an invalid root: {e1005:?}"
+        );
+
+        for (name, source) in [
+            ("balance", balance),
+            ("several", several),
+            ("invalid root", invalid_root),
+        ] {
             assert_eq!(
                 validate_source_findings(source),
                 loader_findings(source),

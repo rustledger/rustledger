@@ -302,14 +302,14 @@ def _spawn(items):
     pid = os.fork()
     if pid == 0:
         os.close(r)
-        # No core file. beancount segfaults on some inputs (see the module
-        # doc), and the harness records those as `crash`, so a core is pure
-        # waste: 50-70 MB each, and fuzz runs wrote thousands of them.
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         # Exit 3 unless the worker finishes; `finally` runs on any exception,
         # so the child never returns into the parent's code.
         code = 3
         try:
+            # No core file. beancount segfaults on some inputs (see the module
+            # doc), and the harness records those as `crash`, so a core is pure
+            # waste: 50-70 MB each, and fuzz runs wrote thousands of them.
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             _worker(items, w)
             code = 0
         finally:

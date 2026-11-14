@@ -91,7 +91,7 @@ fn test_parse_other_token_keeps_the_narration() {
         ("* \"Cafe\" USD", 1),
         ("* \"Cafe\" ~", 1),
         ("* 123 \"Cafe\" \u{11}", 2),
-        ("* 2024-01-03 \"Cafe\" \u{11}", 1),
+        ("* 2024-01-03 \"Cafe\" \u{11}", 2),
     ] {
         let (txn, got) = parse_header(header);
         assert_eq!(got, errors, "{header:?}");

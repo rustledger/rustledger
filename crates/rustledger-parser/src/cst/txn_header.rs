@@ -529,8 +529,8 @@ mod tests {
         ));
     }
 
-    /// #2951: only the header's first token may be a date. A second one, in
-    /// the flag position or after a string, tag or link, is an unexpected
+    /// #2951: only the header's first token may be a date. A second one,
+    /// before or after the flag or after a string, tag or link, is an unexpected
     /// token, reported at that date.
     #[test]
     fn rejects_a_second_date() {
@@ -541,6 +541,8 @@ mod tests {
             (SyntaxKind::TAG, "#t"),
         );
         for rest in [
+            // Before the flag: only the first token is the header's date.
+            vec![date, WS, star, WS, s],
             vec![star, WS, date, WS, s],
             vec![star, WS, date],
             vec![star, WS, date, WS, star, WS, s],

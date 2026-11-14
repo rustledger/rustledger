@@ -506,3 +506,41 @@ fn test_parse_lone_capital_glued_to_a_stray_cr_is_an_invalid_token() {
         assert_eq!(per_line(&src), expected, "{src:?}");
     }
 }
+
+/// A one-letter transaction flag glued to a stray `\r` keeps main's reading
+/// (#2966 review): the parser's glued-flag rule reports it, as the flag of a
+/// transaction it keeps, so its postings and metadata stay quiet. Turning it
+/// into an invalid token dropped the header and reported every indented line
+/// under it. Where an invalid token follows the `\r`, the `\r` is a blank,
+/// so the line has the flag's error and the token's, as in beancount. Each
+/// count is bean-check 3.2.3's.
+#[test]
+fn test_parse_flag_glued_to_a_stray_cr_keeps_the_transaction() {
+    let body = "  k: \"v\"\n  Assets:A  1 USD\n    pk: \"w\"\n  Assets:B  -1 USD\n";
+    let postings = "  Assets:A  1 USD\n  Assets:B  -1 USD\n";
+    for flag in ["P", "S"] {
+        // With metadata right under the header, beancount also reports that
+        // line (its header failed); with postings only, the header alone.
+        for (tail, header_errors) in [
+            ("\r\r\n", 1),
+            ("\r\t\n", 1),
+            ("\r$\n", 2),
+            ("\r $\n", 2),
+            ("\r\r$\n", 2),
+        ] {
+            let src = format!("{OPENS}2024-01-02 {flag}{tail}{body}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, header_errors), (4, 1)], "{src:?}");
+            let src = format!("{OPENS}2024-01-02 {flag}{tail}{postings}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, header_errors)], "{src:?}");
+        }
+        let src = format!("{OPENS}2024-01-02 {flag}\r");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 1)], "{src:?}");
+        // A capital after the narration is no flag: it is the invalid token.
+        let src = format!("{OPENS}2024-01-02 * \"x\" {flag}\r$\n{body}");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 2), (4, 1)], "{src:?}");
+    }
+}

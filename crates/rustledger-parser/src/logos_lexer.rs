@@ -1158,7 +1158,8 @@ impl TokenIter<'_> {
                 Some((token, span))
                     if span.start == at
                         && is_lone_capital_token(&token)
-                        && self.stray_cr_follows(span.end) =>
+                        && self.stray_cr_follows(span.end)
+                        && self.capital_rule_applies(span.start) =>
                 {
                     let run = self.stray_run(span.end);
                     at = run.end;
@@ -1178,6 +1179,35 @@ impl TokenIter<'_> {
     fn stray_cr_follows(&self, at: usize) -> bool {
         let after = &self.source.as_bytes()[at..self.lex_end];
         after.first() == Some(&b'\r') && after.get(1) != Some(&b'\n')
+    }
+
+    /// Whether a lone capital glued to a stray `\r`, starting at `at`, is
+    /// made an invalid token (#2966): everywhere but a transaction's flag
+    /// position, a capital after a column-0 date and blanks
+    /// (`2024-01-02 P\r`). There the parser's glued one-letter rule
+    /// (`txn_header::first_header_defect_in`, `GluedLetterFlag`) already
+    /// reports it, as the flag of a transaction it keeps, so the postings
+    /// and metadata under it stay quiet; an invalid token there would drop
+    /// the header and report every indented line under it.
+    ///
+    /// Reads back only over the blanks before `at` and the date-like run
+    /// before them, both bounded by the token before the capital.
+    fn capital_rule_applies(&self, at: usize) -> bool {
+        let bytes = self.source.as_bytes();
+        let blanks_start = bytes[..at]
+            .iter()
+            .rposition(|b| !matches!(b, b' ' | b'\t'))
+            .map_or(0, |i| i + 1);
+        if blanks_start == at {
+            return true;
+        }
+        let date_start = bytes[..blanks_start]
+            .iter()
+            .rposition(|b| !matches!(b, b'0'..=b'9' | b'-' | b'/'))
+            .map_or(0, |i| i + 1);
+        let at_column_0 = date_start == 0 || bytes[date_start - 1] == b'\n';
+        !(at_column_0
+            && leading_date_len(&self.source[date_start..]) == Some(blanks_start - date_start))
     }
 }
 
@@ -1279,8 +1309,13 @@ impl<'src> Iterator for TokenIter<'src> {
             // error of its own, the deliberate stricter reading, and it
             // already stands for the capital's (`1N\rAssets:A` is one error
             // there, `'N'`, and one here). A CRLF's `\r` is left to the
-            // parser's glued one-letter rules, as before.
-            if !self.peeking && is_lone_capital(&result) && self.stray_cr_follows(span.end) {
+            // parser's glued one-letter rules, as before, and so is a
+            // transaction's flag (`capital_rule_applies`).
+            if !self.peeking
+                && is_lone_capital(&result)
+                && self.stray_cr_follows(span.end)
+                && self.capital_rule_applies(span.start)
+            {
                 let run = self.stray_run(span.end);
                 if run.at_line_end || self.cr_chain_is_trivia(run.end) {
                     result = Err(());

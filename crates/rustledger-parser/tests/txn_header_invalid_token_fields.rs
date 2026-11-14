@@ -318,12 +318,17 @@ fn test_parse_other_token_before_the_string_keeps_the_narration() {
     }
 }
 
-/// A date after the flag is an ordinary token (the missing error for it is
-/// separate), so `* 2024-01-03 "n" <bad>` keeps the narration, as
-/// `* 123 "n" <bad>` does.
+/// A date after the flag is an ordinary unexpected token, so `* 2024-01-03
+/// "n" <bad>` keeps the narration, as `* 123 "n" <bad>` does. It is reported
+/// first, at the date, and the invalid token after it too: two errors, as
+/// bean-check 3.2.3 gives (`unexpected DATE` and `Invalid token`, #2951).
 #[test]
 fn test_parse_later_date_before_the_string_keeps_the_narration() {
-    check(&other("* 2024-01-03 \"n\" <bad>", None, "n"), BAD);
+    let date = "2024-01-03";
+    check(
+        &other_with("* 2024-01-03 \"n\" <bad>", None, "n", &[], &[], 2),
+        date,
+    );
     check(
         &other_with(
             "* 2024-01-03 \"p\" \"n\" <bad>",
@@ -331,9 +336,9 @@ fn test_parse_later_date_before_the_string_keeps_the_narration() {
             "n",
             &[],
             &[],
-            1,
+            2,
         ),
-        BAD,
+        date,
     );
 }
 

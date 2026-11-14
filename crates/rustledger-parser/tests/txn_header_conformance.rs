@@ -395,3 +395,81 @@ fn valid_cost_specs_are_untouched() {
         );
     }
 }
+
+// ---- a second date in the header (#2951) -----------------------------------
+
+/// 1-based line and column of byte `at` in `src`.
+fn line_col(src: &str, at: usize) -> (usize, usize) {
+    let before = &src[..at];
+    let line = before.matches('\n').count() + 1;
+    let col = at - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+    (line, col)
+}
+
+/// #2951: a date is the first token of a transaction header and nowhere else.
+/// A second one, in any position, was accepted with no error. bean-check
+/// 3.2.3 reports `syntax error, unexpected DATE, expecting end of file or EOL
+/// or TAG or LINK` for every header below, one error on the header line, and
+/// drops the transaction. Reported here at the second date (the first extra
+/// one), by both converters, with the message every other unexpected header
+/// token gets; the transaction is kept, as for every other header defect.
+#[test]
+fn a_second_date_in_the_header_is_one_error_at_that_date() {
+    let opens = "2024-01-01 open Assets:A\n2024-01-01 open Expenses:B\n\n";
+    let bodies = "\x20 Assets:A  -1 USD\n\x20 Expenses:B  1 USD\n";
+    for (header, at) in [
+        // After the flag: the issue's case.
+        ("2024-01-02 * 2024-01-03 \"n\"", 13),
+        ("2024-01-02 ! 2024-01-03 \"n\"", 13),
+        ("2024-01-02 # 2024-01-03 \"n\"", 13),
+        ("2024-01-02 P 2024-01-03 \"n\"", 13),
+        ("2024-01-02 txn 2024-01-03 \"n\"", 15),
+        // Alone after the flag, or before a tag.
+        ("2024-01-02 * 2024-01-03", 13),
+        ("2024-01-02 * 2024-01-03 #t", 13),
+        ("2024-01-02 * 2024-01-03 ; c", 13),
+        // Glued to the flag.
+        ("2024-01-02 *2024-01-03 \"n\"", 12),
+        // Two extra dates, or a flag after the date: the first extra date.
+        ("2024-01-02 * 2024-01-03 2024-01-04 \"n\"", 13),
+        ("2024-01-02 * 2024-01-03 * \"n\"", 13),
+        // After the payee, the narration, a tag or a link.
+        ("2024-01-02 * \"p\" 2024-01-03 \"n\"", 17),
+        ("2024-01-02 * \"p\" \"n\" 2024-01-03", 21),
+        ("2024-01-02 * \"n\" #t 2024-01-03", 20),
+        ("2024-01-02 * \"n\" ^l 2024-01-03 #t", 20),
+        // beancount's other date spellings lex as a date too.
+        ("2024-01-02 * 2024/01/03 \"n\"", 13),
+        ("2024-01-02 * 2024-1-3 \"n\"", 13),
+    ] {
+        let src = format!("{opens}{header}\n{bodies}");
+        let date_at = opens.len() + at;
+        let date_len = header[at..].find([' ', '\n']).unwrap_or(header.len() - at);
+        let date = &src[date_at..date_at + date_len];
+        for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "{name} {header:?}: expected one error, got {:?}",
+                result.errors
+            );
+            let err = &result.errors[0];
+            assert_eq!(
+                err.to_string(),
+                format!("parse error: unexpected \"{date}\" in transaction header"),
+                "{name} {header:?}"
+            );
+            assert_eq!(
+                (err.span.start, err.span.end),
+                (date_at, date_at + date_len),
+                "{name} {header:?}"
+            );
+            assert_eq!(
+                line_col(&src, err.span.start),
+                (4, at + 1),
+                "{name} {header:?}"
+            );
+            assert_eq!(result.directives.len(), 3, "{name} {header:?}");
+        }
+    }
+}

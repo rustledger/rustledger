@@ -757,12 +757,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     one is reported. Such a ledger loaded with no error on v73, so a v73
 ///     blob of it would keep serving that error-free load.
 ///
+/// v75: PARSER OUTPUT changed, no archived layout moved (#2951). A second date
+///     in a transaction header (`2024-01-02 * 2024-01-03 "n"`) is a parse
+///     error, as in beancount, where it was accepted with no error. Such a
+///     ledger loaded with no error on v74, so a v74 blob of it would keep
+///     serving that error-free load.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 74;
+pub const CACHE_VERSION: u32 = 75;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1647,7 +1653,9 @@ mod tests {
         // encoding moves, so the arrays still hold.
         // v74 (#2928) lexes a mid-line `#!` / `#+` as beancount does; no
         // archived encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 74;
+        // v75 (#2951) rejects a second date in a transaction header; no
+        // archived encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 75;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1806,7 +1814,9 @@ mod tests {
         // is unchanged.
         // v74 (#2928) lexes a mid-line `#!` / `#+` as beancount does; no
         // archived layout moves, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 74;
+        // v75 (#2951) rejects a second date in a transaction header; no
+        // archived layout moves, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 75;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

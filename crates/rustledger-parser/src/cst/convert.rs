@@ -9878,6 +9878,25 @@ fn report_no_metadata_continuations(
     }
 }
 
+/// Whether the transaction `source` starts with holds an invalid token, by
+/// the rule the parser itself applies (`holds_an_invalid_token`).
+///
+/// `source` is a transaction's own text, from its date to the end of its
+/// last line, as its directive's span gives it. beancount's grammar never
+/// builds such a transaction (its recovery discards the whole statement),
+/// while rledger keeps it under error recovery (#2932) with what recovery
+/// could read: a posting's price or cost after the token is gone. The
+/// validator asks this before it reports a balance residual for a
+/// transaction (#2954), so the parser's rule is the only one. `false` when
+/// `source` does not start with a transaction.
+#[must_use]
+pub fn transaction_holds_invalid_token(source: &str) -> bool {
+    super::parser::parse_structured(source)
+        .children()
+        .find(|n| n.kind() == crate::SyntaxKind::TRANSACTION)
+        .is_some_and(|n| holds_an_invalid_token(n.green()))
+}
+
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than
 /// BOMs beancount reads into an account (`is_bom_account_token`). A BOM-led
 /// run is an invalid token like any other here (#2928).

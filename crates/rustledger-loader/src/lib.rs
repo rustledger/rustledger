@@ -78,8 +78,8 @@ pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 /// of truth so the LSP/MCP diagnostics cannot drift from `check` (issue #1648).
 #[cfg(feature = "validation")]
 pub use process::{
-    document_source_dirs, source_lines, source_lines_overlaid, validation_error_to_ledger_error,
-    validation_options_from_options,
+    document_source_dirs, source_lines, source_lines_of_text, source_lines_overlaid,
+    validation_error_to_ledger_error, validation_options_from_options,
 };
 
 /// Resolve `documents` roots against the ledger's directory.

@@ -12,7 +12,10 @@
 use rustledger_core::Directive;
 use rustledger_parser::cst::parse_red_only;
 use rustledger_parser::format::format_source;
-use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, ParseResult, parse};
+use rustledger_parser::{
+    __baseline_canonical_payload, ParseErrorKind, ParseResult, parse,
+    transaction_holds_invalid_token,
+};
 
 const BOM: &str = "\u{FEFF}";
 
@@ -684,14 +687,17 @@ fn test_parse_heading_rest_hash_after_brace_is_not_a_comment() {
     assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
 }
 
-/// KNOWN GAP, pinned on purpose (issue #2954): a BOM right before a
-/// posting's price or cost is the line's one `P0026`, as in bean-check, but
-/// recovery keeps the posting without its price or cost. The transaction
-/// then no longer balances, so `rledger check` adds two `E3001` where
-/// bean-check reports one error. `main` already drops the cost after any
-/// other invalid character (`\x11{2 USD}`), so this is the same recovery gap,
-/// newly reached by a mid-line BOM since its run takes the `@` or `{`.
-/// Fixing #2954 must update this test on purpose.
+/// A BOM right before a posting's price or cost is the line's one `P0026`,
+/// as in bean-check, and recovery keeps the posting without its price or
+/// cost, as it does after any other invalid character (`\x11{2 USD}`): the
+/// token took the `@` or `{`, so nothing of the price or cost can be read,
+/// and the parse output says so rather than guessing. The transaction then
+/// does not balance, so the validator skips its balance check: it holds an
+/// invalid token (`transaction_holds_invalid_token`, asked of its own span's
+/// text, as the validator asks it), and beancount never builds such a
+/// transaction (issue #2954; `rledger check` added two `E3001`). The
+/// surfaces' agreement on that is pinned by the loader's
+/// `surface_agreement/cases.rs`.
 #[test]
 fn test_parse_bom_before_price_or_cost_drops_it_issue_2954() {
     for (tail, invalid) in [
@@ -719,10 +725,52 @@ fn test_parse_bom_before_price_or_cost_drops_it_issue_2954() {
             Some("1 HOOL"),
             "{src:?}"
         );
-        // The gap itself: the price and the cost are gone.
+        // The price and the cost are gone, and the transaction says why.
         assert!(leg.price.is_none(), "{src:?}: {:?}", leg.price);
         assert!(leg.cost.is_none(), "{src:?}: {:?}", leg.cost);
+        let span = result.directives[2].span;
+        assert!(
+            transaction_holds_invalid_token(&src[span.start..span.end]),
+            "{src:?}"
+        );
     }
+}
+
+/// `transaction_holds_invalid_token` reads a transaction's own text by the
+/// parser's rule (`holds_an_invalid_token`): an invalid token anywhere in it,
+/// in a posting before a price or cost, in its header or on a metadata line,
+/// BOM-led or not. Not a BOM glued to an account, which beancount reads into
+/// the account; not a transaction without one; not text that starts with
+/// anything but a transaction. The validator skips the balance check of
+/// exactly these (#2954).
+#[test]
+fn test_transaction_holds_invalid_token_reads_the_parsers_rule() {
+    let txn = |posting: &str| format!("2024-01-02 * \"x\"\n  {posting}\n  Assets:B  -2 USD\n");
+    for posting in [
+        format!("Assets:A  1 HOOL {BOM}{{2 USD}}"),
+        format!("Assets:A  1 HOOL{BOM}@ 2 USD"),
+        "Assets:A  1 HOOL \u{11}{2 USD}".to_string(),
+        "Assets:A  1 HOOL $x{2 USD}".to_string(),
+        "Assets:A  1 HOOL \u{11}@@ 2 USD".to_string(),
+        "Assets:A  1 USD\n    kk: \u{11}".to_string(),
+    ] {
+        let src = txn(&posting);
+        assert!(transaction_holds_invalid_token(&src), "{src:?}");
+    }
+    assert!(transaction_holds_invalid_token(
+        "2024-01-02 * \"p\" \u{11}\n  Assets:A  1 USD\n  Assets:B\n"
+    ));
+    for posting in [
+        "Assets:A  1 HOOL {2 USD}".to_string(),
+        "Assets:A  1 HOOL @ 2 USD".to_string(),
+        format!("{BOM}Assets:A  2 USD"),
+    ] {
+        let src = txn(&posting);
+        assert!(!transaction_holds_invalid_token(&src), "{src:?}");
+    }
+    assert!(!transaction_holds_invalid_token(
+        "2024-01-01 open Assets:A \u{11}\n"
+    ));
 }
 
 /// A token of BOMs alone that ends the file is still an invalid token: no

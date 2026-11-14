@@ -1148,7 +1148,11 @@ pub fn all_diagnostics(
             // current file's parent directory so they don't end up being
             // interpreted relative to the LSP process CWD.
             let base_dir = current_file_path.and_then(|p| p.parent());
+            // The buffer's own text, as file 0, for its lines and for the
+            // balance check's error-recovery read (#2954), as the loaded
+            // path reads them from the ledger's files.
             build_validation_options_from_file(&result.options, base_dir)
+                .with_source_lines(rustledger_loader::source_lines_of_text(source))
         };
 
         // Build plugin context for running plugins before validation.

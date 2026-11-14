@@ -30,6 +30,11 @@
 //   USD)`) and the balance assertion after it (`accumulated 100 USD`), with
 //   the error on the same lines (8, 4, 10) as `check`. WASM, the FFI and the
 //   LSP validated nothing after a parse error (#2949).
+// - bean-check drops a transaction that holds an invalid token, so it checks
+//   no balance there: the token is the transaction's one error. rledger keeps
+//   the transaction under error recovery without the price or cost after the
+//   token, and reported two `E3001` beside the token's parse error (#2954).
+//   A transaction with no invalid token still has its residual reported.
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -171,6 +176,60 @@ garbage
                 code: "E2001",
                 line: 10,
                 message: "Balance failed for Assets:Bank: expected 0 USD, got 100 USD",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "no balance check for a transaction holding an invalid token",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"cost after a control character\"
+  Assets:A  1 HOOL \u{11}{2 USD}
+  Assets:B  -2 USD
+
+2024-01-03 * \"price after an invalid run\"
+  Assets:A  1 HOOL $x@ 2 USD
+  Assets:B  -2 USD
+
+2024-01-04 * \"total price after a BOM\"
+  Assets:A  1 HOOL \u{feff}@@ 2 USD
+  Assets:B  -2 USD
+
+2024-01-05 * \"cost glued to a BOM\"
+  Assets:A  1 HOOL\u{feff}{2 USD}
+  Assets:B  -2 USD
+
+2024-01-06 * \"unbalanced, no invalid token\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+",
+        findings: &[
+            Finding {
+                code: "P0012",
+                line: 5,
+                message: "parse error: unexpected input",
+            },
+            Finding {
+                code: "P0012",
+                line: 9,
+                message: "parse error: unexpected input",
+            },
+            Finding {
+                code: "P0026",
+                line: 13,
+                message: "Invalid token: UTF-8 BOM",
+            },
+            Finding {
+                code: "P0026",
+                line: 17,
+                message: "Invalid token: UTF-8 BOM",
+            },
+            Finding {
+                code: "E3001",
+                line: 20,
+                message: "Transaction does not balance: residual -1 USD",
             },
         ],
         closes_nonempty: false,

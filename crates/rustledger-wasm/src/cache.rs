@@ -525,11 +525,18 @@ use crate::types::{Error, LedgerOptions};
 /// mid-line one is reported. A file that loaded with no error can now have
 /// one, and both payloads archive its errors and directives, so an older blob
 /// would keep serving the old ones. (v111 was taken by #2973.)
+/// v113: loader v74, unchanged; parsed directives did not move. Both
+/// payloads' validation findings move (#2954): a transaction that holds an
+/// invalid token, kept under error recovery without the price or cost after
+/// the token, has no balance residual reported (`E3001`), as beancount never
+/// builds it. Every such source has a parse error, which the loader's cache
+/// is never saved for; an older blob here would keep serving the residuals.
+/// (v111 was taken by #2973 and v112 by #2974.)
 /// v114: loader v75, bumped too; PARSER OUTPUT changed (#2951). A second date
 /// in a transaction header (`2024-01-02 * 2024-01-03 "n"`) is a parse error,
 /// as in beancount, where it was accepted with no error. A file that loaded
 /// with no error can now have one, and both payloads archive its errors and
-/// directives, so an older blob would keep serving the old ones. (v113 is held
+/// directives, so an older blob would keep serving the old ones. (v113 was taken
 /// by #2975.)
 pub const CACHE_VERSION: u32 = 114;
 

@@ -884,6 +884,10 @@ pub(crate) const TOKEN_CAPACITY_CAP: usize = 4 << 20;
 /// `Vec<(SyntaxKind, Range)>` (1.6 GB more). [`tokenize`] /
 /// [`tokenize_lossless`] keep their `Vec` API by collecting from this
 /// iterator; the structured parser streams it instead.
+///
+/// `Clone` so `stray_cr_trivia_end` can read the token after a run of stray
+/// `\r` bytes exactly as this iterator would emit it (#2966).
+#[derive(Clone)]
 pub(crate) struct TokenIter<'src> {
     lexer: logos::Lexer<'src, Token<'src>>,
     source: &'src str,
@@ -910,6 +914,15 @@ pub(crate) struct TokenIter<'src> {
     /// either; skipping it keeps a long run of glued one-letter tokens
     /// (`V,V,V,...`) linear.
     capital_run_clean_until: usize,
+    /// Set on the clones `cr_chain_is_trivia` reads ahead with, where a lone
+    /// capital glued to a stray `\r` is left a token: the walk decides those
+    /// itself, so no lookahead starts another (#2966).
+    peeking: bool,
+    /// How far the last chain `cr_chain_is_trivia` walked reaches, and its
+    /// answer, which holds for every link of it (#2966). A later run that
+    /// ends before that point is a link of the same chain.
+    cr_chain_until: usize,
+    cr_chain_is_trivia: bool,
     pending: Option<(Token<'src>, Span)>,
 }
 
@@ -930,6 +943,9 @@ impl<'src> TokenIter<'src> {
             last_newline_end: 0,
             stray_cr_failed_until: 0,
             capital_run_clean_until: 0,
+            peeking: false,
+            cr_chain_until: 0,
+            cr_chain_is_trivia: false,
             pending: None,
         }
     }
@@ -999,6 +1015,24 @@ impl<'src> TokenIter<'src> {
                 }
                 return Some((at, peek));
             }
+            // The run's last token a lone capital glued to a stray `\r` that
+            // the capital rule in `next` makes an invalid token (#2966):
+            // that is an error in the run too, so the run from the first
+            // capital on is ONE invalid token, as beancount's `P@T` and
+            // `B,B` are, not a token run and then the last capital's own
+            // error. Off on the clones that read ahead (`peeking`), as the
+            // capital rule is.
+            if !self.peeking
+                && peek.span().end == run_end
+                && result.as_ref().is_ok_and(is_lone_capital_token)
+                && self.stray_cr_follows(run_end)
+                && self.capital_rule_applies(at)
+            {
+                let run = self.stray_run(run_end);
+                if run.at_line_end || self.cr_chain_is_trivia(run.end) {
+                    return Some((at, peek));
+                }
+            }
         }
         self.capital_run_clean_until = run_end;
         None
@@ -1020,15 +1054,24 @@ impl TokenIter<'_> {
     /// the `\r` of a `\r\n`, which stays in the `Newline`) or the end of the
     /// source. The bytes stay in the token stream, as trivia.
     ///
+    /// A run with more of its line after it is trivia too when the token the
+    /// iterator emits after it is itself an error (#2966): `\r$`, `\r<BOM>~`,
+    /// `\r $~`. beancount reads the `\r` as a blank there, so the line has
+    /// that one invalid token, and reporting the `\r` as well counted one
+    /// error more than beancount. The token is read as it is emitted, after
+    /// every rewrite in `next`; see `cr_chain_is_trivia`, which also covers a
+    /// lone capital glued to a stray `\r` after the run (`\rB\r$`).
+    ///
     /// Stricter than beancount, deliberately: a `\r` with more of the line
-    /// after it (`open\rAssets:Cash`, `; a\rb`, or before the first token of
-    /// a line) is still an error, where beancount takes it as a token
-    /// separator. The formatter folds such a bare `\r` into a line break
-    /// (`crlf_to_lf_outside_strings`, which is what keeps classic-Mac files
-    /// formattable), so accepting it would make `rledger format` split a
-    /// line that `rledger check` called valid. Pinned by
+    /// after it that is not an error (`open\rAssets:Cash`, `; a\rb`, or
+    /// before the first token of a line) is still an error, where beancount
+    /// takes it as a token separator. The formatter folds such a bare `\r`
+    /// into a line break (`crlf_to_lf_outside_strings`, which is what keeps
+    /// classic-Mac files formattable), so accepting it would make `rledger
+    /// format` split a line that `rledger check` called valid. Pinned by
     /// `test_parse_cr_with_more_of_the_line_after_it_stays_an_error` in
-    /// `tests/stray_cr.rs`.
+    /// `tests/stray_cr.rs`. The #2966 case cannot reach the formatter that
+    /// way: its line keeps the error after the run.
     ///
     /// Returns `None`, after one byte comparison, for an ordinary
     /// `Whitespace` token. Linear: a run that reaches the line ending is
@@ -1047,7 +1090,7 @@ impl TokenIter<'_> {
         span: &Range<usize>,
     ) -> Option<usize> {
         let bytes = self.source.as_bytes();
-        let mut has_cr = match result {
+        let has_cr = match result {
             Ok(Token::Whitespace(_)) => false,
             Err(()) if &bytes[span.clone()] == b"\r" => true,
             _ => return None,
@@ -1055,7 +1098,22 @@ impl TokenIter<'_> {
         if span.start < self.stray_cr_failed_until {
             return None;
         }
-        let mut end = span.end;
+        let run = self.stray_run(span.end);
+        if (has_cr || run.has_cr) && (run.at_line_end || self.cr_chain_is_trivia(run.end)) {
+            Some(run.end)
+        } else {
+            self.stray_cr_failed_until = run.end;
+            None
+        }
+    }
+
+    /// The `[ \t\r]` run that goes on at `from`: where it ends (before the
+    /// `\r` of a `\r\n`, which stays in the `Newline`), whether it holds a
+    /// stray `\r`, and whether it ends its line.
+    fn stray_run(&self, from: usize) -> StrayRun {
+        let bytes = self.source.as_bytes();
+        let mut has_cr = false;
+        let mut end = from;
         while end < self.lex_end {
             match bytes[end] {
                 b' ' | b'\t' => end += 1,
@@ -1076,13 +1134,166 @@ impl TokenIter<'_> {
         } else {
             matches!(bytes[end], b'\n' | b'\r')
         };
-        if has_cr && at_line_end {
-            Some(end)
-        } else {
-            self.stray_cr_failed_until = end;
-            None
+        StrayRun {
+            end,
+            has_cr,
+            at_line_end,
         }
     }
+
+    /// Whether a run of stray `\r` bytes (and blanks) that ends at `at`, with
+    /// more of its line after it, is trivia (#2966): whether the token this
+    /// iterator emits at `at` is an error.
+    ///
+    /// The token is read on a clone, as it would be emitted (a lone capital
+    /// merged into the error after it, a BOM-led run), an indent synthesized
+    /// before it aside. One case needs more than that token: a lone capital
+    /// glued to a stray `\r` is an error exactly when the run after it is
+    /// trivia (the capital rule in `next`), so the answer is that of the run
+    /// after it, and so on along the chain (`\rB\rC\r$`). The chain is walked
+    /// here in one loop, not by each decision waiting on the next, with the
+    /// capital rule off on the clones (`peeking`); and its answer, the same
+    /// for every link, is remembered up to the chain's end, so each chain is
+    /// walked once. Linear in all.
+    fn cr_chain_is_trivia(&mut self, mut at: usize) -> bool {
+        if at <= self.cr_chain_until {
+            return self.cr_chain_is_trivia;
+        }
+        let lexer_at = self.lexer.span().end;
+        let result = loop {
+            let mut peek = self.clone();
+            peek.peeking = true;
+            peek.pending = None;
+            peek.lexer.bump(at - lexer_at);
+            let token = loop {
+                match peek.next() {
+                    Some((Token::Indent(_) | Token::DeepIndent(_), _)) => {}
+                    other => break other,
+                }
+            };
+            match token {
+                Some((Token::Error(_), span)) if span.start == at => break true,
+                Some((token, span))
+                    if span.start == at
+                        && is_lone_capital_token(&token)
+                        && self.stray_cr_follows(span.end)
+                        && self.capital_rule_applies(span.start) =>
+                {
+                    let run = self.stray_run(span.end);
+                    at = run.end;
+                    if run.at_line_end {
+                        break true;
+                    }
+                }
+                _ => break false,
+            }
+        };
+        self.cr_chain_until = at;
+        self.cr_chain_is_trivia = result;
+        result
+    }
+
+    /// Whether a `\r` that is not part of a `\r\n` starts at `at`.
+    fn stray_cr_follows(&self, at: usize) -> bool {
+        let after = &self.source.as_bytes()[at..self.lex_end];
+        after.first() == Some(&b'\r') && after.get(1) != Some(&b'\n')
+    }
+
+    /// Whether a lone capital glued to a stray `\r`, starting at `at`, is
+    /// made an invalid token (#2966): everywhere but a transaction's flag
+    /// position, a capital after a column-0 date and blanks
+    /// (`2024-01-02 P\r`). There the parser's glued one-letter rule
+    /// (`txn_header::first_header_defect_in`, `GluedLetterFlag`) already
+    /// reports it, as the flag of a transaction it keeps, so the postings
+    /// and metadata under it stay quiet; an invalid token there would drop
+    /// the header and report every indented line under it.
+    ///
+    /// A capital glued straight to a date that starts its line, indented or
+    /// not (`2024-01-02P\r`, `  2024-1-2Z\r`), is left alone too: the parser
+    /// reads it as that line's transaction flag, as on main
+    /// (`parser::identify_directive`), and an invalid token there would
+    /// drop the transaction the same way. After an indented date and blanks
+    /// (`  2024-01-02 P\r`) the parser takes the invalid token as the flag
+    /// itself, so the rule applies there.
+    ///
+    /// The last capital of a blank-free run that a lone capital in a flag
+    /// position starts (`2024-01-02 P@T\r`, `  2024-01-02 P@Z\r`) is left
+    /// alone too: the header's glued one-letter rule reports that run, as
+    /// on main, where beancount has one invalid token.
+    ///
+    /// Reads back only over the blanks before `at`, the date-like run
+    /// before them and the indentation before that, each bounded by the
+    /// token before it; and, for a capital that is in no flag position, over
+    /// its own blank-free run, which a later capital glued to a stray `\r`
+    /// cannot share (the `\r` ends the run).
+    fn capital_rule_applies(&self, at: usize) -> bool {
+        if let Some(position) = self.flag_position(at) {
+            return !(position.column_0 || position.glued);
+        }
+        let bytes = self.source.as_bytes();
+        let run_start = bytes[..at]
+            .iter()
+            .rposition(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .map_or(0, |i| i + 1);
+        // A run glued to a date (`2024-01-02P@T`) is led by what follows it.
+        let lead = match leading_date_len(&self.source[run_start..at]) {
+            Some(n) => run_start + n,
+            None => run_start,
+        };
+        let lone_capital_leads = lead < at
+            && bytes[lead].is_ascii_uppercase()
+            && !matches!(
+                bytes.get(lead + 1),
+                Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'\'' | b'.' | b'_' | b'-')
+            );
+        !(lone_capital_leads && self.flag_position(lead).is_some())
+    }
+
+    /// Whether a token at `at` stands where a transaction's flag does: after
+    /// a date that starts its line (after any indentation), glued to it or
+    /// after blanks. `None` when it does not.
+    fn flag_position(&self, at: usize) -> Option<FlagPosition> {
+        let bytes = self.source.as_bytes();
+        let blanks_start = bytes[..at]
+            .iter()
+            .rposition(|b| !matches!(b, b' ' | b'\t'))
+            .map_or(0, |i| i + 1);
+        let date_start = bytes[..blanks_start]
+            .iter()
+            .rposition(|b| !matches!(b, b'0'..=b'9' | b'-' | b'/'))
+            .map_or(0, |i| i + 1);
+        if date_start == blanks_start
+            || leading_date_len(&self.source[date_start..]) != Some(blanks_start - date_start)
+        {
+            return None;
+        }
+        let indent_start = bytes[..date_start]
+            .iter()
+            .rposition(|b| !matches!(b, b' ' | b'\t'))
+            .map_or(0, |i| i + 1);
+        if !(indent_start == 0 || bytes[indent_start - 1] == b'\n') {
+            return None;
+        }
+        Some(FlagPosition {
+            column_0: date_start == 0 || bytes[date_start - 1] == b'\n',
+            glued: blanks_start == at,
+        })
+    }
+}
+
+/// Where a flag position is, as `TokenIter::flag_position` reads it.
+struct FlagPosition {
+    /// The date is at column 0.
+    column_0: bool,
+    /// The token is glued to the date, with no blank between.
+    glued: bool,
+}
+
+/// A `[ \t\r]` run, as `TokenIter::stray_run` reads it.
+struct StrayRun {
+    end: usize,
+    has_cr: bool,
+    at_line_end: bool,
 }
 
 #[cfg(test)]
@@ -1164,6 +1375,29 @@ impl<'src> Iterator for TokenIter<'src> {
                 span.end = lexer.span().end;
                 self.lexer = lexer;
                 result = Err(());
+            }
+            // A `\r` that is not part of a line ending is none of the three
+            // either, so a lone capital glued to one is beancount's invalid
+            // token, which ends at the `\r` (#2966): `B\r$` is
+            // `Invalid token: 'B'`, then `\r` as a blank, then `'$'`. The
+            // capital is the error here when that `\r` starts a run that is
+            // trivia (`stray_cr_trivia_end`: it ends the line, or an error
+            // follows it, `cr_chain_is_trivia`); clones reading ahead leave
+            // that to the walk (`peeking`). Otherwise the `\r` stays an
+            // error of its own, the deliberate stricter reading, and it
+            // already stands for the capital's (`1N\rAssets:A` is one error
+            // there, `'N'`, and one here). A CRLF's `\r` is left to the
+            // parser's glued one-letter rules, as before, and so is a
+            // transaction's flag (`capital_rule_applies`).
+            if !self.peeking
+                && is_lone_capital(&result)
+                && self.stray_cr_follows(span.end)
+                && self.capital_rule_applies(span.start)
+            {
+                let run = self.stray_run(span.end);
+                if run.at_line_end || self.cr_chain_is_trivia(run.end) {
+                    result = Err(());
+                }
             }
             // A `%` that is not at column 0 is a FLAG in beancount (`[!&#?%]`),
             // never a comment: `  % Assets:A  1 USD` is a flagged posting and
@@ -1459,7 +1693,15 @@ impl<'src> Iterator for TokenIter<'src> {
 /// `Currency` (or `Flag`) here and is beancount's `CAPITAL` only before a
 /// space, tab or `\n`. See the lookahead in `TokenIter::next`.
 const fn is_lone_capital(result: &Result<Token<'_>, ()>) -> bool {
-    matches!(result, Ok(Token::Currency(s) | Token::Flag(s))
+    match result {
+        Ok(token) => is_lone_capital_token(token),
+        Err(()) => false,
+    }
+}
+
+/// [`is_lone_capital`], for a token.
+const fn is_lone_capital_token(token: &Token<'_>) -> bool {
+    matches!(token, Token::Currency(s) | Token::Flag(s)
         if s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase())
 }
 
@@ -1822,20 +2064,24 @@ mod tests {
     /// lone-`\r` error token whose stray-`\r` scan ran to the end of the run
     /// and failed, so a run of N bytes cost O(N^2) (over 120 s on 1 MB). The
     /// bytes those scans step over must stay linear in the input.
+    ///
+    /// Each run ends at a token that lexes (`USD`), so its `\r` bytes stay
+    /// errors; a run that ends at an error is trivia (#2966), and has its
+    /// own linear-cost guard below.
     #[test]
     fn test_tokenize_lossless_long_cr_run_not_at_a_line_end_lexes_in_linear_time() {
         const N: usize = 20_000;
         for (label, src) in [
             (
                 "\\r run",
-                "2024-01-01 open Assets:A\n".to_string() + &"\r".repeat(N) + "x\n",
+                "2024-01-01 open Assets:A\n".to_string() + &"\r".repeat(N) + "USD\n",
             ),
-            ("\\r and space run", "\r ".repeat(N) + "x\n"),
+            ("\\r and space run", "\r ".repeat(N) + "USD\n"),
             // An unterminated quote puts the rest of the file in
             // line-at-a-time mode, so the run is lexed after a restart.
             (
                 "\\r run in line-at-a-time mode",
-                "\"x\n".to_string() + &"\r".repeat(N) + "y\n",
+                "\"x\n".to_string() + &"\r".repeat(N) + "USD\n",
             ),
         ] {
             test_counters::STRAY_CR_SCANNED_BYTES.with(|c| c.set(0));
@@ -1851,6 +2097,89 @@ mod tests {
                 tokens.iter().any(|(t, _)| matches!(t, Token::Error("\r"))),
                 "{label}"
             );
+        }
+    }
+
+    /// The lookahead of #2966 stays linear and shallow: a stray `\r` run
+    /// reads the token after it, and a `\rB\rB...` chain, where each answer
+    /// is the next one's, is walked once in a loop and remembered for every
+    /// link, rather than each decision waiting on the next. Counted are the
+    /// bytes the stray-`\r` scans step over (the walk's included) and the
+    /// bytes the invalid-token runs take in; and the error tokens, exactly.
+    #[test]
+    fn test_tokenize_lossless_cr_lookaheads_are_linear_and_shallow() {
+        const N: usize = 20_000;
+        let open = "2024-01-01 open Assets:A\n";
+        // (label, source, error tokens, of which `\r` ones)
+        for (label, src, errors, cr_errors) in [
+            // Every run is trivia before the error after it: N errors.
+            (
+                "\\r$ chain",
+                open.to_string() + &"\r$".repeat(N) + "\n",
+                N,
+                0,
+            ),
+            ("\\r and space run before $", "\r ".repeat(N) + "$\n", 1, 0),
+            // Each capital is glued to a `\r` run that is trivia, as the
+            // error after it ends it: N capitals and N `$`.
+            (
+                "B\\r chain",
+                open.to_string() + &"B\r$ ".repeat(N) + "\n",
+                2 * N,
+                0,
+            ),
+            // A chain of capitals between `\r` bytes, ending at an error:
+            // every run is trivia and every capital an error, as in
+            // beancount (N capitals and the `$`). Walked once.
+            (
+                "\\rB chain to an error",
+                open.to_string() + &"\rB".repeat(N) + "\r$\n",
+                N + 1,
+                0,
+            ),
+            // The same chain ending at a token that lexes: every capital is
+            // a token and every `\r` an error of its own, the deliberate
+            // stricter reading.
+            (
+                "\\rB chain to a token",
+                open.to_string() + &"\rB".repeat(N) + "\rUSD\n",
+                N + 1,
+                N + 1,
+            ),
+            // Ending at a stray `\r` before the line ending: trivia all
+            // along, the capitals errors.
+            (
+                "\\rB chain to the line end",
+                open.to_string() + &"\rB".repeat(N) + "\r\r\n",
+                N,
+                0,
+            ),
+        ] {
+            test_counters::STRAY_CR_SCANNED_BYTES.with(|c| c.set(0));
+            test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(&src);
+            let scanned = test_counters::STRAY_CR_SCANNED_BYTES.with(std::cell::Cell::get);
+            let error_bytes = test_counters::ERROR_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 4 * src.len(),
+                "{label}: stray-\\r scans stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            assert!(
+                error_bytes <= 4 * src.len(),
+                "{label}: invalid-token runs took in {error_bytes} bytes of a {}-byte input",
+                src.len()
+            );
+            let found = tokens
+                .iter()
+                .filter(|(t, _)| matches!(t, Token::Error(_)))
+                .count();
+            assert_eq!(found, errors, "{label}");
+            let found_cr = tokens
+                .iter()
+                .filter(|(t, _)| matches!(t, Token::Error("\r")))
+                .count();
+            assert_eq!(found_cr, cr_errors, "{label}");
         }
     }
 

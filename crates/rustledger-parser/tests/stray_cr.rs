@@ -15,6 +15,12 @@
 //! files formattable), so accepting it would let `rledger format` split a
 //! line `rledger check` accepted. See `TokenIter::stray_cr_trivia_end`.
 //!
+//! Except before an invalid token (#2966): there the line has that token's
+//! error in any case, so nothing is accepted, and the `\r` is a blank, as in
+//! beancount, rather than one error more. A lone capital glued to such a
+//! `\r` is an invalid token, as beancount's `CAPITAL` needs a space, tab or
+//! `\n` after it.
+//!
 //! Every expected outcome below was checked against `bean-check` 3.2.3.
 
 use rustledger_core::{Directive, InternedStr};
@@ -334,5 +340,349 @@ fn test_try_format_source_stray_cr_formats_like_crlf() {
         ] {
             assert_eq!(try_format_source(&src).as_ref(), Ok(&expected), "{src:?}");
         }
+    }
+}
+
+/// The errors of `src` per line (1-based, counting `\n` only, as
+/// `rledger check` does): `(line, count)`, in line order.
+fn per_line(src: &str) -> Vec<(usize, usize)> {
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for e in &parse(src).errors {
+        let line = 1 + src[..e.span.start].matches('\n').count();
+        match counts.iter_mut().find(|(l, _)| *l == line) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((line, 1)),
+        }
+    }
+    counts.sort_unstable();
+    counts
+}
+
+/// Two opens, the start of every source below.
+const OPENS: &str = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n";
+
+/// A stray `\r` before an invalid token is a blank, as in beancount, not an
+/// error of its own (#2966): every row of the issue, per context. Each count
+/// is bean-check 3.2.3's, per line; main counted one more on each.
+#[test]
+fn test_parse_cr_before_an_invalid_token_is_a_blank() {
+    const BOM: &str = "\u{feff}";
+    let cases: Vec<(String, Vec<(usize, usize)>)> = vec![
+        // A directive header.
+        (
+            format!("{OPENS}2024-01-02 open Assets:C\r$\n"),
+            vec![(3, 1)],
+        ),
+        // A transaction header.
+        (
+            format!("{OPENS}2024-01-02 * \"x\"\r$\n  Assets:A  1 USD\n  Assets:B  -1 USD\n"),
+            vec![(3, 1)],
+        ),
+        // A posting.
+        (
+            format!("{OPENS}2024-01-02 * \"x\"\n  Assets:A  1 USD\rx\n  Assets:B  -1 USD\n"),
+            vec![(4, 1)],
+        ),
+        // A metadata line.
+        (
+            format!("{OPENS}2024-01-02 note Assets:A \"n\"\n  kk: \"v\"\r$\n"),
+            vec![(4, 1)],
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
+
+    // A line that is `\r<BOM>` (or `\r$`), after any directive, with CRLF, or
+    // with no final newline, and as a whole file: one error, the BOM's.
+    for before in [
+        "2024-01-02 close Assets:A\n",
+        "2024-01-02 open Assets:C\n",
+        "2024-01-02 commodity HOOL\n",
+        "pushtag #t\n",
+        "2024-01-02 * \"x\"\n  Assets:A  1 USD\n  Assets:B  -1 USD\n",
+        "",
+    ] {
+        let line = 3 + before.matches('\n').count();
+        for tail in [
+            format!("\r{BOM}\n"),
+            "\r$\n".to_string(),
+            format!("\r{BOM}"),
+        ] {
+            // The `poptag` goes on a line of its own, after a final newline.
+            let pop = match (before.starts_with("pushtag"), tail.ends_with('\n')) {
+                (true, true) => "poptag #t\n",
+                (true, false) => "\npoptag #t\n",
+                (false, _) => "",
+            };
+            let src = format!("{OPENS}{before}{tail}{pop}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(line, 1)], "{src:?}");
+        }
+    }
+    let crlf = format!(
+        "{}2024-01-02 close Assets:A\r\n\r{BOM}\r\n",
+        OPENS.replace('\n', "\r\n")
+    );
+    assert_invariants(&crlf);
+    assert_eq!(per_line(&crlf), [(4, 1)], "{crlf:?}");
+    let whole = format!("\r{BOM}");
+    assert_invariants(&whole);
+    assert_eq!(per_line(&whole), [(1, 1)]);
+
+    // `\r<BOM>~`, `\r<BOM>@` and `\r <BOM>~` after a header, and a `\r`, a
+    // blank, then a token: one error. After a metadata line: two, the
+    // grammar's at the key's line and the invalid token's.
+    for tail in [
+        format!("\r{BOM}~"),
+        format!("\r{BOM}@"),
+        format!("\r {BOM}~"),
+        "\r $~".to_string(),
+        "\r $".to_string(),
+    ] {
+        for header in [
+            "2024-01-02 close Assets:A",
+            "2024-01-02 balance Assets:A 1.00 USD",
+            "2024-01-02 price HOOL 2 USD",
+        ] {
+            let src = format!("{OPENS}{header}{tail}\n");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, 1)], "{src:?}");
+        }
+    }
+    for tail in [
+        format!("\r{BOM}~"),
+        format!("\r{BOM}@"),
+        format!("\r {BOM}~"),
+        "\r$~".to_string(),
+        "\r $~".to_string(),
+    ] {
+        for eol in ["\n", "\r\n"] {
+            let src = format!(
+                "{}2024-01-02 close Assets:A{eol}  k: \"v\"{tail}{eol}",
+                OPENS.replace('\n', eol)
+            );
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(4, 2)], "{src:?}");
+        }
+    }
+}
+
+/// A lone capital glued to a stray `\r` is beancount's invalid token, which
+/// ends at the `\r` (#2966): `CAPITAL` needs a space, tab or `\n` after it.
+/// It counts once, and the `\r` is then a blank. Each count is bean-check
+/// 3.2.3's; a `\r` before a token that lexes stays an error of its own and
+/// stands for the capital's (`1N\rAssets:B`).
+#[test]
+fn test_parse_lone_capital_glued_to_a_stray_cr_is_an_invalid_token() {
+    let cases: [(String, Vec<(usize, usize)>); 11] = [
+        (
+            format!("{OPENS}2024-01-02 close Assets:A B\r$\n"),
+            vec![(3, 2)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A AB\r$\n"),
+            vec![(3, 2)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A B \r$\n"),
+            vec![(3, 2)],
+        ),
+        // Glued to a date, the capital is the transaction's flag, which the
+        // header's glued-flag rule reports, after an invalid date too: in
+        // beancount it is an invalid token, which the date does not swallow.
+        ("2024-02-07B\r\u{0}\u{0}\n".to_string(), vec![(1, 2)]),
+        ("2229-2-37B\r\u{0}\u{0}\n".to_string(), vec![(1, 3)]),
+        ("2229-2-37B\r\r\n".to_string(), vec![(1, 2)]),
+        (format!("{OPENS}2024-01-02 P\r$\n"), vec![(3, 2)]),
+        (format!("{OPENS}2024-01-02 * \"x\"\n  P\r$\n"), vec![(4, 2)]),
+        (format!("{OPENS}  k: B\r\r\n"), vec![(3, 2)]),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A 1N\rAssets:B\n"),
+            vec![(3, 2)],
+        ),
+        // A chain: each capital is glued to a `\r` run that is trivia,
+        // because the run after the next capital is (`1\rD\r` at its end).
+        ("1\rD\r".to_string(), vec![(1, 2)]),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
+}
+
+/// A one-letter transaction flag glued to a stray `\r` keeps main's reading
+/// (#2966 review): the parser's glued-flag rule reports it, as the flag of a
+/// transaction it keeps, so its postings and metadata stay quiet. Turning it
+/// into an invalid token dropped the header and reported every indented line
+/// under it. Where an invalid token follows the `\r`, the `\r` is a blank,
+/// so the line has the flag's error and the token's, as in beancount. Each
+/// count is bean-check 3.2.3's.
+#[test]
+fn test_parse_flag_glued_to_a_stray_cr_keeps_the_transaction() {
+    let body = "  k: \"v\"\n  Assets:A  1 USD\n    pk: \"w\"\n  Assets:B  -1 USD\n";
+    let postings = "  Assets:A  1 USD\n  Assets:B  -1 USD\n";
+    for flag in ["P", "S"] {
+        // With metadata right under the header, beancount also reports that
+        // line (its header failed); with postings only, the header alone.
+        for (tail, header_errors) in [
+            ("\r\r\n", 1),
+            ("\r\t\n", 1),
+            ("\r$\n", 2),
+            ("\r $\n", 2),
+            ("\r\r$\n", 2),
+        ] {
+            let src = format!("{OPENS}2024-01-02 {flag}{tail}{body}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, header_errors), (4, 1)], "{src:?}");
+            let src = format!("{OPENS}2024-01-02 {flag}{tail}{postings}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, header_errors)], "{src:?}");
+        }
+        let src = format!("{OPENS}2024-01-02 {flag}\r");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 1)], "{src:?}");
+        // A capital after the narration is no flag: it is the invalid token.
+        let src = format!("{OPENS}2024-01-02 * \"x\" {flag}\r$\n{body}");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 2), (4, 1)], "{src:?}");
+    }
+}
+
+/// An indented date with a one-letter flag glued to a stray `\r` (#2966
+/// review). At the top level it is still a transaction, as on main: the
+/// indented-directive error and the flag's invalid token, its postings
+/// quiet. Under a transaction it is a body line beancount cannot read: the
+/// line's error and the invalid token. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_indented_date_with_a_flag_glued_to_a_stray_cr() {
+    let postings = "  Assets:A  1 USD\n  Assets:B\n";
+    for indent in ["  ", "\t"] {
+        for (tail, after) in [
+            ("\r\r\n", postings),
+            ("\r\t\n", postings),
+            ("\r\r\n", ""),
+            ("\r", ""),
+        ] {
+            let src = format!("{OPENS}{indent}2024-01-02 P{tail}{after}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, 2)], "{src:?}");
+        }
+        // An invalid token after the `\r`: one more, the `\r` a blank.
+        let src = format!("{OPENS}{indent}2024-01-02 P\r$\n{postings}");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 3)], "{src:?}");
+    }
+    let crlf = format!(
+        "{}  2024-01-02 P\r\r\n{}",
+        OPENS.replace('\n', "\r\n"),
+        postings.replace('\n', "\r\n")
+    );
+    assert_invariants(&crlf);
+    assert_eq!(per_line(&crlf), [(3, 2)], "{crlf:?}");
+
+    let txn = "2024-01-02 * \"x\"\n  Assets:A  1 USD\n";
+    for (tail, expected) in [("\r\r\n", 2), ("\r$\n", 3)] {
+        let src = format!("{OPENS}{txn}  2024-01-02 P{tail}  Assets:B  -1 USD\n");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(5, expected)], "{src:?}");
+    }
+    let src = format!("{OPENS}{txn}  2024-01-02 P\r");
+    assert_invariants(&src);
+    assert_eq!(per_line(&src), [(5, 2)], "{src:?}");
+}
+
+/// An indented date with a stray `\r` between it and a one-letter capital,
+/// after a line that already failed (#2966 round-3 review). beancount is in
+/// error recovery there and reports the line's invalid tokens only, so it is
+/// no transaction: the capital is a transaction's flag only after spaces or
+/// tabs, as the `CURRENCY` flag is. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_indented_date_cr_capital_after_a_failed_line() {
+    // (the context, the line its error is on)
+    let contexts = [
+        ("2024-01-01 open Assets:A $\n", 1),
+        ("2024-01-01 open Assets:A\n$\n", 2),
+        ("2024-01-01 open Assets:A\n  kk: \"v\" $\n", 2),
+        ("2024-01-01 open Assets:A\n  k: \"v\"\n", 2),
+        (
+            "2024-01-01 open Assets:A\n2024-01-01 close Assets:A\n  k: \"v\"\n",
+            3,
+        ),
+    ];
+    for (context, failed) in contexts {
+        let line = failed + 1;
+        for before in ["\r", "\r ", " \r"] {
+            for (tail, expected) in [("\r", 1), ("\r\r\n", 1), ("\rB\r\r\n", 2)] {
+                let src = format!("{context}  2024-01-02{before}P{tail}");
+                assert_invariants(&src);
+                assert_eq!(per_line(&src), [(failed, 1), (line, expected)], "{src:?}");
+            }
+        }
+    }
+    let src = "2024-01-01 open Assets:A\n  k: 1\n  2024-01-02\rP\r$\n";
+    assert_invariants(src);
+    assert_eq!(per_line(src), [(2, 1), (3, 2)], "{src:?}");
+}
+
+/// A run of capitals and punctuation that ends in a capital glued to a
+/// stray `\r` is ONE invalid token, as beancount's `P@T` and `B,B` are, not
+/// a token run and then the last capital's own error (#2966 round-4
+/// review). In a flag position the header's glued-flag rule reports the run,
+/// as on main. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_capital_run_ending_at_a_stray_cr_is_one_invalid_token() {
+    let cases: [(String, Vec<(usize, usize)>); 10] = [
+        ("P@T\r\r\n".to_string(), vec![(1, 1)]),
+        (
+            format!("{OPENS}2024-01-02 commodity B,B\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (format!("{OPENS}2024-01-02 P@T\r"), vec![(3, 1)]),
+        (
+            format!("{OPENS}2024-01-02 txn \"x\" P@T\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 open Assets:C USD,P@T\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 price HOOL 2 B,B\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (format!("{OPENS}2024-01-02 P,P\r\r\n"), vec![(3, 1)]),
+        (format!("{OPENS}  P@P\r\r\r\n"), vec![(3, 1)]),
+        (format!("{OPENS}  2024-01-02 P@Z\r\r\n"), vec![(3, 2)]),
+        (
+            format!("{OPENS}  2024-01-02 P@Z\r\r\n  Assets:A  1 USD\n  Assets:B\n"),
+            vec![(3, 2)],
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
+}
+
+/// A one-letter capital glued straight to a date that starts its line
+/// (indented or not) and to a stray `\r` stays that line's transaction
+/// flag, as on main: the transaction keeps its postings quiet (#2966
+/// round-4 review). Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_capital_glued_to_a_date_and_a_stray_cr_keeps_the_transaction() {
+    let postings = "  Assets:A  1 USD\n  Assets:B\n";
+    let cases: [(String, Vec<(usize, usize)>); 5] = [
+        (format!("{OPENS}2024-01-02P\r\r\n{postings}"), vec![(3, 1)]),
+        (format!("{OPENS}2024-01-02P\r$\n{postings}"), vec![(3, 2)]),
+        (format!("2024/01/02T\r\r\r\n{postings}"), vec![(1, 1)]),
+        (format!("  2024-1-2Z\r\r\r\n{postings}"), vec![(1, 2)]),
+        // An invalid date: its error, the glued flag's and the `$`.
+        (format!("2229-2-37B\r$\n{postings}"), vec![(1, 3)]),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
     }
 }

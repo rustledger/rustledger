@@ -9682,10 +9682,14 @@ fn quiet_after_invalid_tokens(
                 // before the invalid one (an invalid date, an account), so
                 // there this condition changes nothing.
                 //
-                // A check that ends right at the token (a posting's sign
-                // check, `-$x`) is kept, one error more than beancount;
-                // `>=` would drop it too (#2967).
-                e.span.end > at
+                // A check that ends right at the token is dropped too
+                // (#2967): a posting's sign check covers the sign and the
+                // blanks after it, so in `-$x` or `- <BOM>x` it ends where
+                // the token starts, and beancount's grammar, having read the
+                // sign, fails at the token alone. The same holds for a
+                // header's amount check that ends there
+                // (`balance Assets:A 1 +2x EUR \x11`).
+                e.span.end >= at
                     && construct_check
                     && *reaches.get_or_insert_with(|| {
                         if content > line_start {

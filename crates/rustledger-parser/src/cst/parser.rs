@@ -1334,10 +1334,18 @@ fn identify_directive(
                 // date it is still a transaction's flag position, as the
                 // `CURRENCY` was: the transaction keeps its postings, which
                 // stay quiet, and the token reports its own error beside the
-                // indented directive's. Only after a blank: a capital glued
-                // to the date (`2229-2-37B\r`) is no flag.
+                // indented directive's. Only after spaces or tabs, as the
+                // `CURRENCY` flag stands on main: a capital glued to the date
+                // (`2229-2-37B\r`) is no flag, and neither is one after a
+                // stray `\r` (`2024-01-02\rP\r`), where the `\r` was an error
+                // of its own on main and the line no transaction, which is
+                // what beancount's error recovery reports after a line that
+                // already failed.
                 SyntaxKind::ERROR_TOKEN
                     if j > i + 1
+                        && source
+                            .get(tokens[i].1.end..tokens[j].1.start)
+                            .is_some_and(|gap| gap.bytes().all(|b| matches!(b, b' ' | b'\t')))
                         && source.get(tokens[j].1.clone()).is_some_and(|t| {
                             t.len() == 1 && t.as_bytes()[0].is_ascii_uppercase()
                         }) =>

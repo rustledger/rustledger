@@ -587,3 +587,36 @@ fn test_parse_indented_date_with_a_flag_glued_to_a_stray_cr() {
     assert_invariants(&src);
     assert_eq!(per_line(&src), [(5, 2)], "{src:?}");
 }
+
+/// An indented date with a stray `\r` between it and a one-letter capital,
+/// after a line that already failed (#2966 round-3 review). beancount is in
+/// error recovery there and reports the line's invalid tokens only, so it is
+/// no transaction: the capital is a transaction's flag only after spaces or
+/// tabs, as the `CURRENCY` flag is. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_indented_date_cr_capital_after_a_failed_line() {
+    // (the context, the line its error is on)
+    let contexts = [
+        ("2024-01-01 open Assets:A $\n", 1),
+        ("2024-01-01 open Assets:A\n$\n", 2),
+        ("2024-01-01 open Assets:A\n  kk: \"v\" $\n", 2),
+        ("2024-01-01 open Assets:A\n  k: \"v\"\n", 2),
+        (
+            "2024-01-01 open Assets:A\n2024-01-01 close Assets:A\n  k: \"v\"\n",
+            3,
+        ),
+    ];
+    for (context, failed) in contexts {
+        let line = failed + 1;
+        for before in ["\r", "\r ", " \r"] {
+            for (tail, expected) in [("\r", 1), ("\r\r\n", 1), ("\rB\r\r\n", 2)] {
+                let src = format!("{context}  2024-01-02{before}P{tail}");
+                assert_invariants(&src);
+                assert_eq!(per_line(&src), [(failed, 1), (line, expected)], "{src:?}");
+            }
+        }
+    }
+    let src = "2024-01-01 open Assets:A\n  k: 1\n  2024-01-02\rP\r$\n";
+    assert_invariants(src);
+    assert_eq!(per_line(src), [(2, 1), (3, 2)], "{src:?}");
+}

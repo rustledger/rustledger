@@ -5497,10 +5497,36 @@ fn report_invalid_dates(
         let i = lexer_errors.partition_point(|t| t.end <= span.start);
         lexer_errors.get(i).is_some_and(|t| t.start < end)
     };
+    // A one-letter capital glued to a stray `\r` (`2229-2-37B\r`): rledger
+    // reports it as a grammar error on the letter (the glued one-letter
+    // rules, `txn_header::GluedLetterFlag` and `directive_header`), but
+    // beancount's `CAPITAL` needs a space, a tab or a `\n` after it, so there
+    // it is an invalid token, the lexer's own error, which a bad date before
+    // it does not swallow (#2966). On main the `\r` was an error of its own
+    // that stood in for it; it is trivia now when an error or the line end
+    // follows it. Not when it is still an error of its own (one before a
+    // token that lexes, stricter than beancount on purpose): that error
+    // stands for the capital's, as on main. Only a stray `\r`: a capital glued
+    // to anything else (`P"x"`) is read as on main, whose error recovery this
+    // pass does not model further (#2966 review).
+    let glued_capital = |span: &Span| {
+        let at = span.start.saturating_sub(off);
+        let bytes = stripped.as_bytes();
+        let stray_cr_after = bytes.get(at + 1) == Some(&b'\r') && bytes.get(at + 2) != Some(&b'\n');
+        let cr_error_after = {
+            let i = lexer_errors.partition_point(|t| t.start < span.end);
+            lexer_errors.get(i).is_some_and(|t| t.start == span.end)
+        };
+        span.end == span.start + 1
+            && bytes.get(at).is_some_and(u8::is_ascii_uppercase)
+            && stray_cr_after
+            && !cr_error_after
+    };
     errors.retain(|e| {
         matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_))
             || !reaches_a_bad_date(&e.span)
             || covers_a_lexer_error(&e.span)
+            || glued_capital(&e.span)
     });
 }
 

@@ -1015,6 +1015,24 @@ impl<'src> TokenIter<'src> {
                 }
                 return Some((at, peek));
             }
+            // The run's last token a lone capital glued to a stray `\r` that
+            // the capital rule in `next` makes an invalid token (#2966):
+            // that is an error in the run too, so the run from the first
+            // capital on is ONE invalid token, as beancount's `P@T` and
+            // `B,B` are, not a token run and then the last capital's own
+            // error. Off on the clones that read ahead (`peeking`), as the
+            // capital rule is.
+            if !self.peeking
+                && peek.span().end == run_end
+                && result.as_ref().is_ok_and(is_lone_capital_token)
+                && self.stray_cr_follows(run_end)
+                && self.capital_rule_applies(at)
+            {
+                let run = self.stray_run(run_end);
+                if run.at_line_end || self.cr_chain_is_trivia(run.end) {
+                    return Some((at, peek));
+                }
+            }
         }
         self.capital_run_clean_until = run_end;
         None
@@ -1190,25 +1208,85 @@ impl TokenIter<'_> {
     /// and metadata under it stay quiet; an invalid token there would drop
     /// the header and report every indented line under it.
     ///
-    /// Reads back only over the blanks before `at` and the date-like run
-    /// before them, both bounded by the token before the capital.
+    /// A capital glued straight to a date that starts its line, indented or
+    /// not (`2024-01-02P\r`, `  2024-1-2Z\r`), is left alone too: the parser
+    /// reads it as that line's transaction flag, as on main
+    /// (`parser::identify_directive`), and an invalid token there would
+    /// drop the transaction the same way. After an indented date and blanks
+    /// (`  2024-01-02 P\r`) the parser takes the invalid token as the flag
+    /// itself, so the rule applies there.
+    ///
+    /// The last capital of a blank-free run that a lone capital in a flag
+    /// position starts (`2024-01-02 P@T\r`, `  2024-01-02 P@Z\r`) is left
+    /// alone too: the header's glued one-letter rule reports that run, as
+    /// on main, where beancount has one invalid token.
+    ///
+    /// Reads back only over the blanks before `at`, the date-like run
+    /// before them and the indentation before that, each bounded by the
+    /// token before it; and, for a capital that is in no flag position, over
+    /// its own blank-free run, which a later capital glued to a stray `\r`
+    /// cannot share (the `\r` ends the run).
     fn capital_rule_applies(&self, at: usize) -> bool {
+        if let Some(position) = self.flag_position(at) {
+            return !(position.column_0 || position.glued);
+        }
+        let bytes = self.source.as_bytes();
+        let run_start = bytes[..at]
+            .iter()
+            .rposition(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .map_or(0, |i| i + 1);
+        // A run glued to a date (`2024-01-02P@T`) is led by what follows it.
+        let lead = match leading_date_len(&self.source[run_start..at]) {
+            Some(n) => run_start + n,
+            None => run_start,
+        };
+        let lone_capital_leads = lead < at
+            && bytes[lead].is_ascii_uppercase()
+            && !matches!(
+                bytes.get(lead + 1),
+                Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'\'' | b'.' | b'_' | b'-')
+            );
+        !(lone_capital_leads && self.flag_position(lead).is_some())
+    }
+
+    /// Whether a token at `at` stands where a transaction's flag does: after
+    /// a date that starts its line (after any indentation), glued to it or
+    /// after blanks. `None` when it does not.
+    fn flag_position(&self, at: usize) -> Option<FlagPosition> {
         let bytes = self.source.as_bytes();
         let blanks_start = bytes[..at]
             .iter()
             .rposition(|b| !matches!(b, b' ' | b'\t'))
             .map_or(0, |i| i + 1);
-        if blanks_start == at {
-            return true;
-        }
         let date_start = bytes[..blanks_start]
             .iter()
             .rposition(|b| !matches!(b, b'0'..=b'9' | b'-' | b'/'))
             .map_or(0, |i| i + 1);
-        let at_column_0 = date_start == 0 || bytes[date_start - 1] == b'\n';
-        !(at_column_0
-            && leading_date_len(&self.source[date_start..]) == Some(blanks_start - date_start))
+        if date_start == blanks_start
+            || leading_date_len(&self.source[date_start..]) != Some(blanks_start - date_start)
+        {
+            return None;
+        }
+        let indent_start = bytes[..date_start]
+            .iter()
+            .rposition(|b| !matches!(b, b' ' | b'\t'))
+            .map_or(0, |i| i + 1);
+        if !(indent_start == 0 || bytes[indent_start - 1] == b'\n') {
+            return None;
+        }
+        Some(FlagPosition {
+            column_0: date_start == 0 || bytes[date_start - 1] == b'\n',
+            glued: blanks_start == at,
+        })
     }
+}
+
+/// Where a flag position is, as `TokenIter::flag_position` reads it.
+struct FlagPosition {
+    /// The date is at column 0.
+    column_0: bool,
+    /// The token is glued to the date, with no blank between.
+    glued: bool,
 }
 
 /// A `[ \t\r]` run, as `TokenIter::stray_run` reads it.

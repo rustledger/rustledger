@@ -476,7 +476,7 @@ fn test_parse_cr_before_an_invalid_token_is_a_blank() {
 /// stands for the capital's (`1N\rAssets:B`).
 #[test]
 fn test_parse_lone_capital_glued_to_a_stray_cr_is_an_invalid_token() {
-    let cases: [(String, Vec<(usize, usize)>); 9] = [
+    let cases: [(String, Vec<(usize, usize)>); 11] = [
         (
             format!("{OPENS}2024-01-02 close Assets:A B\r$\n"),
             vec![(3, 2)],
@@ -489,7 +489,12 @@ fn test_parse_lone_capital_glued_to_a_stray_cr_is_an_invalid_token() {
             format!("{OPENS}2024-01-02 close Assets:A B \r$\n"),
             vec![(3, 2)],
         ),
+        // Glued to a date, the capital is the transaction's flag, which the
+        // header's glued-flag rule reports, after an invalid date too: in
+        // beancount it is an invalid token, which the date does not swallow.
+        ("2024-02-07B\r\u{0}\u{0}\n".to_string(), vec![(1, 2)]),
         ("2229-2-37B\r\u{0}\u{0}\n".to_string(), vec![(1, 3)]),
+        ("2229-2-37B\r\r\n".to_string(), vec![(1, 2)]),
         (format!("{OPENS}2024-01-02 P\r$\n"), vec![(3, 2)]),
         (format!("{OPENS}2024-01-02 * \"x\"\n  P\r$\n"), vec![(4, 2)]),
         (format!("{OPENS}  k: B\r\r\n"), vec![(3, 2)]),
@@ -619,4 +624,65 @@ fn test_parse_indented_date_cr_capital_after_a_failed_line() {
     let src = "2024-01-01 open Assets:A\n  k: 1\n  2024-01-02\rP\r$\n";
     assert_invariants(src);
     assert_eq!(per_line(src), [(2, 1), (3, 2)], "{src:?}");
+}
+
+/// A run of capitals and punctuation that ends in a capital glued to a
+/// stray `\r` is ONE invalid token, as beancount's `P@T` and `B,B` are, not
+/// a token run and then the last capital's own error (#2966 round-4
+/// review). In a flag position the header's glued-flag rule reports the run,
+/// as on main. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_capital_run_ending_at_a_stray_cr_is_one_invalid_token() {
+    let cases: [(String, Vec<(usize, usize)>); 10] = [
+        ("P@T\r\r\n".to_string(), vec![(1, 1)]),
+        (
+            format!("{OPENS}2024-01-02 commodity B,B\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (format!("{OPENS}2024-01-02 P@T\r"), vec![(3, 1)]),
+        (
+            format!("{OPENS}2024-01-02 txn \"x\" P@T\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 open Assets:C USD,P@T\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 price HOOL 2 B,B\r\r\n"),
+            vec![(3, 1)],
+        ),
+        (format!("{OPENS}2024-01-02 P,P\r\r\n"), vec![(3, 1)]),
+        (format!("{OPENS}  P@P\r\r\r\n"), vec![(3, 1)]),
+        (format!("{OPENS}  2024-01-02 P@Z\r\r\n"), vec![(3, 2)]),
+        (
+            format!("{OPENS}  2024-01-02 P@Z\r\r\n  Assets:A  1 USD\n  Assets:B\n"),
+            vec![(3, 2)],
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
+}
+
+/// A one-letter capital glued straight to a date that starts its line
+/// (indented or not) and to a stray `\r` stays that line's transaction
+/// flag, as on main: the transaction keeps its postings quiet (#2966
+/// round-4 review). Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_capital_glued_to_a_date_and_a_stray_cr_keeps_the_transaction() {
+    let postings = "  Assets:A  1 USD\n  Assets:B\n";
+    let cases: [(String, Vec<(usize, usize)>); 5] = [
+        (format!("{OPENS}2024-01-02P\r\r\n{postings}"), vec![(3, 1)]),
+        (format!("{OPENS}2024-01-02P\r$\n{postings}"), vec![(3, 2)]),
+        (format!("2024/01/02T\r\r\r\n{postings}"), vec![(1, 1)]),
+        (format!("  2024-1-2Z\r\r\r\n{postings}"), vec![(1, 2)]),
+        // An invalid date: its error, the glued flag's and the `$`.
+        (format!("2229-2-37B\r$\n{postings}"), vec![(1, 3)]),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
 }

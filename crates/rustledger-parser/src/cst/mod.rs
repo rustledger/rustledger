@@ -66,7 +66,9 @@ pub(crate) fn is_flag_token(token: &crate::SyntaxToken) -> bool {
     convert::is_flag_token(token)
 }
 pub(crate) use convert::{parse_date_token, token_has_stray_bom};
-pub use convert::{parse_red_only, parse_via_cst, parse_via_cst_opts};
+pub use convert::{
+    parse_red_only, parse_via_cst, parse_via_cst_opts, transaction_holds_invalid_token,
+};
 // Formatter exports do NOT re-export through `cst` — the sole
 // import path for the formatter is `rustledger_parser::format`
 // (the crate-root sub-module that re-exports the six symbols

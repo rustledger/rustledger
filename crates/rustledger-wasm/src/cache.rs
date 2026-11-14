@@ -525,7 +525,14 @@ use crate::types::{Error, LedgerOptions};
 /// mid-line one is reported. A file that loaded with no error can now have
 /// one, and both payloads archive its errors and directives, so an older blob
 /// would keep serving the old ones. (v111 was taken by #2973.)
-pub const CACHE_VERSION: u32 = 112;
+/// v113: loader v74, unchanged; parsed directives did not move. Both
+/// payloads' validation findings move (#2954): a transaction that holds an
+/// invalid token, kept under error recovery without the price or cost after
+/// the token, has no balance residual reported (`E3001`), as beancount never
+/// builds it. Every such source has a parse error, which the loader's cache
+/// is never saved for; an older blob here would keep serving the residuals.
+/// (v111 was taken by #2973 and v112 by #2974.)
+pub const CACHE_VERSION: u32 = 113;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

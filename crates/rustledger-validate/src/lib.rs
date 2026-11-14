@@ -217,10 +217,19 @@ pub struct ValidationOptions {
 
 /// A located directive's place in beancount's entry order from its file id
 /// and byte offset; see [`ValidationOptions::source_lines`].
+///
+/// It can also hand out the source text itself ([`Self::with_text`]), which
+/// the balance check reads to tell a transaction kept under error recovery
+/// (#2954).
 #[derive(Clone)]
-pub struct SourceLines(
-    std::sync::Arc<dyn Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync>,
-);
+pub struct SourceLines {
+    position_of:
+        std::sync::Arc<dyn Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync>,
+    text_of: Option<TextOf>,
+}
+
+/// Gives the text of bytes `range` of file `file_id`, if it is at hand.
+type TextOf = std::sync::Arc<dyn Fn(u16, std::ops::Range<usize>) -> Option<String> + Send + Sync>;
 
 impl SourceLines {
     /// Wrap `position_of`, which gives the position of byte `offset` of file
@@ -228,13 +237,37 @@ impl SourceLines {
     pub fn new(
         position_of: impl Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync + 'static,
     ) -> Self {
-        Self(std::sync::Arc::new(position_of))
+        Self {
+            position_of: std::sync::Arc::new(position_of),
+            text_of: None,
+        }
+    }
+
+    /// With `text_of`, which gives the text of bytes `range` of file
+    /// `file_id`, or `None` when that text is not at hand (it was dropped,
+    /// or the range is not in it).
+    #[must_use]
+    pub fn with_text(
+        mut self,
+        text_of: impl Fn(u16, std::ops::Range<usize>) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.text_of = Some(std::sync::Arc::new(text_of));
+        self
     }
 
     /// The position of byte `offset` of file `file_id`.
     #[must_use]
     pub fn position(&self, file_id: u16, offset: usize) -> rustledger_booking::SourcePosition {
-        (self.0)(file_id, offset)
+        (self.position_of)(file_id, offset)
+    }
+
+    /// The text of bytes `range` of file `file_id`, when it was given
+    /// ([`Self::with_text`]) and is at hand.
+    #[must_use]
+    pub fn text(&self, file_id: u16, range: std::ops::Range<usize>) -> Option<String> {
+        self.text_of
+            .as_ref()
+            .and_then(|text_of| text_of(file_id, range))
     }
 }
 

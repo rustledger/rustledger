@@ -2301,7 +2301,6 @@ pub fn source_lines_overlaid<'a>(
     source_map: &SourceMap,
     buffers: impl IntoIterator<Item = (u16, &'a str)>,
 ) -> rustledger_validate::SourceLines {
-    use rustledger_booking::SourcePosition;
     let mut files: Vec<crate::source_map::DetachedLines> = source_map
         .files()
         .iter()
@@ -2312,13 +2311,43 @@ pub fn source_lines_overlaid<'a>(
             *lines = crate::source_map::DetachedLines::of_text(text);
         }
     }
-    let placeholders = source_map.placeholder_lines();
+    detached_source_lines(files, Some(source_map.placeholder_lines()))
+}
+
+/// [`source_lines`] for one text standing alone as file 0: an editor's
+/// buffer validated outside any loaded ledger, which has no [`SourceMap`].
+#[cfg(feature = "validation")]
+#[must_use]
+pub fn source_lines_of_text(text: &str) -> rustledger_validate::SourceLines {
+    detached_source_lines(vec![crate::source_map::DetachedLines::of_text(text)], None)
+}
+
+/// The positions, and the text (for the validator's error-recovery check,
+/// #2954), of `files` by file id; any other id is a placeholder location.
+#[cfg(feature = "validation")]
+fn detached_source_lines(
+    files: Vec<crate::source_map::DetachedLines>,
+    placeholders: Option<crate::source_map::PlaceholderLines>,
+) -> rustledger_validate::SourceLines {
+    use rustledger_booking::SourcePosition;
+    let files = std::sync::Arc::new(files);
+    let texts = std::sync::Arc::clone(&files);
     rustledger_validate::SourceLines::new(move |file_id, offset| {
         if let Some(lines) = files.get(usize::from(file_id)) {
             SourcePosition::in_file(lines.line(offset), file_id)
         } else {
-            SourcePosition::from_plugin(placeholders.line(file_id).map_or(0, |line| line as usize))
+            let line = placeholders
+                .as_ref()
+                .and_then(|p| p.line(file_id))
+                .map_or(0, |line| line as usize);
+            SourcePosition::from_plugin(line)
         }
+    })
+    .with_text(move |file_id, range| {
+        texts
+            .get(usize::from(file_id))
+            .and_then(|lines| lines.text(range))
+            .map(str::to_string)
     })
 }
 
@@ -3293,7 +3322,7 @@ mod canonical_sort_key_tests {
 
 #[cfg(all(test, feature = "validation"))]
 mod source_lines_tests {
-    use super::{SourceMap, source_lines, source_lines_overlaid};
+    use super::{SourceMap, source_lines, source_lines_of_text, source_lines_overlaid};
     use rustledger_booking::SourcePosition;
     use std::path::{Path, PathBuf};
 
@@ -3326,5 +3355,29 @@ mod source_lines_tests {
         assert_eq!(source_lines(&map).position(0, 4), SourcePosition::new(3, 1));
         let overlaid = source_lines_overlaid(&map, [(0, "\n\n\n\nx\n")]);
         assert_eq!(overlaid.position(0, 4), SourcePosition::new(5, 1));
+    }
+
+    /// The text the validator's error-recovery check reads (#2954): a file's
+    /// from the map, an overlaid buffer's from the buffer as it is now, and a
+    /// lone buffer's as file 0. None once the map's text was dropped, for a
+    /// range outside the text, or for a file that is not there.
+    #[test]
+    fn test_source_lines_text_from_the_map_a_buffer_and_a_lone_text() {
+        let mut map = SourceMap::new();
+        map.add_file(PathBuf::from("a.beancount"), "x\ny\nz\n".into());
+        map.add_file(PathBuf::from("b.beancount"), "p\nq\n".into());
+        let lines = source_lines(&map);
+        assert_eq!(lines.text(0, 2..3).as_deref(), Some("y"));
+        assert_eq!(lines.text(1, 0..4).as_deref(), Some("p\nq\n"));
+        assert_eq!(lines.text(1, 3..9), None);
+        assert_eq!(lines.text(2, 0..1), None);
+        let overlaid = source_lines_overlaid(&map, [(1, "edited\n")]);
+        assert_eq!(overlaid.text(1, 0..6).as_deref(), Some("edited"));
+        assert_eq!(overlaid.text(0, 0..1).as_deref(), Some("x"));
+        let lone = source_lines_of_text("a\nb\n");
+        assert_eq!(lone.text(0, 2..3).as_deref(), Some("b"));
+        assert_eq!(lone.position(0, 2), SourcePosition::new(2, 1));
+        map.drop_text();
+        assert_eq!(source_lines(&map).text(0, 0..1), None);
     }
 }

@@ -100,15 +100,16 @@ fn test_parse_header_amount_check_ending_at_an_invalid_token_is_that_token_alone
 fn test_parse_check_dropped_before_a_word_we_do_not_read_as_invalid() {
     // A posting: the sign, then the first invalid token (`$`, `'`, `x`,
     // `.5`, a control character, a backtick), then the word.
-    for (signed, unsigned) in [
-        ("-$ U~SD", "$ U~SD"),
-        ("-' 1 U%SD", "' 1 U%SD"),
-        ("-x U?SD", "x U?SD"),
-        ("-.5 U~SD", ".5 U~SD"),
-        ("-\x11 U~SD", "\x11 U~SD"),
-        ("-` U%SD", "` U%SD"),
+    for signed in [
+        "-$ U~SD",
+        "-' 1 U%SD",
+        "-x U?SD",
+        "-.5 U~SD",
+        "-\x11 U~SD",
+        "-` U%SD",
     ] {
-        for amount in [signed, unsigned] {
+        // The analog: the same line without its sign.
+        for amount in [signed, &signed[1..]] {
             let src = format!("{OPENS}2024-01-02 *\n  Assets:B  1 USD\n  Assets:A  {amount}\n");
             assert_eq!(per_line(&src), vec![(5, 1)], "{src:?}");
         }

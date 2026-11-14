@@ -518,7 +518,14 @@ use crate::types::{Error, LedgerOptions};
 /// its message rather than given as its hint, and its context (a failing
 /// balance's `difference: 1, tolerance: 0`) is no longer its hint. An older
 /// blob would keep serving those hints. (v110 was taken by #2931.)
-pub const CACHE_VERSION: u32 = 111;
+/// v112: loader v74, bumped too; PARSER OUTPUT changed (#2928). A `#!` or
+/// `#+` that does not start its line is a `#` and the token after it, as in
+/// beancount, not a comment to the end of the line: an indented `#+STARTUP`
+/// line is a parse error where it was a comment, and an invalid token after a
+/// mid-line one is reported. A file that loaded with no error can now have
+/// one, and both payloads archive its errors and directives, so an older blob
+/// would keep serving the old ones. (v111 was taken by #2973.)
+pub const CACHE_VERSION: u32 = 112;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -550,7 +557,7 @@ pub const CACHE_VERSION: u32 = 111;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 73;
+const LOADER_CACHE_VERSION_PIN: u32 = 74;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

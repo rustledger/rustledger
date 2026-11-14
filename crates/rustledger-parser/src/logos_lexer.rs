@@ -985,6 +985,14 @@ impl<'src> TokenIter<'src> {
             if at >= run_end {
                 break;
             }
+            // A `#!` or `#+` here is mid-line, so it is a `#` and the token
+            // after it (the rewrite in `next`), and an error later in its
+            // line is in the run: lex on right after the `#`.
+            if matches!(result, Ok(Token::Shebang(_) | Token::EmacsDirective(_))) {
+                peek = Token::lexer(&self.source[..self.lex_end]);
+                peek.bump(at + 1);
+                continue;
+            }
             if result.is_err() {
                 if self.source[at..].starts_with('\r') {
                     break;
@@ -1180,6 +1188,23 @@ impl<'src> Iterator for TokenIter<'src> {
                 self.restart_lexer(span.start + 1);
                 span.end = span.start + 1;
                 result = Ok(Token::Flag(&source[span.clone()]));
+            }
+            // A `#!` or `#+` that is not at column 0 is a `#` (HASH) in
+            // beancount, then a `!` (FLAG) or a `+` (PLUS), and the rest of
+            // its line lexes as usual (#2928): only a column-0 `#` line is
+            // skipped (`^[\*\:\#]/.`). Lexing it as one `Shebang` or
+            // `EmacsDirective` token to the end of the line hid every invalid
+            // token after it (`2024-01-02 * "x" #!cd` is two errors there, the
+            // grammar's and `Invalid token: 'cd'`, and was one here), and an
+            // indented `  #!x` line was skipped as a comment where beancount
+            // reports it. Rewritten here, as `%` is above, so an indented one
+            // gets its `Indent`; the lexer resumes right after the `#`.
+            if matches!(result, Ok(Token::Shebang(_) | Token::EmacsDirective(_)))
+                && !(self.at_line_start && span.start == self.last_newline_end)
+            {
+                self.restart_lexer(span.start + 1);
+                span.end = span.start + 1;
+                result = Ok(Token::Hash);
             }
 
             if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
@@ -1909,6 +1934,44 @@ mod tests {
                 .any(|k| k.starts_with("PercentComment(\"% note\")")),
             "{kinds:?}"
         );
+    }
+
+    /// A `#!` or `#+` that is not at column 0 is a `#` and the token after
+    /// it, as in beancount (#2928), so an invalid token later on its line is
+    /// one of its own (`cd` here), and an indented one gets its `Indent`. At
+    /// column 0 each is a whole-line comment. After a lone capital glued to
+    /// it, the run's later error makes the run one error token, as the
+    /// capital's rule reads it (`A#!x` is one invalid token in beancount).
+    #[test]
+    fn test_tokenize_hash_bang_and_hash_plus_are_a_hash_outside_column_0() {
+        let kinds = |src: &str| -> Vec<String> {
+            tokenize(src)
+                .iter()
+                .map(|(t, _)| format!("{t:?}"))
+                .collect()
+        };
+        let mid = kinds("2024-01-01 * \"x\" #!cd\n");
+        let at = mid
+            .iter()
+            .position(|k| k == "Hash")
+            .unwrap_or_else(|| panic!("a `#`: {mid:?}"));
+        assert_eq!(mid[at + 1], "Pending", "{mid:?}");
+        assert!(mid[at + 2].starts_with("Error("), "{mid:?}");
+        let plus = kinds("2024-01-01 * \"x\" #+cd\n");
+        let at = plus.iter().position(|k| k == "Hash").expect("a `#`");
+        assert_eq!(plus[at + 1], "Plus", "{plus:?}");
+        let indented = kinds("2024-01-01 *\n  #+x\n");
+        let at = indented.iter().position(|k| k == "Hash").expect("a `#`");
+        assert!(indented[at - 1].starts_with("Indent("), "{indented:?}");
+        for line in ["#!x\n", "#+y\n"] {
+            let col0 = kinds(line);
+            assert!(
+                col0[0].starts_with("Shebang(") || col0[0].starts_with("EmacsDirective("),
+                "{col0:?}"
+            );
+        }
+        let glued = kinds("2024-01-01 * \"x\" A#!x\n");
+        assert!(glued.iter().any(|k| k == "Error(\"A#!x\")"), "{glued:?}");
     }
 
     /// Which column-0 lines beancount ignores (#2779), checked against

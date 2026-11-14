@@ -545,6 +545,13 @@ use crate::types::{Error, LedgerOptions};
 /// loader's cache, saved only for an error-free load, holds none of them;
 /// both payloads here archive a source with parse errors, and an older blob
 /// would keep serving such a file with its old errors.
+/// v116: loader v75, unchanged; PARSER OUTPUT changed (#2967). A posting's
+/// sign check (or a header's amount check) that ends right where its line's
+/// first invalid token starts is dropped, as beancount reports the token
+/// alone there. Only errors on a line that keeps its invalid token's error
+/// are dropped, so a file errors before and after and the loader's cache
+/// holds none of them; both payloads here archive a source with parse
+/// errors, and an older blob would keep serving the extra error.
 /// v117: loader v75, unchanged; PARSER OUTPUT changed (#2968). A BOM-led
 /// account after an earlier error on its line has no `BomInDirectiveBody` of
 /// its own, as beancount reads it into an account and reports nothing there,
@@ -552,7 +559,7 @@ use crate::types::{Error, LedgerOptions};
 /// reported in the tag's place. Every input that changes has a parse error
 /// before and after, so the loader's cache, saved only for an error-free
 /// load, holds none of them; both payloads here archive a source with parse
-/// errors, and an older blob would keep serving its old errors. (v116 is held
+/// errors, and an older blob would keep serving its old errors. (v116 was taken
 /// by #2981.)
 pub const CACHE_VERSION: u32 = 117;
 

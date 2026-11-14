@@ -1,0 +1,3 @@
+SELECT	-(-(	IN(	BL,B,BB
+IN(	BL,B))))
+

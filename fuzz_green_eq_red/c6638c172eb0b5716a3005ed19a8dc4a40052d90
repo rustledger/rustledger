@@ -1,0 +1,12 @@
+# Regression inputs, kept in tree
+
+Each file here once broke an assertion of `fuzz_green_eq_red` (the pakeeps the same files under its own diregreen_eq_red/<file>
+```
+
+| file | what it caught |
+|---|---|
+| `crlf-hash-comment-5538` | A column-0 `#` comment on a CRLF line ran to the `\n`, so it also claimed the `\r` the `\r?\n` newline token starts at. The two tokens overlapped by a byte and the directive after
+
+| file | what it caught |
+|---|---|
+| `column-0 `#` comment on a CRLF line ran to the `\n`, so  (no token on a column-0 `*` line runs past its end) is what fails.(|

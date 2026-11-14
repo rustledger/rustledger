@@ -372,9 +372,19 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         // REPORTS BUT DOES NOT DROP, for the same reason as
         // `reject_tags_and_links`: the directive still loads, so one stray
         // character does not cascade into unopened-account errors.
+        //
+        // A tag or link the directive does not take (`reject_tags_and_links`)
+        // is no reason to skip it: beancount reports the first defect on the
+        // line, so one before the tag (`close Assets:A TRUE #t`, at the
+        // `TRUE`) is reported in the tag's place. Otherwise an invalid token
+        // between the two (`TRUE $x #t`) left the line with the token's error
+        // alone, as the tag's is dropped after it (`quiet_after_invalid_tokens`)
+        // and the defect was never looked for (#2968).
         let converted_or_stateful = pushed_directive.is_some() || !is_directive_producing;
+        let only_tag_rejections = errors.len() > errors_before
+            && errors[errors_before..].iter().all(is_tag_or_link_rejection);
         if converted_or_stateful
-            && errors.len() == errors_before
+            && (errors.len() == errors_before || only_tag_rejections)
             && let Some(err) = directive_header_check(
                 &cst_node,
                 stripped,
@@ -383,7 +393,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 &mut header_tokens,
             )
         {
-            errors.push(err);
+            if !only_tag_rejections {
+                errors.push(err);
+            } else if err.span.start < errors[errors_before].span.start {
+                errors.truncate(errors_before);
+                errors.push(err);
+            }
         }
         if pushed_directive.is_some() && cst_node.kind() == crate::SyntaxKind::TRANSACTION {
             posting_line_check(
@@ -605,14 +620,23 @@ fn reject_tags_and_links(
         );
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::SyntaxError(format!(
-                "the {directive} directive does not take a {what} ({}); \
-                 tags and links belong to transactions, and to note and \
-                 document directives",
+                "the {directive} directive does not take a {what} ({}); {TAGS_AND_LINKS_BELONG}",
                 t.text()
             )),
             span,
         ));
     }
+}
+
+/// The end of every `reject_tags_and_links` message, which
+/// [`is_tag_or_link_rejection`] recognizes it by.
+const TAGS_AND_LINKS_BELONG: &str =
+    "tags and links belong to transactions, and to note and document directives";
+
+/// Whether `e` is a `reject_tags_and_links` error, which the header check
+/// replaces when it finds a defect before the tag (#2968).
+fn is_tag_or_link_rejection(e: &crate::ParseError) -> bool {
+    matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m.ends_with(TAGS_AND_LINKS_BELONG))
 }
 
 fn convert_open(
@@ -9557,6 +9581,10 @@ fn quiet_after_invalid_tokens(
     let off = bom_offset as usize;
     let mut invalid: Vec<usize> = Vec::new();
     let mut unread: Vec<(usize, usize)> = Vec::new();
+    // Starts of the BOM-led tokens beancount reads into an account
+    // (`is_bom_account_token`): no invalid token there, and reported only by
+    // their `BomInDirectiveBody` (#2968).
+    let mut bom_accounts: Vec<usize> = Vec::new();
     let mut stack = vec![(
         root.green().to_owned(),
         usize::from(root.text_range().start()),
@@ -9571,10 +9599,12 @@ fn quiet_after_invalid_tokens(
                     at += len;
                 }
                 rowan::NodeOrToken::Token(t) => {
-                    if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
-                        == K::ERROR_TOKEN
-                        && !is_bom_account_token(stripped, at, t.text())
-                    {
+                    let is_error_token =
+                        <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
+                            == K::ERROR_TOKEN;
+                    if is_error_token && is_bom_account_token(stripped, at, t.text()) {
+                        bom_accounts.push(at);
+                    } else if is_error_token {
                         invalid.push(at);
                         // The invalid tokens counted inside one (the unread
                         // rest of a `<BOM>*` heading line, the tail of an
@@ -9588,12 +9618,14 @@ fn quiet_after_invalid_tokens(
             }
         }
     }
-    // A shortcut: with no invalid token the loop below drops nothing.
-    if invalid.is_empty() {
+    // A shortcut: with no invalid token and no BOM-led account the loops
+    // below drop nothing.
+    if invalid.is_empty() && bom_accounts.is_empty() {
         return;
     }
     invalid.sort_unstable();
     unread.sort_unstable();
+    bom_accounts.sort_unstable();
     let inside_unread = |at: usize| {
         // `s <= at` would differ only for an error that starts where an
         // unread token does, and the one caller asks only after its search
@@ -9703,6 +9735,8 @@ fn quiet_after_invalid_tokens(
                 // The error starts at the token or after it. One at the
                 // token is that token's own error: the search finds the
                 // token and keeps it.
+                // A BOM's error is kept here; one beancount reads into an
+                // account is handled below.
                 invalid.binary_search(&(e.span.start - off)).is_err()
                     && !inside_unread(e.span.start - off)
                     && !matches!(
@@ -9712,6 +9746,62 @@ fn quiet_after_invalid_tokens(
                     )
             };
             i += 1;
+        }
+    }
+    // A BOM beancount reads into an account (`<BOM>Assets:A`,
+    // `<BOM>xAssets:A`; `is_bom_account_token`) is no invalid token there:
+    // that ACCOUNT is an error only when the line's grammar fails right at
+    // it, which its `BomInDirectiveBody` stands for. After an earlier error
+    // on its line (an invalid token, `$@ <BOM>Assets:A`, or a defect the
+    // grammar fails at first, `close Assets:A TRUE <BOM>Assets:B`), the
+    // grammar is already recovering and beancount reports nothing for it
+    // (#2968).
+    //
+    // An error that starts at or before the line's content (its first
+    // non-blank) is not such a point unless it is an invalid token's own: it
+    // stands for the whole line (`  <BOM>Assets:A  1 USD`, a line error from
+    // the indentation), and the BOM's error is kept beside it as before (the
+    // BOM combination matrix's rules model that pair).
+    //
+    // Errors are in source order (the caller sorts them). `line` is the
+    // current line's end and content start, found once per line, and the
+    // start of its first error that counts; so this is linear.
+    if !bom_accounts.is_empty() {
+        let mut line: Option<(usize, usize, Option<usize>)> = None;
+        for (i, e) in errors.iter().enumerate() {
+            if dropped[i] {
+                continue;
+            }
+            let Some(s) = e.span.start.checked_sub(off) else {
+                continue;
+            };
+            let (end, content, counted) = match line {
+                Some((end, content, counted)) if s <= end => (end, content, counted),
+                _ => {
+                    let end = stripped
+                        .get(s..)
+                        .and_then(|rest| rest.find('\n'))
+                        .map_or(stripped.len(), |n| s + n);
+                    let start = stripped
+                        .get(..s)
+                        .and_then(|before| before.rfind('\n'))
+                        .map_or(0, |n| n + 1);
+                    let blanks = stripped.get(start..s).map_or(0, |seg| {
+                        seg.len() - seg.trim_start_matches([' ', '\t']).len()
+                    });
+                    (end, start + blanks, None)
+                }
+            };
+            if matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody)
+                && bom_accounts.binary_search(&s).is_ok()
+                && counted.is_some_and(|first| first < s)
+            {
+                dropped[i] = true;
+                line = Some((end, content, counted));
+                continue;
+            }
+            let counts = s > content || invalid.binary_search(&s).is_ok();
+            line = Some((end, content, counted.or(counts.then_some(s))));
         }
     }
     let mut index = 0;
@@ -9786,11 +9876,11 @@ fn quiet_after_line_start_bom_lines(
         if let rowan::NodeOrToken::Node(node) = child {
             let mut pos = at;
             for el in node.children() {
-                if let rowan::NodeOrToken::Token(t) = el {
-                    if !is_trivia_kind(crate::BeancountLanguage::kind_from_raw(t.kind())) {
-                        items.push((pos, crate::BeancountLanguage::kind_from_raw(node.kind())));
-                        break;
-                    }
+                if let rowan::NodeOrToken::Token(t) = el
+                    && !is_trivia_kind(crate::BeancountLanguage::kind_from_raw(t.kind()))
+                {
+                    items.push((pos, crate::BeancountLanguage::kind_from_raw(node.kind())));
+                    break;
                 }
                 pos += usize::from(el.text_len());
             }

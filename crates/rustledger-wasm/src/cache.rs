@@ -552,7 +552,26 @@ use crate::types::{Error, LedgerOptions};
 /// are dropped, so a file errors before and after and the loader's cache
 /// holds none of them; both payloads here archive a source with parse
 /// errors, and an older blob would keep serving the extra error.
-pub const CACHE_VERSION: u32 = 116;
+/// v117: loader v75, unchanged; PARSER OUTPUT changed (#2968). A BOM-led
+/// account after an earlier error on its line has no `BomInDirectiveBody` of
+/// its own, as beancount reads it into an account and reports nothing there,
+/// and a header defect before a tag or link the directive does not take is
+/// reported in the tag's place. Every input that changes has a parse error
+/// before and after, so the loader's cache, saved only for an error-free
+/// load, holds none of them; both payloads here archive a source with parse
+/// errors, and an older blob would keep serving its old errors. (v116 was taken
+/// by #2981.)
+/// v118: loader v75, unchanged; PARSER OUTPUT changed (#2956). The lines after
+/// a line a mid-file BOM starts keep only the lexer's errors until beancount's
+/// recovery would report again, and a line-start BOM glued to a comment start,
+/// a line start beancount skips or a quote is one invalid token with it, so
+/// the rest of its line is read (a quote no longer opens a string that hid the
+/// directives after it). Every source that changes holds a mid-file BOM, so a
+/// parse error, before and after: the loader's cache, saved only for an
+/// error-free load, holds none of them; both payloads here archive a source
+/// with parse errors and its directives, and an older blob would keep serving
+/// the old ones. (v117 was taken by #2983.)
+pub const CACHE_VERSION: u32 = 118;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

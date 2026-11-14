@@ -197,7 +197,7 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         // non-trivia content's pending trivia attaches under
         // SOURCE_FILE; subsequent runs attach INSIDE the new
         // node), emit the body, then `finish_node()`.
-        let node_kind = identify_directive(&tokens, i).unwrap_or(SyntaxKind::ERROR_NODE);
+        let node_kind = identify_directive(&tokens, i, source).unwrap_or(SyntaxKind::ERROR_NODE);
         if seen_first_content {
             builder.start_node(node_kind.into());
             emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
@@ -1232,7 +1232,14 @@ fn is_indented_directive_continuation(
 /// - `<KEYWORD> ...` (no leading date): PUSHTAG / POPTAG /
 ///   PUSHMETA / POPMETA (PR 2.1a) + OPTION / INCLUDE / PLUGIN
 ///   (PR 2.3)
-fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option<SyntaxKind> {
+///
+/// `source` is the text the ranges index; it is read for one case only, a
+/// one-letter flag that is an invalid token (see the arm below).
+fn identify_directive(
+    tokens: &[(SyntaxKind, Range<usize>)],
+    i: usize,
+    source: &str,
+) -> Option<SyntaxKind> {
     let (head, _) = tokens.get(i)?;
     match *head {
         // Top-level keyword directives — no leading date.
@@ -1320,6 +1327,23 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 // mirrors this. We do the same to stay consistent
                 // with the established lexer/parser contract.
                 SyntaxKind::CURRENCY if tokens[j].1.len() == 1 => Some(SyntaxKind::TRANSACTION),
+                // The same letter made an invalid token by the lexer, as
+                // beancount reads a capital glued to a stray `\r` (#2966;
+                // see `TokenIter::capital_rule_applies`, which leaves the
+                // column-0 flag position a `CURRENCY`). After an indented
+                // date it is still a transaction's flag position, as the
+                // `CURRENCY` was: the transaction keeps its postings, which
+                // stay quiet, and the token reports its own error beside the
+                // indented directive's. Only after a blank: a capital glued
+                // to the date (`2229-2-37B\r`) is no flag.
+                SyntaxKind::ERROR_TOKEN
+                    if j > i + 1
+                        && source.get(tokens[j].1.clone()).is_some_and(|t| {
+                            t.len() == 1 && t.as_bytes()[0].is_ascii_uppercase()
+                        }) =>
+                {
+                    Some(SyntaxKind::TRANSACTION)
+                }
                 // Anything else: unknown shape.
                 _ => None,
             }

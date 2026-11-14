@@ -544,3 +544,46 @@ fn test_parse_flag_glued_to_a_stray_cr_keeps_the_transaction() {
         assert_eq!(per_line(&src), [(3, 2), (4, 1)], "{src:?}");
     }
 }
+
+/// An indented date with a one-letter flag glued to a stray `\r` (#2966
+/// review). At the top level it is still a transaction, as on main: the
+/// indented-directive error and the flag's invalid token, its postings
+/// quiet. Under a transaction it is a body line beancount cannot read: the
+/// line's error and the invalid token. Each count is bean-check 3.2.3's.
+#[test]
+fn test_parse_indented_date_with_a_flag_glued_to_a_stray_cr() {
+    let postings = "  Assets:A  1 USD\n  Assets:B\n";
+    for indent in ["  ", "\t"] {
+        for (tail, after) in [
+            ("\r\r\n", postings),
+            ("\r\t\n", postings),
+            ("\r\r\n", ""),
+            ("\r", ""),
+        ] {
+            let src = format!("{OPENS}{indent}2024-01-02 P{tail}{after}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, 2)], "{src:?}");
+        }
+        // An invalid token after the `\r`: one more, the `\r` a blank.
+        let src = format!("{OPENS}{indent}2024-01-02 P\r$\n{postings}");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(3, 3)], "{src:?}");
+    }
+    let crlf = format!(
+        "{}  2024-01-02 P\r\r\n{}",
+        OPENS.replace('\n', "\r\n"),
+        postings.replace('\n', "\r\n")
+    );
+    assert_invariants(&crlf);
+    assert_eq!(per_line(&crlf), [(3, 2)], "{crlf:?}");
+
+    let txn = "2024-01-02 * \"x\"\n  Assets:A  1 USD\n";
+    for (tail, expected) in [("\r\r\n", 2), ("\r$\n", 3)] {
+        let src = format!("{OPENS}{txn}  2024-01-02 P{tail}  Assets:B  -1 USD\n");
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), [(5, expected)], "{src:?}");
+    }
+    let src = format!("{OPENS}{txn}  2024-01-02 P\r");
+    assert_invariants(&src);
+    assert_eq!(per_line(&src), [(5, 2)], "{src:?}");
+}

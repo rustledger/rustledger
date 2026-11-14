@@ -79,7 +79,7 @@ pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 #[cfg(feature = "validation")]
 pub use process::{
     document_source_dirs, source_lines, source_lines_of_text, source_lines_overlaid,
-    validation_options_from_options,
+    validation_error_to_ledger_error, validation_options_from_options,
 };
 
 /// Resolve `documents` roots against the ledger's directory.

@@ -48,10 +48,11 @@
 //!   comma is valid (`open Assets:A , USD,EUR`), and two are not.
 //! - Only `;` starts a comment in the middle of a line. beancount lexes `%` as
 //!   a `FLAG` token and `#!` / `#+` as `HASH` and a flag or `PLUS`, so all
-//!   three are syntax errors mid-line; our lexer reads each as a comment that
+//!   three are syntax errors mid-line. Our lexer read each as a comment that
 //!   runs to the end of the line, which silently commented out the rest of the
-//!   header (`open Assets:A % USD`). After the header's first token they are
-//!   reported here as unexpected.
+//!   header (`open Assets:A % USD`); it now lexes them as beancount does
+//!   (#2802, #2928), so they are reported here as unexpected, with a hint
+//!   that only `;` starts a comment there.
 //!
 //! # One rule, one walker
 //!
@@ -134,11 +135,11 @@ impl<I: Iterator<Item = (K, Range<usize>)>> Cursor<I> {
     fn defect(&mut self, expected: &'static str) -> HeaderDefect {
         match self.tokens.peek() {
             Some((kind, range)) => HeaderDefect {
-                // A mid-line `%` / `#!` / `#+` token runs to the end of the
-                // line; point at the one or two characters beancount objects to.
+                // A mid-line `%` token runs to the end of the line; point at
+                // the one character beancount objects to. (A mid-line `#!` or
+                // `#+` lexes as a `#` and the token after it, #2928.)
                 range: match kind {
                     K::PERCENT_COMMENT => range.start..range.start + 1,
-                    K::SHEBANG | K::EMACS_DIRECTIVE => range.start..range.start + 2,
                     _ => range.clone(),
                 },
                 expected,
@@ -611,7 +612,9 @@ pub(super) fn defect_message(place: &str, defect: &HeaderDefect, text: &str) -> 
     let expected = defect.expected;
     match defect.found {
         None => format!("unexpected end of line in {place}: expected {expected}"),
-        Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE | K::FLAG)
+        // A mid-line `#` (a `#!` or `#+` lexes as one and the token after it,
+        // #2928) or `%`: a comment marker only at the start of a line.
+        Some(K::PERCENT_COMMENT | K::HASH | K::FLAG)
             if defect.found != Some(K::FLAG) || text == "%" =>
         {
             format!(
@@ -722,15 +725,17 @@ mod tests {
         }
     }
 
-    /// Only `;` is a comment mid-line; `%`, `#!` and `#+` are flags there.
+    /// Only `;` is a comment mid-line; `%` is a flag there, and `#!` and `#+`
+    /// a `#` and a flag or `+` (#2928), reported at the `%` or the `#`.
     #[test]
     fn test_first_header_defect_rejects_a_mid_line_non_semicolon_comment() {
-        for line in [
-            "2024-01-01 open Assets:A % USD\n",
-            "2024-01-01 open Assets:A #!x\n",
-            "2024-01-01 open Assets:A #+x\n",
+        for (line, at) in [
+            ("2024-01-01 open Assets:A % USD\n", "%"),
+            ("2024-01-01 open Assets:A #!x\n", "#"),
+            ("2024-01-01 open Assets:A #+x\n", "#"),
         ] {
-            let (d, _) = defect(line).unwrap_or_else(|| panic!("{line:?} must be rejected"));
+            let (d, text) = defect(line).unwrap_or_else(|| panic!("{line:?} must be rejected"));
+            assert_eq!(text, at, "{line:?}");
             let msg = defect_message("the open directive", &d, &line[d.range.clone()]);
             assert!(msg.contains("Only `;` starts a comment"), "{msg}");
         }

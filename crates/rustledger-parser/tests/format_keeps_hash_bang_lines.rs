@@ -10,9 +10,10 @@
 //! different path kept them. The emitters now use the parser's canonical
 //! `is_comment_kind`, which covers all four. (On a non-transaction header,
 //! a same-line `#!` or `#+` is now a parse error, as in beancount: #2802. So
-//! is one that is indented inside a transaction, or after a posting's
-//! amount: beancount lexes `#` as a HASH there. Those are reported, and the
-//! error-tolerant formatter keeps the line as written.)
+//! is one that is indented, inside a transaction or under any other
+//! directive (#2928), or after a posting's amount: beancount lexes `#` as a
+//! HASH there. Those are reported, and the error-tolerant formatter keeps the
+//! line as written.)
 
 use rustledger_parser::format::{format_source, try_format_source};
 
@@ -97,7 +98,9 @@ fn test_try_format_source_keeps_hash_bang_lines_in_metadata_blocks() {
         "posting metadata",
         "2024-01-01 * \"x\"\n  Assets:A  1 USD\n    aa: \"v1\"\n    #!m\n    bb: \"v2\"\n  Assets:B\n",
     );
-    assert_kept(
+    // Indented, a `#+` is a `#` and a `+` in beancount, not a comment
+    // (#2928): reported, under a non-transaction directive too.
+    assert_reported_and_kept(
         "directive metadata",
         "2024-01-01 open Assets:A\n  aa: \"v1\"\n  #+m\n  bb: \"v2\"\n2024-01-02 open Assets:B\n",
     );

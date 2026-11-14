@@ -4296,14 +4296,14 @@ mod tests {
             "document_directive",
             "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^d1\n",
         ),
-        // Note: `#!` and `#+` anywhere on a line, not just at
-        // line start, open the lexer's SHEBANG / EMACS_DIRECTIVE
-        // tokens. The fixture places `#+` mid-line and tails it
-        // with an unbalanced `"`: an incorrect state machine that
-        // gated the opener on `at_line_start` would stay in Code
-        // when it hit the `#+`, then flip to InString on the next
-        // `"` and trap there for the remainder of the file. The
-        // lexer-agreement property test catches that divergence.
+        // Note: a mid-line `#!` or `#+` is a `#` and the token after
+        // it, as in beancount (#2928); only at column 0 does it open
+        // the lexer's SHEBANG / EMACS_DIRECTIVE comment token. The
+        // fixture places `#+` mid-line and tails it with an
+        // unbalanced `"`, which the lexer reads as an unterminated
+        // string cut at its line: the string scan
+        // (`StringLiterals`) runs the lexer itself, and the
+        // lexer-agreement property test pins that the two agree.
         // The line is a parse error (a mid-line `#+` is not a
         // comment in beancount, #2802), so the round-trip body
         // skips it.
@@ -4401,8 +4401,8 @@ mod tests {
     /// - `emacs_directive_mid_line_with_quote`: a `#+` after a header's
     ///   first token is a parse error, as in beancount (only `;` starts a
     ///   comment mid-line, #2802), so the skip-on-errors guard triggers. It
-    ///   exists for the state machine's lexer-agreement test on a comment
-    ///   with an unbalanced `"`, not the round-trip body.
+    ///   exists for the state machine's lexer-agreement test on a mid-line
+    ///   `#+` with an unbalanced `"` after it, not the round-trip body.
     /// - `unterminated_quote`, `unterminated_quote_backslash_newline`,
     ///   `unterminated_quote_backslash_newline_later_quote`: an
     ///   unterminated quote is a parse error by design (#2788), so the

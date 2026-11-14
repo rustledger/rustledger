@@ -411,6 +411,57 @@ fn test_lint_closed_nonempty_refuses_failed_processing_with_exit_2() {
     );
 }
 
+/// `lint cross-group` exits 2 with an `error:` line, and prints no report,
+/// when it cannot answer: a configuration it refuses, and plugin-inserted
+/// transactions that cross groups at a location they share.
+#[test]
+fn test_lint_cross_group_refusals_exit_2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("main.beancount");
+    std::fs::write(
+        &ledger,
+        "plugin \"beancount.plugins.forecast\"\n\
+         2024-01-01 open Assets:UnitA:Cash USD\n\
+         2024-01-01 open Assets:UnitB:Cash USD\n\
+         2024-01-02 # \"Move [MONTHLY REPEAT 2 TIMES]\"\n  \
+         Assets:UnitA:Cash -2 USD\n  \
+         Assets:UnitB:Cash 2 USD\n",
+    )
+    .unwrap();
+    for (groups, want) in [
+        (
+            ["A=Assets:UnitA", "B=Assets:UnitA:Cash"],
+            "error: overlapping prefixes Assets:UnitA:Cash (B) and Assets:UnitA (A)\n".to_string(),
+        ),
+        (
+            ["A=Assets:UnitA", "B=Assets:UnitB"],
+            format!(
+                "error: {}:4: cannot audit transactions touching groups A, B: several \
+                 transactions share one source location (a plugin inserted one)\n",
+                ledger.display()
+            ),
+        ),
+    ] {
+        let output = Command::new(require_rledger!())
+            .args([
+                "lint",
+                "cross-group",
+                "--group",
+                groups[0],
+                "--group",
+                groups[1],
+            ])
+            .arg(&ledger)
+            .output()
+            .expect("run rledger lint cross-group");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{groups:?}: {stderr}");
+        assert!(stdout.is_empty(), "{groups:?}: {stdout}");
+        assert_eq!(stderr, want, "{groups:?}");
+    }
+}
+
 /// `transfers --apply` refuses a file with load errors and writes nothing,
 /// not even to an input that loaded clean; it exits 2, as every lint does
 /// when it cannot answer (#2899).

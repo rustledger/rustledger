@@ -1535,54 +1535,32 @@ fn deeper_indented_trailing_comment_at_eof_stays_inside_posting() {
 }
 
 #[test]
-fn deeper_indented_emacs_directive_attaches_to_open_posting() {
+fn deeper_indented_hash_bang_and_hash_plus_lines_are_not_comments() {
     use SyntaxKind::*;
-    // `is_comment_token` includes EMACS_DIRECTIVE (`#+`). The
-    // indented-comment branch in `emit_transaction_body` routes it
-    // through the same indent-attribution rule as COMMENT: deeper-
-    // indented than the open POSTING = stays INSIDE POSTING.
-    let source = "2024-01-15 * \"x\"\n\
-                  \x20\x20Assets:Cash 1 USD\n\
-                  \x20\x20\x20\x20#+STARTUP: overview\n";
-    let tree = parse_structured(source);
-    assert_round_trip(source, &tree);
+    // An indented `#!` or `#+` is not a comment: beancount lexes `#` as a
+    // HASH (and `!` / `+` after it) and only skips a whole `#` line at column
+    // 0, so `    #+STARTUP: overview` under a posting is a syntax error there
+    // (#2928). It used to attach to the posting as comment trivia here; it
+    // lexes as beancount's tokens now, and is reported, as `%` is (below).
+    for line in ["#+STARTUP: overview", "#!/usr/bin/env something"] {
+        let source = format!("2024-01-15 * \"x\"\n  Assets:Cash 1 USD\n    {line}\n");
+        let tree = parse_structured(&source);
+        assert_round_trip(&source, &tree);
 
-    let ps = postings(&tree);
-    assert_eq!(ps.len(), 1);
-    let emacs_inside_posting = ps[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    assert_eq!(
-        emacs_inside_posting, 1,
-        "EMACS_DIRECTIVE recognized as comment-class trivia, attaches by indent",
-    );
-}
-
-#[test]
-fn deeper_indented_shebang_attaches_to_open_posting() {
-    use SyntaxKind::*;
-    // Companion to the EMACS_DIRECTIVE test: pin that SHEBANG
-    // (`#!`) is also recognized as comment-class trivia via
-    // `is_comment_token` and follows the same indent-attribution
-    // rule. Catches a regression that drops SHEBANG from the
-    // helper while leaving EMACS_DIRECTIVE in place.
-    let source = "2024-01-15 * \"x\"\n\
-                  \x20\x20Assets:Cash 1 USD\n\
-                  \x20\x20\x20\x20#!/usr/bin/env something\n";
-    let tree = parse_structured(source);
-    assert_round_trip(source, &tree);
-
-    let ps = postings(&tree);
-    assert_eq!(ps.len(), 1);
-    let shebang_inside_posting = ps[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == SHEBANG)
-        .count();
-    assert_eq!(
-        shebang_inside_posting, 1,
-        "SHEBANG recognized as comment-class trivia, attaches by indent",
-    );
+        assert_eq!(postings(&tree).len(), 1, "{source:?}");
+        let comment_class = tree
+            .descendants_with_tokens()
+            .filter(|e| matches!(e.kind(), SHEBANG | EMACS_DIRECTIVE))
+            .count();
+        assert_eq!(
+            comment_class, 0,
+            "{source:?}: an indented `{line}` is not a comment"
+        );
+        assert!(
+            !rustledger_parser::parse(&source).errors.is_empty(),
+            "{source:?}"
+        );
+    }
 }
 
 #[test]
@@ -1609,109 +1587,34 @@ fn deeper_indented_percent_line_is_not_a_comment() {
 }
 
 #[test]
-fn directive_body_absorbs_indented_emacs_directive_when_block_has_meta() {
+fn directive_body_indented_hash_plus_line_is_not_a_comment() {
     use SyntaxKind::*;
-    // The `is_comment_token` widening also affects
-    // `upcoming_indented_block_has_meta` and
-    // `is_indented_directive_continuation` for NON-transaction
-    // directives. Pin that an indented `#+STARTUP` line inside an
-    // OPEN_DIRECTIVE that ALSO contains a meta line is absorbed as
-    // a continuation (rather than orphaning to SOURCE_FILE).
-    // Mirrors the existing `indented_comment_before_first_metadata`
-    // / `indented_comment_between_metadata_lines` tests, which use
-    // `;` only; this pins the SHEBANG/EMACS_DIRECTIVE branch.
-    let source = "2024-01-01 open Assets:Cash\n\
-                  \x20\x20#+STARTUP: overview\n\
-                  \x20\x20key: \"v\"\n";
-    let tree = parse_structured(source);
-    assert_round_trip(source, &tree);
-
-    let ds = directives(&tree);
-    assert_eq!(ds.len(), 1);
-    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
-
-    // The EMACS_DIRECTIVE token lives inside the OPEN_DIRECTIVE,
-    // not orphaned anywhere else in the tree. Use `descendants`
-    // symmetrically on both sides so a future refactor that wraps
-    // SOURCE_FILE trivia in any nested node doesn't make the
-    // orphan check vacuously pass.
-    let emacs_total = tree
-        .descendants_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    let emacs_in_directive = ds[0]
-        .descendants_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    assert_eq!(emacs_total, 1, "exactly one EMACS_DIRECTIVE in the tree");
-    assert_eq!(
-        emacs_in_directive, 1,
-        "EMACS_DIRECTIVE absorbed by OPEN_DIRECTIVE"
-    );
-
-    // The block_has_meta look-ahead is what kept the EMACS line
-    // inside the directive: the subsequent `key: "v"` becomes a
-    // META_ENTRY child of OPEN_DIRECTIVE. Assert that META_ENTRY
-    // actually appears so a regression that breaks the META_KEY
-    // arm (closing the directive AFTER the EMACS line but BEFORE
-    // the meta) fails here, not silently.
-    let meta_entries_in_directive = ds[0]
-        .descendants()
-        .filter(|n| n.kind() == META_ENTRY)
-        .count();
-    assert_eq!(meta_entries_in_directive, 1, "META_ENTRY also absorbed");
-}
-
-#[test]
-fn directive_body_does_not_absorb_indented_emacs_directive_when_no_meta() {
-    use SyntaxKind::*;
-    // Complementary case: when an OPEN_DIRECTIVE has NO meta block,
-    // an indented EMACS_DIRECTIVE / SHEBANG / `;`-comment that
-    // follows the header is NOT a continuation (per the
-    // block_has_meta gate). Pins that the widening did not
-    // accidentally make these tokens unconditional continuations.
-    let source = "2024-01-01 open Assets:Cash\n\
-                  \x20\x20#+STARTUP: trailing only\n\
-                  2024-01-02 open Assets:Bank\n";
-    let tree = parse_structured(source);
-    assert_round_trip(source, &tree);
-
-    let ds = directives(&tree);
-    assert_eq!(
-        ds.len(),
-        2,
-        "two OPEN_DIRECTIVES, separated by EMACS_DIRECTIVE rule-2 trivia"
-    );
-    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
-    assert_eq!(ds[1].kind(), OPEN_DIRECTIVE);
-
-    // The EMACS_DIRECTIVE is rule-2 inter-directive trivia: it
-    // attaches as LEADING trivia of the SECOND directive (per
-    // `cst::trivia`), NOT as a continuation of the first.
-    // Symmetric `descendants` walks on both sides and a total-
-    // count sanity check guard against future structural changes
-    // that wrap trivia in a nested node.
-    let emacs_total = tree
-        .descendants_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    let emacs_in_first = ds[0]
-        .descendants_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    let emacs_in_second = ds[1]
-        .descendants_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
-        .count();
-    assert_eq!(emacs_total, 1, "exactly one EMACS_DIRECTIVE in the tree");
-    assert_eq!(
-        emacs_in_first, 0,
-        "EMACS_DIRECTIVE is NOT absorbed by header-only directive"
-    );
-    assert_eq!(
-        emacs_in_second, 1,
-        "EMACS_DIRECTIVE leads the next directive as rule-2 trivia"
-    );
+    // An indented `#+STARTUP` line under a non-transaction directive is not
+    // a comment either, with a metadata block or without one: beancount
+    // reports it (#2928). The `open` is still read, and the tree still holds
+    // the source byte for byte.
+    for source in [
+        "2024-01-01 open Assets:Cash\n  #+STARTUP: overview\n  key: \"v\"\n",
+        "2024-01-01 open Assets:Cash\n  #+STARTUP: trailing only\n2024-01-02 open Assets:Bank\n",
+    ] {
+        let tree = parse_structured(source);
+        assert_round_trip(source, &tree);
+        let comment_class = tree
+            .descendants_with_tokens()
+            .filter(|e| matches!(e.kind(), SHEBANG | EMACS_DIRECTIVE))
+            .count();
+        assert_eq!(comment_class, 0, "{source:?}");
+        assert_eq!(directives(&tree)[0].kind(), OPEN_DIRECTIVE, "{source:?}");
+        let result = rustledger_parser::parse(source);
+        assert!(!result.errors.is_empty(), "{source:?}");
+        assert!(
+            matches!(
+                &result.directives[0].value,
+                rustledger_core::Directive::Open(_)
+            ),
+            "{source:?}"
+        );
+    }
 }
 
 #[test]

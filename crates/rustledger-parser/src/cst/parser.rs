@@ -1092,9 +1092,14 @@ fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
 /// `Token::Comment` and `Token::PercentComment` as in-body trivia
 /// for transaction / directive bodies. `Token::Shebang` and
 /// `Token::EmacsDirective` are processed only at top level
-/// (`parse_directive` dispatch). So a deeper-indented `#+STARTUP:
-/// overview` between two postings is INSIDE the POSTING for the
-/// CST but TERMINATES the transaction for the AST. Phase-isolated
+/// (`parse_directive` dispatch). The lexer makes those two tokens
+/// only of a column-0 line (#2928: anywhere else, an indented line
+/// included, a `#!` / `#+` is a `#` and the token after it, as in
+/// beancount), so they never stand in an indented body line here, and
+/// a deeper-indented `#+STARTUP: overview` between two postings is a
+/// parse error, not comment trivia (a `%` there is a FLAG, #2802). A
+/// deeper-indented `;` comment is still INSIDE the POSTING for the CST while it
+/// TERMINATES the transaction for the AST. Phase-isolated
 /// in practice: the loader, LSP, validator, query, booking, and
 /// CLI all run through the AST path; the only current
 /// `parse_structured` consumers are this crate's corpus baseline

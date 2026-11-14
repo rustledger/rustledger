@@ -61,6 +61,86 @@ const BAD_LEDGER: &str = "\
 ";
 
 #[test]
+fn test_cross_group_agent_matches_cli_with_repeated_groups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "groups.beancount",
+        concat!(
+            "2024-01-01 open Assets:UnitA:Cash USD\n",
+            "2024-01-01 open Assets:UnitB:Cash USD\n",
+            "2024-01-01 open Income:UnitA USD\n",
+            "2024-01-02 * \"cross\"\n",
+            "  Assets:UnitA:Cash -10 USD\n",
+            "  Assets:UnitB:Cash 10 USD\n"
+        ),
+    );
+    let path = file.to_str().unwrap();
+    let args = [
+        "lint",
+        "cross-group",
+        path,
+        "--group",
+        "A=Assets:UnitA,Income:UnitA",
+        "--group",
+        "B=Assets:UnitB",
+        "--format",
+        "json",
+        "--fail-on-findings",
+    ];
+    let (agent_code, env, _) = run_in(tmp.path(), &args);
+    let (cli_code, output) = rledger_stdout(tmp.path(), &args);
+    assert_eq!(cli_code, 1, "{output}");
+    assert_eq!(agent_code, cli_code, "{env}");
+    // Findings under `--fail-on-findings` are an answer, not a failure.
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(
+        env["result"]["stdout"].as_str(),
+        Some(output.as_str()),
+        "{env}"
+    );
+    assert_eq!(
+        env["result"]["data"]["findings"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn test_cross_group_agent_rejects_missing_group_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "groups.beancount", GOOD_LEDGER);
+    let args = [
+        "lint",
+        "cross-group",
+        file.to_str().unwrap(),
+        "--group",
+        "A=Assets:Cash",
+        "--group",
+        "Assets:Other",
+        "--format",
+        "json",
+    ];
+    let (code, env, _) = run_in(tmp.path(), &args);
+    // ag-rledger exits 1 (agcli's ERROR) on every command failure, as it does
+    // for findings under `--fail-on-findings`; the envelope tells them
+    // apart: a refusal is `ok: false` with an error, findings are `ok: true`.
+    assert_eq!(code, 1, "{env}");
+    assert_eq!(env["ok"], false, "{env}");
+    assert_eq!(env["error"]["code"], "COMMAND_FAILED", "{env}");
+    // The repeated flags are joined with ';', and the refusal names the
+    // segment with no name, not the joined value.
+    assert_eq!(
+        env["error"]["message"],
+        "--group \"Assets:Other\": each group must be NAME=PREFIX[,PREFIX...]",
+        "{env}"
+    );
+    // `rledger` refuses it the same way, with exit 2 and nothing on stdout.
+    let (cli_code, stdout) = rledger_stdout(tmp.path(), &args);
+    assert_eq!(cli_code, 2, "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+#[test]
 fn test_lint_linked_transit_matches_cli_and_accepts_repeated_accounts() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(

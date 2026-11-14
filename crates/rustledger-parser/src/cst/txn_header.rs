@@ -130,27 +130,17 @@ where
     let mut third_string: Option<Range<usize>> = None;
     let mut seen_tag_or_link = false;
     let mut seen_header_content = false;
-    let mut seen_token = false;
     let mut flags: usize = 0;
 
     for (kind, range) in tokens {
         // A `%`, `#!` or `#+` after the header's first token is not a comment
-        // in beancount: only `;` starts one mid-line, and these lex as a FLAG,
-        // or a HASH and a flag, so they are a syntax error there (#2802). Ours
-        // read them as a comment to the end of the line, so the rest of the
-        // header vanished in silence. Report the one or two characters
-        // beancount objects to. Before the first token they are leading
-        // trivia (a comment line above the transaction), as before.
-        if seen_token && matches!(kind, SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE) {
-            // (A mid-line `%` is a FLAG token, not a comment, so it never
-            // reaches here.)
-            let end = (range.start + 2).min(range.end);
-            return Some((HeaderDefect::UnexpectedToken, range.start..end));
-        }
+        // in beancount: only `;` starts one mid-line. The lexer reads them as
+        // beancount does there (a FLAG, or a HASH and the token after it:
+        // #2802, #2928), so they are reported below like any other token the
+        // header has no place for; a comment token is a column-0 line only.
         if is_header_trivia(kind) {
             continue;
         }
-        seen_token = true;
         // One flag only, as in beancount (see `is_flag_position_token`).
         if kind != SyntaxKind::DATE && !seen_header_content && is_flag_position_token(kind, &range)
         {
@@ -733,8 +723,8 @@ mod tests {
             // place, so the count rule stands.
             all.push((vec![date, star, o, s, bad], H::Narration(0)));
         }
-        // Trivia holds no slot and hides no place. (A `#!` mid-line runs to
-        // the end of the line, so no string can follow it in real input.)
+        // Trivia holds no slot and hides no place. (A `SHEBANG` token is a
+        // column-0 line only, #2928, so none is in a header in real input.)
         for o in [K::WHITESPACE, K::PIPE, K::COMMENT, K::BOM, K::SHEBANG] {
             all.push((vec![date, star, s, o], H::Narration(0)));
             all.push((vec![date, star, o, s, o, bad], H::Payee(0)));

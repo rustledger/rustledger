@@ -512,13 +512,26 @@ use crate::types::{Error, LedgerOptions};
 /// with parse errors, and an older blob would keep serving such a file with
 /// its old errors and values. (v104 and v106 were held by #2931 and never
 /// released; v108 was taken by #2970 and v109 by #2971.)
-/// v113: loader v73, unchanged; parsed directives did not move. Both
+/// v111: loader v73, unchanged. A `ParsedLedger`'s validation findings move
+/// (#2972): each carries the message, phase and hint the loader gives it, as
+/// `rledger check` reports them, so a finding's advisory note is folded into
+/// its message rather than given as its hint, and its context (a failing
+/// balance's `difference: 1, tolerance: 0`) is no longer its hint. An older
+/// blob would keep serving those hints. (v110 was taken by #2931.)
+/// v112: loader v74, bumped too; PARSER OUTPUT changed (#2928). A `#!` or
+/// `#+` that does not start its line is a `#` and the token after it, as in
+/// beancount, not a comment to the end of the line: an indented `#+STARTUP`
+/// line is a parse error where it was a comment, and an invalid token after a
+/// mid-line one is reported. A file that loaded with no error can now have
+/// one, and both payloads archive its errors and directives, so an older blob
+/// would keep serving the old ones. (v111 was taken by #2973.)
+/// v113: loader v74, unchanged; parsed directives did not move. Both
 /// payloads' validation findings move (#2954): a transaction that holds an
 /// invalid token, kept under error recovery without the price or cost after
 /// the token, has no balance residual reported (`E3001`), as beancount never
 /// builds it. Every such source has a parse error, which the loader's cache
 /// is never saved for; an older blob here would keep serving the residuals.
-/// (v111 is held by #2973 and v112 by #2974.)
+/// (v111 was taken by #2973 and v112 by #2974.)
 pub const CACHE_VERSION: u32 = 113;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
@@ -551,7 +564,7 @@ pub const CACHE_VERSION: u32 = 113;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 73;
+const LOADER_CACHE_VERSION_PIN: u32 = 74;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

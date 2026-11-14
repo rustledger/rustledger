@@ -10356,7 +10356,10 @@ fn report_no_metadata_continuations(
 /// line and the transaction is kept with the postings above it. A
 /// directive's span runs to the next directive's start, so `source` holds
 /// that line when there is one. After a blank or comment line the
-/// transaction is complete in beancount too, and kept with its findings.
+/// transaction is complete in beancount too, and kept with its findings; so
+/// it is when the BOMs start an account in beancount (`<BOM>Assets:A`,
+/// `<BOM>assets:A`: `bom_led_account`), where its grammar reduces the transaction before
+/// it fails at that account.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
     let root = super::parser::parse_structured(source);
@@ -10371,12 +10374,13 @@ pub fn transaction_holds_invalid_token(source: &str) -> bool {
             .next_sibling()
             .and_then(|next| next.first_token())
             .is_some_and(|t| {
+                let start = usize::from(t.text_range().start());
+                // BOMs beancount reads into an account (`<BOM>Assets:A`) are
+                // no invalid token there: its grammar reduces the transaction
+                // before failing at that account, and keeps it.
                 t.kind() == crate::SyntaxKind::ERROR_TOKEN
-                    && is_line_start_bom_token(
-                        source,
-                        usize::from(t.text_range().start()),
-                        t.text(),
-                    )
+                    && is_line_start_bom_token(source, start, t.text())
+                    && crate::logos_lexer::bom_led_account(&source[start..]).is_none()
             })
 }
 

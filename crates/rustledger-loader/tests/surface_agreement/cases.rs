@@ -41,7 +41,9 @@
 //   ended the block at that line, kept the transaction with the postings
 //   above it, reported its residual (`E3001`), and an orphan `P0012` for each
 //   posting after the line (#2956). After a blank line the transaction is
-//   complete in beancount too, so its residual is reported.
+//   complete in beancount too, so its residual is reported, and so it is
+//   when the BOMs start an account (`<BOM>Assets:A`), where beancount's
+//   grammar reduces the transaction before it fails at that account.
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -273,6 +275,30 @@ garbage
             Finding {
                 code: "P0026",
                 line: 14,
+                message: "Invalid token: UTF-8 BOM",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "a BOM-led account after a transaction keeps its residual",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"kept before a BOM-led account\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+\u{feff}Assets:A 1 USD
+",
+        findings: &[
+            Finding {
+                code: "E3001",
+                line: 4,
+                message: "Transaction does not balance: residual -1 USD",
+            },
+            Finding {
+                code: "P0026",
+                line: 7,
                 message: "Invalid token: UTF-8 BOM",
             },
         ],

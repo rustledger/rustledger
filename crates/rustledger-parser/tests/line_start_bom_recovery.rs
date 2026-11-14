@@ -217,6 +217,15 @@ fn test_transaction_holds_invalid_token_counts_a_bom_line_after_it() {
     for complete in [
         format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n\n{BOM}  k: \"v\"\n"),
         format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n; c\n{BOM}  k: \"v\"\n"),
+        // BOMs beancount reads into an account: its grammar reduces the
+        // transaction, then fails at the account, and keeps the transaction.
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}Assets:A 1 USD\n"),
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}assets:A 1 USD\n"),
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}{BOM}Assets:A\n"),
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}1:A x\n"),
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}Ü:A\n"),
+        format!("2024-01-02 * \"x\"\n  Assets:A 1 USD\n{BOM}:A\n"),
+        format!("2024-01-02 * \"x\"\r\n  Assets:A 1 USD\r\n{BOM}Assets:A"),
     ] {
         assert!(!transaction_holds_invalid_token(&complete), "{complete:?}");
     }

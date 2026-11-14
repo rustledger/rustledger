@@ -172,6 +172,16 @@ fn hash_bang_cut(src: &str) -> String {
         if !marker || h.start < at {
             continue;
         }
+        // A line that starts with BOMs and then a `#!` or `#+` was one comment
+        // to main, which read the BOMs apart from it; the lexer now reads them
+        // as one invalid token with what is glued to them (#2956), so a later
+        // marker on that line is no cut of main's.
+        let line_start = src[..h.start].rfind('\n').map_or(0, |i| i + 1);
+        let lead = src[line_start..].trim_start_matches(BOM);
+        if lead.len() < src.len() - line_start && (lead.starts_with("#!") || lead.starts_with("#+"))
+        {
+            continue;
+        }
         out.push_str(&src[at..h.start]);
         let line_end = src[h.start..].find('\n').map_or(src.len(), |i| h.start + i);
         if src[h.start..line_end].ends_with('\r') {
@@ -2255,35 +2265,42 @@ fn test_cause_line_start_bom_before_comment_needs_a_bom() {
 }
 
 /// `line-start-bom-before-comment` takes each line start beancount skips,
-/// after every BOM the line starts with. Real counts (`recorded_row`):
-/// beancount 2 for `<BOM>:x $y` and the like (its invalid token through
-/// the line start, and `$y`), 3 for `<BOM># x $y`, rledger 1 (its `P0026`)
-/// on each. Made-up counts for the rest: `<BOM>*x` and `<BOM>;` (a `;`
-/// needs nothing after it) are the cause; a `*` or `#` with nothing after it
-/// is no skipped line start, nor is a `#` before a tag character (beancount's
-/// `TAG`, `#[A-Za-z0-9-_/.]+`); rledger counts each of these 1, as
-/// beancount does.
+/// after every BOM the line starts with. The lines it was written for
+/// (`<BOM>:x $y` and the like: beancount 2, its invalid token through the
+/// line start and `$y`; 3 for `<BOM># x $y`) counted 1 here, the BOM's own
+/// `P0026`, until #2956 made a line-start BOM glued to such a start one
+/// invalid token with it, as beancount's is: they now count as beancount
+/// counts them, and only the shapes the lexer still reads apart (`<BOM>*`, a
+/// start with a BOM after it) reach the rule. Made-up counts, so the rule is
+/// pinned for each start: `<BOM>*x` and `<BOM>;` (a `;` needs nothing after
+/// it) are the cause; a `*` or `#` with nothing after it is no skipped line
+/// start, nor is a `#` before a tag character (beancount's `TAG`,
+/// `#[A-Za-z0-9-_/.]+`); rledger counts each of these 1, as beancount does.
 #[test]
 fn test_cause_line_start_bom_before_comment_takes_each_skipped_start() {
-    for tail in [
-        "<BOM>:x $y\\n",
-        "<BOM>&x $y\\n",
-        "<BOM>?x $y\\n",
-        "<BOM>!x $y\\n",
-        "<BOM>%x $y\\n",
-        "<BOM>;c $y\\n",
-        "<BOM><BOM>;c $y\\n",
+    for (text, beancount) in [
+        ("\u{FEFF}:x $y", 2),
+        ("\u{FEFF}&x $y", 2),
+        ("\u{FEFF}?x $y", 2),
+        ("\u{FEFF}!x $y", 2),
+        ("\u{FEFF}%x $y", 2),
+        ("\u{FEFF};c $y", 2),
+        ("\u{FEFF}\u{FEFF};c $y", 2),
+        ("\u{FEFF}# x $y", 3),
     ] {
+        let src = format!("2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n{text}\n");
+        let on_line_3 = parse(&src)
+            .errors
+            .iter()
+            .filter(|e| src[..e.span.start].matches('\n').count() == 2)
+            .count();
+        assert_eq!(on_line_3, beancount, "{text:?} counts as beancount does");
         assert_eq!(
-            recorded_cause(tail, "3:2 3:1 3:2 3:2 3:2 3:2 - - -", 3),
+            line3_cause(text, &line3_counts(beancount, beancount - 1, 0, 1)),
             Some("line-start-bom-before-comment"),
-            "{tail}"
+            "{text:?}"
         );
     }
-    assert_eq!(
-        recorded_cause("<BOM># x $y\\n", "3:3 3:1 3:3 3:3 3:3 3:3 - - -", 3),
-        Some("line-start-bom-before-comment")
-    );
     let counts = line3_counts(2, 1, 0, 1);
     for text in ["\u{FEFF}*x", "\u{FEFF};"] {
         assert_eq!(

@@ -166,9 +166,12 @@ pub fn validate_transaction_late(
 /// gone (`1 HOOL <BOM>{2 USD}` keeps `1 HOOL`). beancount's grammar never
 /// builds it, so it checks no balance there; a residual here would be an
 /// artifact of the recovery, not a finding about the ledger, beside the parse
-/// error already reported for the token (#2954). The balance check asks this
-/// only once it has found a residual, so a ledger that balances never reads
-/// its source here. `false` without a location or without the text
+/// error already reported for the token (#2954). A transaction whose block a
+/// line led by a mid-file BOM breaks into is one too: beancount discards that
+/// statement whole, while here it keeps the postings above the line (#2956).
+/// The balance check asks this only once it has found a residual, so a
+/// ledger that balances never reads its source here. `false` without a
+/// location or without the text
 /// ([`crate::SourceLines::with_text`]), where the residual is reported as
 /// before.
 fn kept_under_error_recovery(

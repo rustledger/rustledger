@@ -35,6 +35,13 @@
 //   the transaction under error recovery without the price or cost after the
 //   token, and reported two `E3001` beside the token's parse error (#2954).
 //   A transaction with no invalid token still has its residual reported.
+// - A line a mid-file BOM starts, right where a transaction's postings go on,
+//   is beancount's invalid token, so the statement is discarded whole and the
+//   lines after it are no errors: the BOM is the one error there. rledger
+//   ended the block at that line, kept the transaction with the postings
+//   above it, reported its residual (`E3001`), and an orphan `P0012` for each
+//   posting after the line (#2956). After a blank line the transaction is
+//   complete in beancount too, so its residual is reported.
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -230,6 +237,43 @@ garbage
                 code: "E3001",
                 line: 20,
                 message: "Transaction does not balance: residual -1 USD",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "a line a BOM starts discards the transaction it breaks into",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"broken by a BOM line\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+\u{feff}  kk: \"v\"
+  Assets:A  1 USD
+
+2024-01-03 * \"complete before a blank line\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+
+\u{feff}  kk: \"v\"
+  Assets:A  1 USD
+",
+        findings: &[
+            Finding {
+                code: "P0026",
+                line: 7,
+                message: "Invalid token: UTF-8 BOM",
+            },
+            Finding {
+                code: "E3001",
+                line: 10,
+                message: "Transaction does not balance: residual -1 USD",
+            },
+            Finding {
+                code: "P0026",
+                line: 14,
+                message: "Invalid token: UTF-8 BOM",
             },
         ],
         closes_nonempty: false,

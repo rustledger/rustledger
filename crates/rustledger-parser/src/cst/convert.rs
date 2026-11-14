@@ -478,6 +478,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     report_duplicate_metadata(source_file.syntax(), bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
+    quiet_after_line_start_bom_lines(&mut errors, source_file.syntax(), stripped, bom_offset);
     drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset, &grammar_failures);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
@@ -9721,6 +9722,333 @@ fn quiet_after_invalid_tokens(
     });
 }
 
+/// Keep the lines after a line a BOM starts as quiet as beancount keeps them
+/// (#2956): only the lexer's own errors there, until its grammar has read
+/// three tokens again.
+///
+/// A mid-file BOM at the start of a line is beancount's invalid token, so the
+/// statement it is in, or starts, fails right there, and bison's recovery
+/// takes over: it discards what it cannot read and reports no syntax error
+/// until it has shifted three tokens since the last one. The line ending
+/// after the BOM line is one; a blank line or a line beancount skips (`;`,
+/// `*`, `#`, ...: [`crate::logos_lexer::beancount_ignores_line`]) is one
+/// more; an indented line, or a column-0 line no declaration starts
+/// (`5`, `$x`, another line a BOM starts), fails again and starts the count
+/// over. So a transaction's postings after its BOM-led header, or the rest
+/// of a block a BOM line breaks into, are no errors there, where each was an
+/// orphan `unexpected input` here. The window ends at a column-0 directive
+/// (its date and keyword are the tokens that end it), once two blank or
+/// skipped lines have been read, or after a line (the BOM line included)
+/// holding a dated header after a blank, which bison shifts there in the
+/// middle of the line ([`holds_a_dated_header`]).
+///
+/// On a quiet line only the grammar's errors go (syntax errors, construct
+/// checks, a BOM diagnostic that stands for one, and the account-name and
+/// booking-method checks beancount makes only of an entry it builds). Kept
+/// are an invalid
+/// token's own error (one starting inside an `ERROR_TOKEN`; a one-letter key
+/// `k:` and an invalid account name are invalid tokens there too, BOMs
+/// beancount reads into an account are not), the line's error when it stands
+/// for the line's first invalid token, as it does after a start beancount
+/// reads (`readable_start_of_an_error_line`), the line's BOM diagnostic when
+/// it stands for an invalid token with a BOM in it that has no error of its
+/// own (`report_invalid_tokens_of_error_line` leaves such a token to it),
+/// and every error that is no grammar error: an invalid date (beancount
+/// builds dates in its lexer) and the state of a `pushtag` / `pushmeta` at
+/// the end of the file.
+///
+/// The same recovery follows any line whose first token beancount cannot
+/// read (`$x` and the postings under it), which is not modeled here (#2872);
+/// this is the line a BOM starts.
+///
+/// `errors` is sorted by start and stays so. Asked only when the source holds
+/// a mid-file BOM; walks the green tree once and each line after a BOM line
+/// at most once.
+fn quiet_after_line_start_bom_lines(
+    errors: &mut Vec<crate::ParseError>,
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+) {
+    use crate::SyntaxKind as K;
+    use rowan::Language as _;
+    if errors.is_empty() || !stripped.contains(crate::bom::BOM_CHAR) {
+        return;
+    }
+    let off = bom_offset as usize;
+    // Every `ERROR_TOKEN`'s range, and where each top-level item's first
+    // content token starts, with the item's kind (in source order).
+    let mut invalid: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut items: Vec<(usize, K)> = Vec::new();
+    let mut at = 0usize;
+    for child in root.green().children() {
+        let len = usize::from(child.text_len());
+        if let rowan::NodeOrToken::Node(node) = child {
+            let mut pos = at;
+            for el in node.children() {
+                if let rowan::NodeOrToken::Token(t) = el {
+                    if !is_trivia_kind(crate::BeancountLanguage::kind_from_raw(t.kind())) {
+                        items.push((pos, crate::BeancountLanguage::kind_from_raw(node.kind())));
+                        break;
+                    }
+                }
+                pos += usize::from(el.text_len());
+            }
+            let mut stack = vec![(node, at)];
+            while let Some((n, start)) = stack.pop() {
+                let mut pos = start;
+                for el in n.children() {
+                    let el_len = usize::from(el.text_len());
+                    match el {
+                        rowan::NodeOrToken::Node(inner) => stack.push((inner, pos)),
+                        rowan::NodeOrToken::Token(t) => {
+                            if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::ERROR_TOKEN {
+                                invalid.push(pos..pos + el_len);
+                            }
+                        }
+                    }
+                    pos += el_len;
+                }
+            }
+        }
+        at += len;
+    }
+    invalid.sort_unstable_by_key(|r| r.start);
+    // Whether one of them is beancount's invalid token: not BOMs it reads
+    // into an account (`is_bom_account_token`), which its grammar, not its
+    // lexer, rejects. Asked only of the tokens on a quiet line.
+    let lexed =
+        |r: &std::ops::Range<usize>| !is_bom_account_token(stripped, r.start, &stripped[r.clone()]);
+    // The invalid tokens that start on `line_start..=line_end`.
+    let on_line = |line_start: usize, line_end: usize| {
+        let from = invalid.partition_point(|r| r.start < line_start);
+        invalid[from..]
+            .iter()
+            .take_while(move |r| r.start <= line_end)
+    };
+    // The quiet lines: (line start, line end, whether the line's error stands
+    // for its first invalid token), in source order.
+    let mut quiet: Vec<(usize, usize, bool)> = Vec::new();
+    let mut walked_to = 0usize;
+    for range in &invalid {
+        if range.start < walked_to
+            || !is_line_start_bom_token(stripped, range.start, &stripped[range.clone()])
+        {
+            continue;
+        }
+        let Some(nl) = stripped[range.start..].find('\n') else {
+            break;
+        };
+        let mut pos = range.start + nl + 1;
+        walked_to = pos;
+        // A dated header later on the BOM line is shifted, and with the line
+        // ending that is the three tokens: no quiet after it.
+        if holds_a_dated_header(&stripped[range.start..=range.start + nl]) {
+            continue;
+        }
+        // Tokens left to shift before beancount reports again.
+        let mut owed = 2u8;
+        while pos < stripped.len() {
+            let line_end = stripped[pos..]
+                .find('\n')
+                .map_or(stripped.len(), |i| pos + i);
+            let line = &stripped[pos..line_end];
+            // The line with its `\n`, so a `\r` before it lexes as the line
+            // ending's, not as a stray one at the end of the input.
+            let with_ending = &stripped[pos..(line_end + 1).min(stripped.len())];
+            if line.trim_matches([' ', '\t', '\r']).is_empty()
+                || crate::logos_lexer::beancount_ignores_line(line)
+            {
+                owed -= 1;
+                if owed == 0 {
+                    break;
+                }
+            } else {
+                let indented = line.starts_with([' ', '\t']);
+                let starts_directive = !indented
+                    && items
+                        .binary_search_by_key(&pos, |&(s, _)| s)
+                        .is_ok_and(|i| items[i].1 != K::ERROR_NODE);
+                if starts_directive {
+                    break;
+                }
+                let content = pos + (line.len() - line.trim_start_matches([' ', '\t']).len());
+                let stands_for_token = on_line(pos, line_end)
+                    .find(|r| lexed(r))
+                    .is_some_and(|r| readable_start_of_an_error_line(&stripped[content..r.start]))
+                    || holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
+                quiet.push((pos, line_end, stands_for_token));
+                owed = 2;
+                if holds_a_dated_header(with_ending) {
+                    walked_to = line_end + 1;
+                    break;
+                }
+            }
+            pos = line_end + 1;
+            walked_to = pos;
+        }
+    }
+    if quiet.is_empty() {
+        return;
+    }
+    let inside_invalid = |at: usize| {
+        let i = invalid.partition_point(|r| r.start <= at);
+        i.checked_sub(1)
+            .and_then(|i| invalid.get(i))
+            .is_some_and(|r| at < r.end && lexed(r))
+    };
+    // Whether a quiet line holds an invalid token with a BOM in it that no
+    // error of its own names: such a token is left to the line's BOM
+    // diagnostic (`report_invalid_tokens_of_error_line`), which then stands
+    // for that lexer error and is kept.
+    let error_starts: Vec<usize> = errors
+        .iter()
+        .filter_map(|e| e.span.start.checked_sub(off))
+        .collect();
+    let bom_left_to_diagnostic: Vec<bool> = quiet
+        .iter()
+        .map(|&(line_start, line_end, _)| {
+            on_line(line_start, line_end)
+                .filter(|r| r.start < line_end && lexed(r))
+                .any(|r| {
+                    stripped[r.clone()].contains(crate::bom::BOM_CHAR) && {
+                        let i = error_starts.partition_point(|&s| s < r.start);
+                        error_starts.get(i).is_none_or(|&s| s >= r.end)
+                    }
+                })
+        })
+        .collect();
+    errors.retain(|e| {
+        // Only an error of the grammar is quieted, or of what it builds (an
+        // account name or booking method beancount checks only for an entry
+        // it builds, which a failed statement never is). An invalid date is
+        // the lexer's (beancount builds dates there), and an unclosed or
+        // unmatched `pushtag` / `pushmeta` is the state after the whole file,
+        // whose span may start in a quiet line's comment.
+        let grammar = matches!(
+            e.kind,
+            crate::ParseErrorKind::SyntaxError(_)
+                | crate::ParseErrorKind::InvalidAccount(_)
+                | crate::ParseErrorKind::InvalidAccountFormat(_)
+                | crate::ParseErrorKind::InvalidBookingMethod(_)
+                | crate::ParseErrorKind::Expected(_)
+                | crate::ParseErrorKind::UnexpectedChar(_)
+                | crate::ParseErrorKind::UnexpectedEof
+                | crate::ParseErrorKind::MissingField(_)
+                | crate::ParseErrorKind::MissingAccount
+                | crate::ParseErrorKind::MissingAmount
+                | crate::ParseErrorKind::MissingCurrency
+                | crate::ParseErrorKind::MissingDirective
+                | crate::ParseErrorKind::IndentationError
+                | crate::ParseErrorKind::MissingNewline
+                | crate::ParseErrorKind::BomInDirectiveBody
+        );
+        let Some(start) = e.span.start.checked_sub(off).filter(|_| grammar) else {
+            return true;
+        };
+        let Some(i) = quiet
+            .partition_point(|&(s, _, _)| s <= start)
+            .checked_sub(1)
+        else {
+            return true;
+        };
+        let (line_start, line_end, stands_for_token) = quiet[i];
+        if start > line_end {
+            return true;
+        }
+        let line = &stripped[line_start..line_end];
+        let content = line_start + (line.len() - line.trim_start_matches([' ', '\t']).len());
+        let line_error = start <= content;
+        inside_invalid(start)
+            || (line_error && stands_for_token)
+            || (line_error
+                && matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody)
+                && bom_left_to_diagnostic[i])
+    });
+}
+
+/// Whether `line` holds a lone capital beancount reads as the start of an
+/// invalid token, which the lexer here reads as a one-letter currency or
+/// flag: one glued to the character after it (`T#!`, `A$`, `B\r` on a CRLF
+/// line), as beancount's `CAPITAL` needs a space, a tab or a `\n` after it
+/// (the rule `invalid_runs` reads a heading's rest by), or one at the very
+/// end of the input (`at_eof`, no line ending after the line). `line` holds
+/// its `\n`, so a CRLF line's `\r` lexes as its line ending. On a line
+/// quiet after a line a BOM starts (`quiet_after_line_start_bom_lines`) the
+/// line's error stands for that token, as it does on an ordinary error line,
+/// so it is kept. Linear in the line, lexed as the middle of a line.
+fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
+    use crate::logos_lexer::{Token, TokenIter};
+    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
+        let lone = match token {
+            Token::Currency(c) | Token::Flag(c) => {
+                c.len() == 1 && c.as_bytes()[0].is_ascii_uppercase()
+            }
+            _ => false,
+        };
+        lone && line[span.end..]
+            .chars()
+            .next()
+            .map_or(at_eof, |c| !matches!(c, ' ' | '\t' | '\n'))
+    })
+}
+
+/// Whether `line` holds, after a blank, a date and then a directive keyword or
+/// a transaction flag: tokens that bison's recovery, discarding what it
+/// cannot read, shifts as the start of a declaration, so that its quiet after
+/// an error ends there (`quiet_after_line_start_bom_lines`). A date glued to
+/// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid
+/// token, not one. Linear in the line, which it lexes from its start as the
+/// middle of a line, so no line-start rule hides any of it.
+fn holds_a_dated_header(line: &str) -> bool {
+    use crate::logos_lexer::{Token, TokenIter};
+    // A date after a blank starts with a digit right after one; without one
+    // the line is not lexed at all.
+    if !line
+        .as_bytes()
+        .windows(2)
+        .any(|w| matches!(w[0], b' ' | b'\t') && w[1].is_ascii_digit())
+    {
+        return false;
+    }
+    let mut after_blank = false;
+    let mut date = false;
+    for (token, _) in TokenIter::new_mid_line(line, true, 0) {
+        match token {
+            Token::Whitespace(_) => after_blank = true,
+            Token::Date(_) => {
+                date = after_blank;
+                after_blank = false;
+            }
+            Token::Star
+            | Token::Flag(_)
+            | Token::Pending
+            | Token::Hash
+            | Token::Txn
+            | Token::Open
+            | Token::Close
+            | Token::Balance
+            | Token::Pad
+            | Token::Event
+            | Token::Query
+            | Token::Note
+            | Token::Document
+            | Token::Price
+            | Token::Commodity
+            | Token::Custom
+                if date =>
+            {
+                return true;
+            }
+            _ => {
+                date = false;
+                after_blank = false;
+            }
+        }
+    }
+    false
+}
+
 /// Whether beancount's grammar for the indented line `stripped[line_start..
 /// line_end]` (a posting, or a metadata line when it starts with a key) gets
 /// as far as the invalid token at `first` before it fails, so that token is
@@ -9930,12 +10258,36 @@ fn report_no_metadata_continuations(
 /// validator asks this before it reports a balance residual for a
 /// transaction (#2954), so the parser's rule is the only one. `false` when
 /// `source` does not start with a transaction.
+///
+/// A line a BOM starts right where the transaction's block would go on (the
+/// next line, with no blank or comment line between) counts too (#2956):
+/// beancount's statement fails at that BOM, its invalid token, and is
+/// discarded with everything before it, while here the block ends at the
+/// line and the transaction is kept with the postings above it. A
+/// directive's span runs to the next directive's start, so `source` holds
+/// that line when there is one. After a blank or comment line the
+/// transaction is complete in beancount too, and kept with its findings.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
-    super::parser::parse_structured(source)
+    let root = super::parser::parse_structured(source);
+    let Some(txn) = root
         .children()
         .find(|n| n.kind() == crate::SyntaxKind::TRANSACTION)
-        .is_some_and(|n| holds_an_invalid_token(n.green()))
+    else {
+        return false;
+    };
+    holds_an_invalid_token(txn.green())
+        || txn
+            .next_sibling()
+            .and_then(|next| next.first_token())
+            .is_some_and(|t| {
+                t.kind() == crate::SyntaxKind::ERROR_TOKEN
+                    && is_line_start_bom_token(
+                        source,
+                        usize::from(t.text_range().start()),
+                        t.text(),
+                    )
+            })
 }
 
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than

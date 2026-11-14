@@ -88,21 +88,44 @@ fn test_parse_header_amount_check_ending_at_an_invalid_token_is_that_token_alone
     }
 }
 
-/// A known mismatch, unchanged from main for the same line without its sign:
-/// a sign glued to an invalid token (`-.5`: beancount's NUMBER needs a digit
-/// first) and, later on the line, a capital-led word with a character our
-/// lexer reads as a token of its own (`U~SD`, `US?D`), which beancount reads
-/// as one more invalid token and we do not. Main's sign check stood in for
-/// that missing error; with it dropped the line counts what main counts for
-/// `.5 U~SD`. Pinned so a fix of the lexer gap shows up here.
+/// A known mismatch (#2982), unchanged from main for the same line without
+/// the dropped check: a sign or a `balance`/`price` amount, then any invalid
+/// token, then later on the line a capital-led word with a character our
+/// lexer reads as a token of its own (`U~SD`, `U?SD`, `U%SD`), which
+/// beancount reads as one more invalid token and we do not. Main's sign or
+/// amount check stood in for that missing error; with it dropped the line
+/// counts what main counts without it. beancount counts 2 on every line
+/// below, signed or not; we count 1. Pinned so a fix of #2982 shows up here.
 #[test]
-fn test_parse_sign_check_dropped_before_a_token_we_do_not_read_as_invalid() {
-    for word in ["U~SD", "U?SD", "U%SD", "US~D"] {
-        let signed = format!("{OPENS}2024-01-02 *\n  Assets:A  1 USD\n  Assets:B  -.5 {word}\n");
-        let unsigned = signed.replace("-.5", ".5");
-        // beancount: 2 on line 5, for each.
-        assert_eq!(per_line(&signed), vec![(5, 1)], "{signed:?}");
-        assert_eq!(per_line(&unsigned), vec![(5, 1)], "{unsigned:?}");
+fn test_parse_check_dropped_before_a_word_we_do_not_read_as_invalid() {
+    // A posting: the sign, then the first invalid token (`$`, `'`, `x`,
+    // `.5`, a control character, a backtick), then the word.
+    for (signed, unsigned) in [
+        ("-$ U~SD", "$ U~SD"),
+        ("-' 1 U%SD", "' 1 U%SD"),
+        ("-x U?SD", "x U?SD"),
+        ("-.5 U~SD", ".5 U~SD"),
+        ("-\x11 U~SD", "\x11 U~SD"),
+        ("-` U%SD", "` U%SD"),
+    ] {
+        for amount in [signed, unsigned] {
+            let src = format!("{OPENS}2024-01-02 *\n  Assets:B  1 USD\n  Assets:A  {amount}\n");
+            assert_eq!(per_line(&src), vec![(5, 1)], "{src:?}");
+        }
+    }
+    // A header: the amount check ends at the first invalid token (`2x`,
+    // `2<`, `2\`). Its analog is a plain amount there.
+    for line in [
+        "2024-01-02 balance Assets:A 1 + 2x U?SD",
+        "2024-01-02 balance Assets:A 1 + 2\\ U?SD",
+        "2024-01-02 price HOOL -1 + 2< U?SD",
+        "2024-01-02 price HOOL -1 + 2x U?SD",
+        "2024-01-02 balance Assets:A 2x U?SD",
+        "2024-01-02 price HOOL 2x U?SD",
+    ] {
+        assert_eq!(per_line(&format!("{line}\n")), vec![(1, 1)], "{line:?}");
+        let src = format!("{OPENS}{line}\n");
+        assert_eq!(per_line(&src), vec![(3, 1)], "{src:?}");
     }
 }
 

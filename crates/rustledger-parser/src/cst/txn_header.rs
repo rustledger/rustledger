@@ -101,10 +101,13 @@ const fn is_header_trivia(kind: SyntaxKind) -> bool {
 /// so a second flag (`2024-01-01 * * "x"`, `2024-01-01 !*`, `2024-01-01 * A
 /// "x"`) is a syntax error there. [`first_header_defect`] counts them (#2802,
 /// stage 3); this only says which tokens may stand in the flag position.
+///
+/// The header's own `DATE` is not one of them: [`first_header_defect`] skips
+/// the header's first token when it is the date, and any later `DATE` is an
+/// unexpected token, as in beancount (#2951).
 fn is_flag_position_token(kind: SyntaxKind, range: &Range<usize>) -> bool {
     match kind {
-        SyntaxKind::DATE
-        | SyntaxKind::STAR
+        SyntaxKind::STAR
         | SyntaxKind::PENDING_KW
         | SyntaxKind::FLAG
         | SyntaxKind::HASH
@@ -131,6 +134,7 @@ where
     let mut seen_tag_or_link = false;
     let mut seen_header_content = false;
     let mut flags: usize = 0;
+    let mut seen_first = false;
 
     for (kind, range) in tokens {
         // A `%`, `#!` or `#+` after the header's first token is not a comment
@@ -141,9 +145,22 @@ where
         if is_header_trivia(kind) {
             continue;
         }
+        // The header's first token is its date. A second date anywhere in
+        // the header (`2024-01-02 * 2024-01-03 "n"`) has no place in it:
+        // beancount reports `syntax error, unexpected DATE` there, so it
+        // falls through to `UnexpectedToken` below (#2951).
+        if !seen_first {
+            seen_first = true;
+            if kind == SyntaxKind::DATE {
+                continue;
+            }
+        }
         // One flag only, as in beancount (see `is_flag_position_token`).
-        if kind != SyntaxKind::DATE && !seen_header_content && is_flag_position_token(kind, &range)
-        {
+        // Flag-position tokens are only valid BEFORE any string, tag or
+        // link. That scoping is what catches #2008 case 4: in
+        // `* "Dinner" A:*:B` the `A` lexes as a single-character `CURRENCY`,
+        // a good flag token in the flag position and junk after the string.
+        if !seen_header_content && is_flag_position_token(kind, &range) {
             flags += 1;
             if flags > 1 {
                 return Some((HeaderDefect::UnexpectedToken, range));
@@ -178,12 +195,6 @@ where
                 seen_tag_or_link = true;
                 seen_header_content = true;
             }
-            // Flag-position tokens are only valid BEFORE any string/tag/link.
-            // That scoping is what catches #2008 case 4: in
-            // `* "Dinner" A:*:B` the `A` lexes as a single-character
-            // `CURRENCY` — a perfectly good flag token in the flag position,
-            // and junk here.
-            _ if !seen_header_content && is_flag_position_token(kind, &range) => {}
             _ => return Some((HeaderDefect::UnexpectedToken, range)),
         }
     }
@@ -516,6 +527,49 @@ mod tests {
             ])),
             Some((HeaderDefect::UnexpectedToken, _))
         ));
+    }
+
+    /// #2951: only the header's first token may be a date. A second one,
+    /// before or after the flag or after a string, tag or link, is an unexpected
+    /// token, reported at that date.
+    #[test]
+    fn rejects_a_second_date() {
+        let (date, star, s, t) = (
+            (SyntaxKind::DATE, "2024-01-03"),
+            (SyntaxKind::STAR, "*"),
+            (SyntaxKind::STRING, "\"n\""),
+            (SyntaxKind::TAG, "#t"),
+        );
+        for rest in [
+            // Before the flag: only the first token is the header's date.
+            vec![date, WS, star, WS, s],
+            vec![star, WS, date, WS, s],
+            vec![star, WS, date],
+            vec![star, WS, date, WS, star, WS, s],
+            vec![star, WS, s, WS, date],
+            vec![star, WS, s, WS, t, WS, date],
+        ] {
+            let mut items = vec![(SyntaxKind::DATE, "2024-01-02"), WS];
+            items.extend(rest);
+            let stream = toks(&items);
+            let at = stream
+                .iter()
+                .skip(1)
+                .find(|(k, _)| *k == SyntaxKind::DATE)
+                .expect("fixture has a second date")
+                .1
+                .clone();
+            assert_eq!(
+                first_header_defect(stream),
+                Some((HeaderDefect::UnexpectedToken, at)),
+                "{items:?}"
+            );
+        }
+        // The header's own date alone is no defect.
+        assert_eq!(
+            first_header_defect(toks(&[(SyntaxKind::DATE, "2024-01-02"), WS, star, WS, s])),
+            None
+        );
     }
 
     /// #2905: beancount's `txn` is required, so a string, tag or link straight

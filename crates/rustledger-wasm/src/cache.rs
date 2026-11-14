@@ -532,7 +532,13 @@ use crate::types::{Error, LedgerOptions};
 /// builds it. Every such source has a parse error, which the loader's cache
 /// is never saved for; an older blob here would keep serving the residuals.
 /// (v111 was taken by #2973 and v112 by #2974.)
-pub const CACHE_VERSION: u32 = 113;
+/// v114: loader v75, bumped too; PARSER OUTPUT changed (#2951). A second date
+/// in a transaction header (`2024-01-02 * 2024-01-03 "n"`) is a parse error,
+/// as in beancount, where it was accepted with no error. A file that loaded
+/// with no error can now have one, and both payloads archive its errors and
+/// directives, so an older blob would keep serving the old ones. (v113 was taken
+/// by #2975.)
+pub const CACHE_VERSION: u32 = 114;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -564,7 +570,7 @@ pub const CACHE_VERSION: u32 = 113;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 74;
+const LOADER_CACHE_VERSION_PIN: u32 = 75;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

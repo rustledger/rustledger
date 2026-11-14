@@ -545,7 +545,14 @@ use crate::types::{Error, LedgerOptions};
 /// loader's cache, saved only for an error-free load, holds none of them;
 /// both payloads here archive a source with parse errors, and an older blob
 /// would keep serving such a file with its old errors.
-pub const CACHE_VERSION: u32 = 115;
+/// v116: loader v75, unchanged; PARSER OUTPUT changed (#2967). A posting's
+/// sign check (or a header's amount check) that ends right where its line's
+/// first invalid token starts is dropped, as beancount reports the token
+/// alone there. Only errors on a line that keeps its invalid token's error
+/// are dropped, so a file errors before and after and the loader's cache
+/// holds none of them; both payloads here archive a source with parse
+/// errors, and an older blob would keep serving the extra error.
+pub const CACHE_VERSION: u32 = 116;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

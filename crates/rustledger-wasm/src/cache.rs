@@ -538,7 +538,14 @@ use crate::types::{Error, LedgerOptions};
 /// with no error can now have one, and both payloads archive its errors and
 /// directives, so an older blob would keep serving the old ones. (v113 was taken
 /// by #2975.)
-pub const CACHE_VERSION: u32 = 114;
+/// v115: loader v75, unchanged; PARSER OUTPUT changed (#2966). A stray `\r`
+/// before an invalid token is a blank, as in beancount, where it was an error
+/// of its own, and a lone capital glued to such a `\r` is an invalid token.
+/// Every input that changes has a parse error before and after, so the
+/// loader's cache, saved only for an error-free load, holds none of them;
+/// both payloads here archive a source with parse errors, and an older blob
+/// would keep serving such a file with its old errors.
+pub const CACHE_VERSION: u32 = 115;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

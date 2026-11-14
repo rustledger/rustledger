@@ -15,6 +15,12 @@
 //! files formattable), so accepting it would let `rledger format` split a
 //! line `rledger check` accepted. See `TokenIter::stray_cr_trivia_end`.
 //!
+//! Except before an invalid token (#2966): there the line has that token's
+//! error in any case, so nothing is accepted, and the `\r` is a blank, as in
+//! beancount, rather than one error more. A lone capital glued to such a
+//! `\r` is an invalid token, as beancount's `CAPITAL` needs a space, tab or
+//! `\n` after it.
+//!
 //! Every expected outcome below was checked against `bean-check` 3.2.3.
 
 use rustledger_core::{Directive, InternedStr};
@@ -334,5 +340,169 @@ fn test_try_format_source_stray_cr_formats_like_crlf() {
         ] {
             assert_eq!(try_format_source(&src).as_ref(), Ok(&expected), "{src:?}");
         }
+    }
+}
+
+/// The errors of `src` per line (1-based, counting `\n` only, as
+/// `rledger check` does): `(line, count)`, in line order.
+fn per_line(src: &str) -> Vec<(usize, usize)> {
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for e in &parse(src).errors {
+        let line = 1 + src[..e.span.start].matches('\n').count();
+        match counts.iter_mut().find(|(l, _)| *l == line) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((line, 1)),
+        }
+    }
+    counts.sort_unstable();
+    counts
+}
+
+/// Two opens, the start of every source below.
+const OPENS: &str = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n";
+
+/// A stray `\r` before an invalid token is a blank, as in beancount, not an
+/// error of its own (#2966): every row of the issue, per context. Each count
+/// is bean-check 3.2.3's, per line; main counted one more on each.
+#[test]
+fn test_parse_cr_before_an_invalid_token_is_a_blank() {
+    const BOM: &str = "\u{feff}";
+    let cases: Vec<(String, Vec<(usize, usize)>)> = vec![
+        // A directive header.
+        (
+            format!("{OPENS}2024-01-02 open Assets:C\r$\n"),
+            vec![(3, 1)],
+        ),
+        // A transaction header.
+        (
+            format!("{OPENS}2024-01-02 * \"x\"\r$\n  Assets:A  1 USD\n  Assets:B  -1 USD\n"),
+            vec![(3, 1)],
+        ),
+        // A posting.
+        (
+            format!("{OPENS}2024-01-02 * \"x\"\n  Assets:A  1 USD\rx\n  Assets:B  -1 USD\n"),
+            vec![(4, 1)],
+        ),
+        // A metadata line.
+        (
+            format!("{OPENS}2024-01-02 note Assets:A \"n\"\n  kk: \"v\"\r$\n"),
+            vec![(4, 1)],
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
+    }
+
+    // A line that is `\r<BOM>` (or `\r$`), after any directive, with CRLF, or
+    // with no final newline, and as a whole file: one error, the BOM's.
+    for before in [
+        "2024-01-02 close Assets:A\n",
+        "2024-01-02 open Assets:C\n",
+        "2024-01-02 commodity HOOL\n",
+        "pushtag #t\n",
+        "2024-01-02 * \"x\"\n  Assets:A  1 USD\n  Assets:B  -1 USD\n",
+        "",
+    ] {
+        let line = 3 + before.matches('\n').count();
+        for tail in [
+            format!("\r{BOM}\n"),
+            "\r$\n".to_string(),
+            format!("\r{BOM}"),
+        ] {
+            // The `poptag` goes on a line of its own, after a final newline.
+            let pop = match (before.starts_with("pushtag"), tail.ends_with('\n')) {
+                (true, true) => "poptag #t\n",
+                (true, false) => "\npoptag #t\n",
+                (false, _) => "",
+            };
+            let src = format!("{OPENS}{before}{tail}{pop}");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(line, 1)], "{src:?}");
+        }
+    }
+    let crlf = format!(
+        "{}2024-01-02 close Assets:A\r\n\r{BOM}\r\n",
+        OPENS.replace('\n', "\r\n")
+    );
+    assert_invariants(&crlf);
+    assert_eq!(per_line(&crlf), [(4, 1)], "{crlf:?}");
+    let whole = format!("\r{BOM}");
+    assert_invariants(&whole);
+    assert_eq!(per_line(&whole), [(1, 1)]);
+
+    // `\r<BOM>~`, `\r<BOM>@` and `\r <BOM>~` after a header, and a `\r`, a
+    // blank, then a token: one error. After a metadata line: two, the
+    // grammar's at the key's line and the invalid token's.
+    for tail in [
+        format!("\r{BOM}~"),
+        format!("\r{BOM}@"),
+        format!("\r {BOM}~"),
+        "\r $~".to_string(),
+        "\r $".to_string(),
+    ] {
+        for header in [
+            "2024-01-02 close Assets:A",
+            "2024-01-02 balance Assets:A 1.00 USD",
+            "2024-01-02 price HOOL 2 USD",
+        ] {
+            let src = format!("{OPENS}{header}{tail}\n");
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(3, 1)], "{src:?}");
+        }
+    }
+    for tail in [
+        format!("\r{BOM}~"),
+        format!("\r{BOM}@"),
+        format!("\r {BOM}~"),
+        "\r$~".to_string(),
+        "\r $~".to_string(),
+    ] {
+        for eol in ["\n", "\r\n"] {
+            let src = format!(
+                "{}2024-01-02 close Assets:A{eol}  k: \"v\"{tail}{eol}",
+                OPENS.replace('\n', eol)
+            );
+            assert_invariants(&src);
+            assert_eq!(per_line(&src), [(4, 2)], "{src:?}");
+        }
+    }
+}
+
+/// A lone capital glued to a stray `\r` is beancount's invalid token, which
+/// ends at the `\r` (#2966): `CAPITAL` needs a space, tab or `\n` after it.
+/// It counts once, and the `\r` is then a blank. Each count is bean-check
+/// 3.2.3's; a `\r` before a token that lexes stays an error of its own and
+/// stands for the capital's (`1N\rAssets:B`).
+#[test]
+fn test_parse_lone_capital_glued_to_a_stray_cr_is_an_invalid_token() {
+    let cases: [(String, Vec<(usize, usize)>); 9] = [
+        (
+            format!("{OPENS}2024-01-02 close Assets:A B\r$\n"),
+            vec![(3, 2)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A AB\r$\n"),
+            vec![(3, 2)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A B \r$\n"),
+            vec![(3, 2)],
+        ),
+        ("2229-2-37B\r\u{0}\u{0}\n".to_string(), vec![(1, 3)]),
+        (format!("{OPENS}2024-01-02 P\r$\n"), vec![(3, 2)]),
+        (format!("{OPENS}2024-01-02 * \"x\"\n  P\r$\n"), vec![(4, 2)]),
+        (format!("{OPENS}  k: B\r\r\n"), vec![(3, 2)]),
+        (
+            format!("{OPENS}2024-01-02 close Assets:A 1N\rAssets:B\n"),
+            vec![(3, 2)],
+        ),
+        // A chain: each capital is glued to a `\r` run that is trivia,
+        // because the run after the next capital is (`1\rD\r` at its end).
+        ("1\rD\r".to_string(), vec![(1, 2)]),
+    ];
+    for (src, expected) in cases {
+        assert_invariants(&src);
+        assert_eq!(per_line(&src), expected, "{src:?}");
     }
 }

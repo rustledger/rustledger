@@ -9137,7 +9137,12 @@ fn drop_errors_inside_a_line_error(
                 // line error stands for it: a directive the converter
                 // dropped, whose header grammar first fails here
                 // (`2024-01-01 open Ass'ets:A`), or an indented line whose
-                // start before it is one beancount reads.
+                // start before it is one beancount reads. A line that starts
+                // with a stray `\r` counts too: that `\r` is trivia only when
+                // the run it starts reaches this token
+                // (`TokenIter::stray_cr_trivia_end`, #2966), so the prefix is
+                // blanks, which beancount reads as nothing (`\r$` after a
+                // transaction is one `Invalid token` there).
                 let fails_here = || {
                     let (line_start, _) = line_of(span.start);
                     let prefix = stripped
@@ -9146,7 +9151,7 @@ fn drop_errors_inside_a_line_error(
                     grammar_failures
                         .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
                         .is_ok_and(|j| grammar_failures[j].2 == span.start)
-                        || (prefix.starts_with([' ', '\t']) && readable_start(prefix))
+                        || (prefix.starts_with([' ', '\t', '\r']) && readable_start(prefix))
                 };
                 // A mid-line BOM-led invalid token where the line's grammar
                 // first fails (`price USD 1 <BOM>EUR`, `  <BOM>a`):
@@ -9473,11 +9478,17 @@ fn invalid_runs(rest: &str) -> (Vec<std::ops::Range<usize>>, bool) {
 /// keyword or flag is expected next). Then the invalid token is the line's
 /// first error and its line error stands for it. Any other prefix (a string,
 /// a number, an orphan indented account) is where the grammar fails first.
+///
+/// A `\r` in the prefix is a blank, as in beancount: one that is not part of
+/// a line ending is trivia only in a run the first invalid token follows
+/// (`TokenIter::stray_cr_trivia_end`, #2966), and otherwise it would be that
+/// token itself, so the prefix would end before it.
 fn readable_start_of_an_error_line(prefix: &str) -> bool {
-    let rest = prefix.trim_start_matches([' ', '\t']);
+    const BLANKS: [char; 3] = [' ', '\t', '\r'];
+    let rest = prefix.trim_start_matches(BLANKS);
     rest.is_empty()
         || crate::logos_lexer::leading_date_len(rest)
-            .is_some_and(|n| rest[n..].trim_matches([' ', '\t']).is_empty())
+            .is_some_and(|n| rest[n..].trim_matches(BLANKS).is_empty())
 }
 
 /// Drop every error that starts on a line after its first invalid token,

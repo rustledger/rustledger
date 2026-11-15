@@ -580,7 +580,7 @@ use crate::types::{Error, LedgerOptions};
 /// parse error, before and after: the loader's cache, saved only for an
 /// error-free load, holds none of them, and parsed directives do not move;
 /// both payloads here archive a source with parse errors, and an older blob
-/// would keep serving the old ones. (v118 is held by #2984.)
+/// would keep serving the old ones. (v118 was taken by #2984.)
 pub const CACHE_VERSION: u32 = 119;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

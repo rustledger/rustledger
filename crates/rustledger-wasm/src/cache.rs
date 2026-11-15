@@ -591,7 +591,16 @@ use crate::types::{Error, LedgerOptions};
 /// and after, which the loader's cache is never saved for; parsed directives
 /// do not move. Both payloads here archive validation findings and parse
 /// errors, and an older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 120;
+/// v121: loader v75, unchanged; parse errors move (#2977). A lone capital
+/// glued to a string or comment that reaches past its run of non-blank
+/// characters (`A@"x` with the string closing on a later line, `T"x y"`,
+/// `T;x y`) is, with the run, one invalid token, as in beancount, so the
+/// quote opens no string and the lines after it are lexed on their own.
+/// Every such source has a parse error, before and after (the glued
+/// one-letter rules reported the capital), which the loader's cache is never
+/// saved for. Both payloads here archive parse errors, and an older blob
+/// would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 121;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

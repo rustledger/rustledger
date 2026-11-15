@@ -10084,8 +10084,11 @@ fn quiet_after_failed_line_starts(
         // there, and with the line ending that is the three tokens: no quiet
         // after it.
         // Nor does a dated line holding a lone capital glued to a character no
-        // currency continues with (`T"`): beancount reads an invalid run from
-        // there, which this pass does not model.
+        // currency continues with, that the lexer still reads as a token of
+        // its own (`T#`, `T"x"`): beancount reads an invalid run from there,
+        // which this pass does not model. Where the lexer reads that run as
+        // one invalid token too (`T"x y"`, #2977), the line is an ordinary
+        // failed line.
         let trigger_line = &stripped[start..=start + nl];
         if ends_recovery(trigger_line, dated_line)
             || (dated_line && holds_a_lone_capital_glued_to_a_non_blank(trigger_line))
@@ -10297,15 +10300,27 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
 }
 
 /// Whether `line` holds, after a blank, a capital glued to punctuation that no
-/// currency or account continues with (`T"`, `T#`, `P(`): beancount's `CAPITAL` needs
-/// a blank after it, so it reads the run from there as an invalid token, while
-/// the lexer here may read the capital otherwise (`T"` opens a string). Linear
-/// in the line.
+/// currency or account continues with (`T#`, `P(1)`) and that the lexer here
+/// still reads as a token of its own: beancount's `CAPITAL` needs a blank
+/// after it, so it reads the run from there as an invalid token, while the
+/// lexer here reads the capital and the tokens after it. Where the run holds
+/// an error, or a string or comment that reaches past it (`T"x y"`, `T"` whose
+/// string closes on a later line, #2977), the lexer reads the run as one
+/// invalid token as beancount does, and the line is an ordinary error line.
+/// Linear in the line: one lexing pass.
 fn holds_a_lone_capital_glued_to_a_non_blank(line: &str) -> bool {
+    use crate::logos_lexer::{Token, TokenIter};
     let bytes = line.as_bytes();
-    (1..bytes.len()).any(|i| {
-        matches!(bytes[i - 1], b' ' | b'\t')
-            && bytes[i].is_ascii_uppercase()
+    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
+        let lone = match token {
+            Token::Currency(c) | Token::Flag(c) => {
+                c.len() == 1 && c.as_bytes()[0].is_ascii_uppercase()
+            }
+            _ => false,
+        };
+        let i = span.start;
+        lone && i > 0
+            && matches!(bytes[i - 1], b' ' | b'\t')
             && bytes.get(i + 1).is_some_and(|&c| {
                 !(c.is_ascii_alphanumeric()
                     || c >= 0x80

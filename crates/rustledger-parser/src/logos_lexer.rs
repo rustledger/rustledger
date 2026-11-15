@@ -1015,6 +1015,22 @@ impl<'src> TokenIter<'src> {
                 }
                 return Some((at, peek));
             }
+            // A token that starts in the run and reaches past its end: a
+            // string with a blank or a line break inside it (`A@"x` then
+            // `foo"` on the next line), or a comment (`A;x y`). beancount's
+            // invalid token is `[^ \t\n\r]+`, so its run ends at the blank
+            // and the quote or `;` is part of it, opening nothing; the next
+            // line lexes on its own (#2977). That run is one invalid token
+            // here too: the error ends at the run's end, and lexing resumes
+            // there. The lexer handed back stands at the run's end (its span
+            // ends there), so the `Err` arm sizes the error to the run and
+            // does not take it for a stray quote's (`error_start` is past
+            // the quote).
+            if peek.span().end > run_end {
+                let mut lexer = Token::lexer(&self.source[..self.lex_end]);
+                lexer.bump(run_end);
+                return Some((run_end, lexer));
+            }
             // The run's last token a lone capital glued to a stray `\r` that
             // the capital rule in `next` makes an invalid token (#2966):
             // that is an error in the run too, so the run from the first

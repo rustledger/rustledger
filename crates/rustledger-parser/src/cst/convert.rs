@@ -10051,7 +10051,8 @@ fn quiet_after_failed_line_starts(
             // Nor when a lone capital glued to the line's end (`T\r`, `T` at
             // the end of the input) is an invalid token of its own there.
             let with_ending = &stripped[start..(line_end + 1).min(stripped.len())];
-            let glued_capital = holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
+            let glued_capital = holds_a_glued_lone_capital(with_ending, line_end == stripped.len())
+                || holds_a_lone_capital_glued_to_a_non_blank(line);
             if second_date_invalid
                 && !after_an_error_line
                 && !glued_capital
@@ -10068,7 +10069,13 @@ fn quiet_after_failed_line_starts(
         // A declaration bison shifts later on the line ends its recovery
         // there, and with the line ending that is the three tokens: no quiet
         // after it.
-        if ends_recovery(&stripped[start..=start + nl], dated_line) {
+        // Nor does a dated line holding a lone capital glued to a character no
+        // currency continues with (`T"`): beancount reads an invalid run from
+        // there, which this pass does not model.
+        let trigger_line = &stripped[start..=start + nl];
+        if ends_recovery(trigger_line, dated_line)
+            || (dated_line && holds_a_lone_capital_glued_to_a_non_blank(trigger_line))
+        {
             continue;
         }
         // Tokens left to shift before beancount reports again.
@@ -10107,7 +10114,8 @@ fn quiet_after_failed_line_starts(
                 if starts_directive
                     || (dated_line
                         && ((owed == 1 && dated_line_at(pos))
-                            || (!indented && ends_recovery(with_ending, true))))
+                            || (!indented && ends_recovery(with_ending, true))
+                            || holds_a_lone_capital_glued_to_a_non_blank(line)))
                 {
                     break;
                 }
@@ -10218,6 +10226,27 @@ fn quiet_after_failed_line_starts(
     });
 }
 
+/// Whether `line` holds, after a blank, a capital glued to punctuation that no
+/// currency or account continues with (`T"`, `T#`, `P(`): beancount's `CAPITAL` needs
+/// a blank after it, so it reads the run from there as an invalid token, while
+/// the lexer here may read the capital otherwise (`T"` opens a string). Linear
+/// in the line.
+fn holds_a_lone_capital_glued_to_a_non_blank(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    (1..bytes.len()).any(|i| {
+        matches!(bytes[i - 1], b' ' | b'\t')
+            && bytes[i].is_ascii_uppercase()
+            && bytes.get(i + 1).is_some_and(|&c| {
+                !(c.is_ascii_alphanumeric()
+                    || c >= 0x80
+                    || matches!(
+                        c,
+                        b'\'' | b'.' | b'_' | b'-' | b':' | b' ' | b'\t' | b'\r' | b'\n'
+                    ))
+            })
+    })
+}
+
 /// Whether `line` holds a lone capital beancount reads as the start of an
 /// invalid token, which the lexer here reads as a one-letter currency or
 /// flag: one glued to the character after it (`T#!`, `A$`, `B\r` on a CRLF
@@ -10280,20 +10309,40 @@ fn first_resync_point(line: &str) -> Option<(bool, usize)> {
 /// that its quiet after an error ends there (`quiet_after_failed_line_starts`),
 /// with where its date starts in `line`: `true` when it starts a transaction
 /// (a flag or `txn` after the date), `false` when it starts another directive
-/// (a keyword after it). With `lone_capital_flag`, a lone capital after the
-/// date counts as a transaction flag, as beancount reads it. A date glued to
+/// (a keyword after it). With `after_a_dated_line`, a lone capital after the
+/// date counts as a transaction flag, and a date glued after punctuation
+/// beancount lexes as a token of its own (`,` `:` `|` `~` `@` `{` `}` `(` `)`
+/// `+` `-` `/`) counts as after a blank, as beancount reads them; a BOM line's
+/// window keeps #2956's reading without them. A date glued to
 /// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid token, not one. Linear
 /// in the line, which it lexes from its start as the middle of a line, so no
 /// line-start rule hides any of it.
-fn first_dated_header(line: &str, lone_capital_flag: bool) -> Option<(bool, usize)> {
+fn first_dated_header(line: &str, after_a_dated_line: bool) -> Option<(bool, usize)> {
     use crate::logos_lexer::{Token, TokenIter};
     // A date after a blank starts with a digit right after one; without one
     // the line is not lexed at all.
-    if !line
-        .as_bytes()
-        .windows(2)
-        .any(|w| matches!(w[0], b' ' | b'\t') && w[1].is_ascii_digit())
-    {
+    // A date after a blank, or after punctuation beancount lexes as a token
+    // of its own (`,2024-01-03`, `:2024-01-03`, `|2024-01-03`), starts with a
+    // digit right after one; without one the line is not lexed at all.
+    if !line.as_bytes().windows(2).any(|w| {
+        let separator = matches!(w[0], b' ' | b'\t')
+            || (after_a_dated_line
+                && matches!(
+                    w[0],
+                    b',' | b':'
+                        | b'|'
+                        | b'~'
+                        | b'@'
+                        | b'{'
+                        | b'}'
+                        | b'('
+                        | b')'
+                        | b'+'
+                        | b'-'
+                        | b'/'
+                ));
+        separator && w[1].is_ascii_digit()
+    }) {
         return None;
     }
     let mut after_blank = false;
@@ -10305,6 +10354,27 @@ fn first_dated_header(line: &str, lone_capital_flag: bool) -> Option<(bool, usiz
                 date = after_blank.then_some(span.start);
                 after_blank = false;
             }
+            Token::Comma
+            | Token::Colon
+            | Token::Pipe
+            | Token::Tilde
+            | Token::At
+            | Token::AtAt
+            | Token::LBrace
+            | Token::RBrace
+            | Token::LDoubleBrace
+            | Token::RDoubleBrace
+            | Token::LParen
+            | Token::RParen
+            | Token::Plus
+            | Token::Minus
+            | Token::Slash
+                if after_a_dated_line =>
+            {
+                // A date right after it is shifted as after a blank.
+                date = None;
+                after_blank = true;
+            }
             Token::Star | Token::Flag(_) | Token::Pending | Token::Hash | Token::Txn
                 if date.is_some() =>
             {
@@ -10315,7 +10385,7 @@ fn first_dated_header(line: &str, lone_capital_flag: bool) -> Option<(bool, usiz
             // for after a dated line only; a BOM line's window keeps #2956's
             // reading.
             Token::Currency(c)
-                if lone_capital_flag
+                if after_a_dated_line
                     && date.is_some()
                     && c.len() == 1
                     && c.as_bytes()[0].is_ascii_uppercase() =>

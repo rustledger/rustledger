@@ -417,6 +417,51 @@ fn test_parse_dated_line_invalid_second_date_then_a_glued_lone_capital() {
     ]);
 }
 
+/// A date glued after punctuation beancount lexes as a token of its own
+/// (`,` `:` `|` `~`) is shifted as after a blank: the line starts no window,
+/// and the line after it keeps its error.
+#[test]
+fn test_parse_dated_line_date_glued_after_punctuation_starts_no_window() {
+    let open = "2024-01-01 open Assets:A\n\n";
+    assert_counts(&[
+        (
+            format!("{open}2024-01-02 ,2024-01-03 *\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 :2024-01-03 txn\nUSD\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 |2024-01-03 T \"n\"\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 2024-01-03:2024-01-04 *\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 ~2024-01-03 *\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 ,2024-01-03 *\n#x\n").replace('\n', "\r\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+    ]);
+}
+
+/// A lone capital glued to a quote is the start of an invalid run to
+/// beancount: the line keeps its error beside the invalid date's.
+#[test]
+fn test_parse_dated_line_lone_capital_glued_to_a_quote() {
+    assert_counts(&[(
+        "2024-01-01 open Assets:A\n\n2024-01-02 2024-13-45 T\" 1 USD\n; c\n  Assets:A 1 USD\n2024-01-02 t \"n\"\n"
+            .to_string(),
+        vec![(3, 2), (6, 1)],
+    )]);
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

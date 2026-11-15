@@ -282,8 +282,23 @@ impl ParsedLedger {
         let load = load_and_book(source);
         // Validation runs whatever loaded, as `rledger check` does (#2937); an
         // invalid option, kept in `option_errors`, does not stop it (#2299).
-        let validation_errors = run_validation(&load);
+        let mut validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
+        // A booking failure that restates an E3002 the validation reports is
+        // one cause, one error, as `rledger check` gives (#2998): the E3002
+        // takes its place in the soundness list, as the loader makes it the
+        // booking failure, so every gate below still stops on the refused
+        // transaction. A WASM error does not name its transaction, so with
+        // any such failure every E3002 moves; that ledger's gates were
+        // already closed by the failure.
+        let mut parse_errors = load.errors_beside_validation();
+        if parse_errors.len() < load.errors.len() {
+            let (refusals, findings) = validation_errors
+                .into_iter()
+                .partition(|e| e.code.as_deref() == Some("E3002"));
+            parse_errors.extend::<Vec<_>>(refusals);
+            validation_errors = findings;
+        }
 
         Self {
             source: source.to_string(),
@@ -294,7 +309,7 @@ impl ParsedLedger {
             source_map: load.source_map,
             query_directives: std::cell::OnceCell::new(),
             options: load.options,
-            parse_errors: load.errors,
+            parse_errors,
             query_option_errors: load.query_option_errors,
             option_errors: load.option_errors,
             validation_errors,
@@ -1446,6 +1461,37 @@ pub mod option_warning_severity_tests {
             "the gates read `parse_errors`; an option warning must not land \
              there or every operation refuses to run while isValid() says true"
         );
+    }
+
+    /// #2998: two elided postings are one E3002, on the posting beancount
+    /// names, as `rledger check` gives, with no `BOOK` beside it, and the
+    /// E3002 is in the soundness list the gates read, as the `BOOK` was, so
+    /// the operations over the refused transaction still refuse. The
+    /// `validateSource` view (`reported_errors_beside_validation` plus
+    /// `run_validation`) is the same one error.
+    #[test]
+    fn ambiguous_elision_is_one_e3002_that_still_gates() {
+        let src = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n\
+2024-01-01 open Assets:C\n2024-01-02 *\n  Assets:A 1 USD\n  Assets:B\n  Assets:C\n";
+        let parsed = ParsedLedger::new(src);
+        let all: Vec<_> = parsed
+            .parse_errors
+            .iter()
+            .chain(&parsed.validation_errors)
+            .map(|e| (e.code.as_deref(), e.line))
+            .collect();
+        assert_eq!(all, vec![(Some("E3002"), Some(7))], "{all:?}");
+        assert!(
+            !parsed.parse_errors.is_empty(),
+            "the gates still see the refused transaction"
+        );
+        assert!(parsed.query_refused, "a query still refuses");
+
+        let load = crate::helpers::load_and_book(src);
+        let mut single = load.reported_errors_beside_validation();
+        single.extend(crate::helpers::run_validation(&load));
+        let single: Vec<_> = single.iter().map(|e| (e.code.as_deref(), e.line)).collect();
+        assert_eq!(single, vec![(Some("E3002"), Some(7))], "{single:?}");
     }
 
     /// And an option ERROR must not disable them either: it does not make the

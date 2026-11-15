@@ -5322,6 +5322,25 @@ mod tests {
         // A fully elided posting joins every group, so any group's refusal is it.
         assert!(missing("EUR").restates_ambiguous_elision(&two_auto));
 
+        // Another posting to the account of an elided one: the failure may be
+        // that posting's, so it is kept (`Assets:C 5` beside `Assets:C EUR`;
+        // beancount reports "Failed to categorize" on `Assets:C 5`).
+        let shared = Transaction::new(date(2024, 1, 2), "t")
+            .with_synthesized_posting(Posting::auto("Assets:A"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(7), "EUR")))
+            .with_synthesized_posting(Posting::new("Assets:D", Amount::new(dec!(10), "USD")))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:C",
+                IncompleteAmount::NumberOnly(dec!(5)),
+            ))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:C",
+                IncompleteAmount::CurrencyOnly("EUR".into()),
+            ));
+        assert!(ambiguous_elision(&shared).is_some());
+        assert!(!cannot_infer("Assets:C").restates_ambiguous_elision(&shared));
+        assert!(cannot_infer("Assets:A").restates_ambiguous_elision(&shared));
+
         // Nothing ambiguous: never a restatement.
         let fine = Transaction::new(date(2024, 1, 2), "t")
             .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1), "USD")))

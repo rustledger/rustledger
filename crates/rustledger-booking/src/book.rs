@@ -190,8 +190,11 @@ impl BookingError {
     /// refusal twice (`rledger check` used to print an E3002 and a `BOOK`
     /// "interpolation failed" for one transaction). A failure with another
     /// cause is never a restatement: a `MultipleMissing` in a currency no
-    /// ambiguous group is in, or `CannotInferCurrency` for a posting that is
-    /// not one of the elided unknowns.
+    /// ambiguous group is in, or `CannotInferCurrency` for an account any
+    /// posting of which is not one of the elided unknowns. The failure names
+    /// an account, not a posting, so when another posting shares the account
+    /// (`Assets:C 5` beside an elided `Assets:C EUR`) it may be that one's,
+    /// and is kept.
     #[must_use]
     pub fn restates_ambiguous_elision(&self, txn: &Transaction) -> bool {
         use crate::interpolate::InterpolationError as I;
@@ -205,11 +208,16 @@ impl BookingError {
             I::MultipleMissing { currency, .. } => {
                 ambiguity.has_unassigned || ambiguity.crowded.iter().any(|(c, _)| c == currency)
             }
-            I::CannotInferCurrency { account } => ambiguity.postings.iter().any(|&i| {
-                txn.postings
-                    .get(i)
-                    .is_some_and(|p| &p.value.account == account)
-            }),
+            I::CannotInferCurrency { account } => {
+                let mut to_account = txn
+                    .postings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| &p.value.account == account)
+                    .peekable();
+                to_account.peek().is_some()
+                    && to_account.all(|(i, _)| ambiguity.postings.contains(&i))
+            }
             _ => false,
         }
     }

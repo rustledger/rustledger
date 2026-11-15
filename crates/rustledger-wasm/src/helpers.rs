@@ -218,6 +218,14 @@ pub struct ProcessedLedger {
     /// reported beside the rows. This is the query rule, not the soundness
     /// gate [`has_fatal`] reads, which also stops on a plugin's error.
     pub query_blocked: bool,
+    /// Parallel to `errors`: whether the error is a booking failure that
+    /// restates the E3002 [`run_validation`] reports
+    /// ([`rustledger_loader::LedgerError::restates_ambiguous_elision`],
+    /// #2998). This load does not validate, so it keeps such a failure; a
+    /// surface that also runs [`run_validation`] reports
+    /// [`Self::errors_beside_validation`] instead, so one cause is one error,
+    /// as in `rledger check`. Such a failure still blocks queries.
+    pub restates_e3002: Vec<bool>,
     /// Raw parse result, needed by editor features and `ParsedLedger`.
     pub parse_result: ParserResult,
     pub lookup: LineLookup,
@@ -241,6 +249,34 @@ impl ProcessedLedger {
     #[must_use]
     pub fn reported_errors(&self) -> Vec<Error> {
         let mut all = self.errors.clone();
+        all.extend(self.option_errors.iter().cloned());
+        all
+    }
+
+    /// [`Self::errors`] as a surface that also runs [`run_validation`]
+    /// reports them: without the booking failures that restate an E3002 the
+    /// validation reports ([`Self::restates_e3002`], #2998).
+    #[must_use]
+    pub fn errors_beside_validation(&self) -> Vec<Error> {
+        self.errors
+            .iter()
+            .zip(
+                self.restates_e3002
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(false)),
+            )
+            .filter(|&(_, restated)| !restated)
+            .map(|(error, _)| error.clone())
+            .collect()
+    }
+
+    /// [`Self::reported_errors`] for a surface that also runs
+    /// [`run_validation`]: [`Self::errors_beside_validation`] plus the option
+    /// diagnostics.
+    #[must_use]
+    pub fn reported_errors_beside_validation(&self) -> Vec<Error> {
+        let mut all = self.errors_beside_validation();
         all.extend(self.option_errors.iter().cloned());
         all
     }
@@ -295,6 +331,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
+                restates_e3002: Vec::new(),
                 parse_result,
                 lookup,
             };
@@ -356,6 +393,13 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
+            let mut restates_e3002 = vec![false; parse_errors.len()];
+            restates_e3002.extend(
+                ledger
+                    .errors
+                    .iter()
+                    .map(rustledger_loader::LedgerError::restates_ambiguous_elision),
+            );
             let mut errors = parse_errors;
             errors.extend(
                 ledger
@@ -374,6 +418,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 option_errors,
                 query_option_errors,
                 query_blocked,
+                restates_e3002,
                 parse_result,
                 lookup,
             }
@@ -391,6 +436,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
+                restates_e3002: Vec::new(),
                 parse_result,
                 lookup,
             }
@@ -1521,7 +1567,7 @@ mod parse_error_mapping_parity {
         ];
         for source in cases {
             let load = load_and_book(source);
-            let mut single = load.reported_errors();
+            let mut single = load.reported_errors_beside_validation();
             single.extend(run_validation(&load));
             let single = places(single);
             assert!(

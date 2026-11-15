@@ -289,6 +289,78 @@ fn test_parse_dated_line_lone_date_at_the_last_owed_token() {
     ]);
 }
 
+/// A BOM line's window is left as #2956 has it: a failed dated line inside it
+/// is walked there, so its invalid second date, a declaration on it and the
+/// lines after it count as before.
+#[test]
+fn test_parse_dated_line_inside_a_bom_window_is_unchanged() {
+    let start = "; a\n\u{feff}x\n";
+    assert_counts(&[
+        (
+            format!("{start}\n2024-01-02 2024-13-45 include \"x\"\n"),
+            vec![(2, 1), (4, 1)],
+        ),
+        (
+            format!("{start};c\n2024-01-02 2024-13-45 popmeta k:\n"),
+            vec![(2, 1), (4, 2)],
+        ),
+        (
+            format!("{start};c\n2024-01-02 $x pushmeta k: 1\n;c\n#comment\n"),
+            vec![(2, 1), (4, 2)],
+        ),
+        (
+            format!("{start};c\n2024-01-02 'x\n2024-01-02\n  ~,option \"a\" \"b\"\n"),
+            vec![(2, 1), (4, 1)],
+        ),
+        (
+            format!("{start};c\n2024-01-02 'x\n  k: 1\n  option \"a\" \"b\"\n"),
+            vec![(2, 1), (4, 1), (5, 1)],
+        ),
+    ]);
+}
+
+/// A declaration bison shifts on an indented line in a dated line's window
+/// is no error of its own, and ends the window: the line after it is
+/// reported.
+#[test]
+fn test_parse_dated_line_indented_declaration_ends_the_window_after_it() {
+    assert_counts(&[
+        (
+            "2024-01-02 'x\n2024-01-02\n  ~,option \"a\" \"b\"\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "2024-01-02 123\n  ~,option \"a\" \"b\"\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+    ]);
+}
+
+/// A date with a comment glued to it is alone on its line too.
+#[test]
+fn test_parse_dated_line_lone_date_with_a_glued_comment() {
+    assert_counts(&[
+        (
+            "2024-01-02 123\n;c\n2024-01-02;c".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+        (
+            "2024-01-02 123\n;c\n2024-01-02%x".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+    ]);
+}
+
+/// After a line with an error of its own, which beancount may report on the
+/// dated line (a flag-only posting `  !`), the dated line keeps both its
+/// errors: two there, as beancount counts that line.
+#[test]
+fn test_parse_dated_line_invalid_second_date_after_an_error_line() {
+    let src = "2024-01-02 * \"x\"\n  !\n2024-01-02 2024-02-30 \"n\"\n";
+    let counts = per_line(src);
+    assert!(counts.contains(&(3, 2)), "{counts:?}");
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

@@ -5501,32 +5501,8 @@ fn report_invalid_dates(
                         &multiline_strings,
                         &error_starts,
                     );
-                // A column-0 line that starts with a valid date and opens no
-                // directive (#2979): beancount reads the date and fails at the
-                // token after it, so a bad date there is where it fails
-                // (`2024-01-02 2024-02-30 "n"`: the date alone).
-                let after_a_date = (ahead + behind == 0
-                    && (from == 0 || stripped.as_bytes()[from - 1] == b'\n'))
-                    .then(|| crate::logos_lexer::leading_date_len(&stripped[from..]))
-                    .flatten()
-                    .filter(|&n| parse_date_token(&stripped[from..from + n]).is_some())
-                    .and_then(|n| {
-                        let rest = &stripped[from + n..];
-                        let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-                        (blanks > 0).then_some(from + n + blanks)
-                    })
-                    // Unless bison shifts a declaration later on the line,
-                    // whose own errors follow (`2024-01-02 2024-13-45 2024-01-04
-                    // open Assets:Q *`, `2024-01-02 2024-13-45 poptag #t`):
-                    // that is not modeled, so the line keeps its error.
-                    .filter(|_| {
-                        let line = &stripped[from..];
-                        first_resync_point(&line[..line.find('\n').unwrap_or(line.len())]).is_none()
-                    });
                 let failed_at = if after_a_gap {
                     line_begin + off
-                } else if let Some(next) = after_a_date {
-                    next + off
                 } else {
                     span.start + ahead
                 };
@@ -9850,8 +9826,9 @@ fn quiet_after_invalid_tokens(
 /// blank, `2024-01-02 2024-01-03 * "n"`, or an undated declaration's keyword,
 /// `2024-01-02 option "a" "b"`), its recovery ends and it builds that
 /// declaration; that is not modeled either, so a dated line holding one starts
-/// no window, and a line holding one ends a window before it, keeping its
-/// errors. A failed dated line inside a quiet window starts with a date bison
+/// no window, a column-0 line holding one ends a window before it, keeping its
+/// errors, and an indented one is quiet and ends the window after it, as
+/// beancount reports the line after it. A failed dated line inside a quiet window starts with a date bison
 /// shifts, so when that is the last token owed, the line is reported and
 /// starts a window of its own (in a dated line's window a date alone on its
 /// line counts too). A line a BOM starts inside a dated line's window starts
@@ -9980,12 +9957,15 @@ fn quiet_after_failed_line_starts(
             let rest = &stripped[pos + n..];
             let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
             let after = line.trim_start_matches([' ', '\t']);
-            if !(line.is_empty() || line.len() > after.len() || line == "\r") {
+            // A comment glued to the date (`2024-01-02;c`, `2024-01-02%x`)
+            // leaves it alone on its line too.
+            let comment = |t: &str| t.starts_with([';', '%']);
+            if !(line.is_empty() || line.len() > after.len() || line == "\r" || comment(line)) {
                 return None;
             }
             Some((
                 pos,
-                !after.trim_end_matches('\r').is_empty() && !after.starts_with(';'),
+                !after.trim_end_matches('\r').is_empty() && !comment(after),
             ))
         })
         .collect();
@@ -10005,13 +9985,11 @@ fn quiet_after_failed_line_starts(
         .collect();
     triggers.sort_unstable_by_key(|&(start, _)| start);
     // Whether a column-0 line at `pos` starts with a date and opens no
-    // directive: bison shifts that date. After a BOM line only one with a
-    // token after the date counts, as before (#2956); after a dated line a
-    // date alone (`2024-01-02`) counts too.
-    let dated_line_at = |pos: usize, in_dated_window: bool| {
+    // directive, a token after the date or not: bison shifts that date.
+    let dated_line_at = |pos: usize| {
         dated_lines
             .binary_search_by_key(&pos, |&(start, _)| start)
-            .is_ok_and(|i| in_dated_window || dated_lines[i].1)
+            .is_ok()
     };
     // Whether a line a BOM starts begins in `from..=to`: such a line has its
     // own window (#2956), which a dated line's window hands over to there.
@@ -10034,10 +10012,45 @@ fn quiet_after_failed_line_starts(
             first_dated_header(line).is_some()
         }
     };
+    // The dated lines whose `unexpected input` stands for an invalid date
+    // right after their date (below).
+    let mut invalid_second_dates: Vec<usize> = Vec::new();
     let mut walked_to = 0usize;
     for &(start, dated_line) in &triggers {
         if start < walked_to {
             continue;
+        }
+        // An invalid date right after a dated line's date is where beancount's
+        // grammar fails, and that date's own error is the line's one error
+        // (`2024-01-02 2024-02-30`): beancount builds dates in its lexer. Not
+        // when a declaration bison shifts follows on the line, whose own
+        // errors are not modeled (`2024-01-02 2024-13-45 poptag #t`), nor
+        // right after a line with an error of its own: beancount reports some
+        // of those on the next line, this one (a date alone on its line, a
+        // flag-only posting `  !`, an `open` with no account). Only outside a
+        // BOM line's window, which this pass leaves as #2956 has it: such a
+        // line inside one is walked there.
+        if dated_line {
+            let line_end = stripped[start..]
+                .find('\n')
+                .map_or(stripped.len(), |i| start + i);
+            let line = &stripped[start..line_end];
+            let prev_start = stripped[..start.saturating_sub(1)]
+                .rfind('\n')
+                .map_or(0, |i| i + 1);
+            // Whether an error starts on the line before (`errors` is sorted).
+            let after_an_error_line = start > 0 && {
+                let i = errors.partition_point(|e| e.span.start < prev_start + off);
+                errors.get(i).is_some_and(|e| e.span.start < start + off)
+            };
+            let second_date_invalid = crate::logos_lexer::leading_date_len(line).is_some_and(|n| {
+                let rest = line[n..].trim_start_matches([' ', '\t']);
+                crate::logos_lexer::leading_date_len(rest)
+                    .is_some_and(|m| parse_date_token(&rest[..m]).is_none())
+            });
+            if second_date_invalid && !after_an_error_line && first_resync_point(line).is_none() {
+                invalid_second_dates.push(start);
+            }
         }
         let Some(nl) = stripped[start..].find('\n') else {
             break;
@@ -10084,8 +10097,9 @@ fn quiet_after_failed_line_starts(
                 // After a dated line, a line holding a declaration bison shifts
                 // ends the window before it: that line keeps its errors.
                 if starts_directive
-                    || (owed == 1 && dated_line_at(pos, dated_line))
-                    || (dated_line && ends_recovery(with_ending, true))
+                    || (dated_line
+                        && ((owed == 1 && dated_line_at(pos))
+                            || (!indented && ends_recovery(with_ending, true))))
                 {
                     break;
                 }
@@ -10096,7 +10110,10 @@ fn quiet_after_failed_line_starts(
                     || holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
                 quiet.push((pos, line_end, stands_for_token));
                 owed = 2;
-                if !dated_line && ends_recovery(with_ending, false) {
+                // A declaration bison shifts on an indented line (a column-0
+                // one ended the window above) is no error of its own there,
+                // but ends the recovery: the line after it is reported.
+                if ends_recovery(with_ending, dated_line) {
                     walked_to = line_end + 1;
                     break;
                 }
@@ -10104,6 +10121,15 @@ fn quiet_after_failed_line_starts(
             pos = line_end + 1;
             walked_to = pos;
         }
+    }
+    if !invalid_second_dates.is_empty() {
+        errors.retain(|e| {
+            !(matches!(e.kind, crate::ParseErrorKind::SyntaxError(_))
+                && e.span
+                    .start
+                    .checked_sub(off)
+                    .is_some_and(|at| invalid_second_dates.binary_search(&at).is_ok()))
+        });
     }
     if quiet.is_empty() {
         return;

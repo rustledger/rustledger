@@ -223,16 +223,49 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
         // PREFIX of the component's. This is exactly the silent-green
         // invariant: nothing the native path reports may vanish through the
         // component.
-        if loaded.errors.len() < native.errors.len() {
+        //
+        // One exception, by design (#2998): a booking failure that restates
+        // an E3002 (`error_restates_e3002`) is reported by the non-validating
+        // native load and replaced by the component's own validation, which
+        // reports that E3002, as `rledger check` reports one error for one
+        // cause. Such a failure is left out of the prefix, and the component
+        // must then report at least as many E3002s as were left out, so the
+        // refusal cannot vanish either.
+        let native_errors: Vec<_> = native
+            .errors
+            .iter()
+            .zip(
+                native
+                    .error_restates_e3002
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(false)),
+            )
+            .filter(|&(_, restated)| !restated)
+            .map(|(error, _)| error)
+            .collect();
+        let restated = native.errors.len() - native_errors.len();
+        let e3002s = loaded
+            .errors
+            .iter()
+            .filter(|e| e.code.as_deref() == Some("E3002"))
+            .count();
+        if e3002s < restated {
+            mismatches.push(format!(
+                "{rel}: {restated} booking failure(s) restate an E3002 the component \
+                 does not report ({e3002s} E3002)"
+            ));
+            continue;
+        }
+        if loaded.errors.len() < native_errors.len() {
             mismatches.push(format!(
                 "{rel}: component dropped errors: native={} component={}",
-                native.errors.len(),
+                native_errors.len(),
                 loaded.errors.len()
             ));
             continue;
         }
-        if let Some((i, (ne, we))) = native
-            .errors
+        if let Some((i, (ne, we))) = native_errors
             .iter()
             .zip(loaded.errors.iter())
             .enumerate()

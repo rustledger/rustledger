@@ -574,10 +574,8 @@ use crate::types::{Error, LedgerOptions};
 /// v119: loader v75, unchanged; PARSER OUTPUT changed (#2979). The indented
 /// lines under a column-0 dated line that opens no directive
 /// (`2024-01-02 123 * "n"`) keep only the lexer's errors until beancount's
-/// recovery would report again, where each was an orphan line's error, a
-/// declaration that recovery shifts later on such a line takes the errors a
-/// parse of it gives, and an invalid date right after the line's date is that
-/// line's one error. Every
+/// recovery would report again, where each was an orphan line's error, and an
+/// invalid date right after the line's date is that line's one error. Every
 /// source that changes holds such a line, which keeps its own error, so a
 /// parse error, before and after: the loader's cache, saved only for an
 /// error-free load, holds none of them, and parsed directives do not move;

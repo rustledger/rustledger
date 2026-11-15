@@ -2,14 +2,17 @@
 //! beancount (#2979).
 //!
 //! When the token after a line's date is no directive keyword and no
-//! transaction flag (a second date, a number, an account, a currency, ...),
-//! beancount reads the date and fails at that token, and bison's recovery
-//! stays quiet about the indented lines under it until its grammar has read
-//! three tokens again (`quiet_after_failed_line_starts`). Each of those lines
-//! was an orphan `unexpected input` here. When the line holds a transaction's
-//! header after a blank (`2024-01-02 2024-01-03 * "n"`), bison shifts that
-//! header and builds the transaction, so the lines under it are its body and
-//! count as a transaction's body does.
+//! transaction flag (a number, an account, a currency, ...), beancount reads
+//! the date and fails at that token, and bison's recovery stays quiet about
+//! the indented lines under it until its grammar has read three tokens again
+//! (`quiet_after_failed_line_starts`). Each of those lines was an orphan
+//! `unexpected input` here.
+//!
+//! Where bison would shift a declaration (a dated header after a blank, or an
+//! undated declaration's keyword) its recovery ends and it builds that
+//! declaration, which is not modeled: such a line starts no window, and a line
+//! holding one ends a window before it, so the errors there stay as main
+//! gives them (as they are in beancount for every shape tested below).
 //!
 //! Every expected count below was checked against `bean-check` 3.2.3.
 
@@ -37,7 +40,7 @@ fn per_line(src: &str) -> Vec<(usize, usize)> {
     green
 }
 
-/// Two opens and a blank line, the start of every source below, as in the
+/// Two opens and a blank line, the start of most sources below, as in the
 /// issue: the dated line is line 4.
 const OPENS: &str = "2024-01-01 open Assets:A\n2024-01-01 open Expenses:B\n\n";
 
@@ -54,7 +57,6 @@ fn assert_counts(cases: &[(String, Vec<(usize, usize)>)]) {
 #[test]
 fn test_parse_dated_line_opening_no_directive_quiets_its_postings() {
     let cases: Vec<(String, Vec<(usize, usize)>)> = [
-        "2024-01-02 2024-01-03 * \"n\"",
         "2024-01-02 2024-01-03 \"n\"",
         "2024-01-02 123 * \"n\"",
         "2024-01-02 Assets:A * \"n\"",
@@ -123,30 +125,6 @@ fn test_parse_dated_line_variants() {
     ]);
 }
 
-/// A transaction header after the line's date is the one beancount builds:
-/// the lines under it are its body, so a line no transaction takes is an
-/// error (`  "s"`), postings are none, and the body ends at a blank or
-/// column-0 line, after which an indented line is an error again.
-#[test]
-fn test_parse_dated_line_resynchronized_transaction_body() {
-    assert_counts(&[
-        (
-            format!("{OPENS}2024-01-02 2024-01-03 * \"n\"\n  \"s\"\n  Assets:A  -1 USD\n"),
-            vec![(4, 1), (5, 1)],
-        ),
-        (
-            format!("{OPENS}2024-01-02 2024-01-03 * \"n\"\n* h\n  Assets:A  -1 USD\n"),
-            vec![(4, 1), (6, 1)],
-        ),
-        (
-            format!(
-                "{OPENS}2024-01-02 2024-01-03 * \"n\"\n  Assets:A  -1 USD\n\n  Expenses:B  1 USD\n"
-            ),
-            vec![(4, 1), (7, 1)],
-        ),
-    ]);
-}
-
 /// A dated line that opens no directive starts with a date bison shifts: in
 /// the window after a failed line, when that date is the last token owed,
 /// the line is reported (after a skipped comment line), and otherwise it is
@@ -165,27 +143,12 @@ fn test_parse_dated_line_in_a_recovery_window() {
     ]);
 }
 
-/// The state of a `pushtag` left open at the end of the file is still
-/// reported after a resynchronized transaction's body, whose comment line its
-/// error's span takes in.
+/// A declaration bison would shift on the dated line (a dated header after a
+/// blank, an undated declaration's keyword, glued to punctuation too) starts
+/// no window: the line and the lines under it keep their errors, as in
+/// beancount for these shapes.
 #[test]
-fn test_parse_dated_line_keeps_unclosed_pushtag() {
-    let src = format!("{OPENS}2024-01-02 2024/01/03 *\n  ; c\npushtag #a");
-    let errors = parse(&src).errors;
-    assert_eq!(errors.len(), 2, "{errors:?}");
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e.kind, ParseErrorKind::UnclosedPushtag(_))),
-        "{errors:?}"
-    );
-}
-
-/// An undated declaration after the date (`option`, `include`, `plugin`) is
-/// one bison shifts there, which ends its recovery: an indented line after it
-/// is reported (`unexpected INDENT` after an `option`).
-#[test]
-fn test_parse_dated_line_undated_declaration_ends_the_quiet() {
+fn test_parse_dated_line_shifted_declaration_starts_no_window() {
     assert_counts(&[
         (
             "2024-01-02 option \"a\" \"b\"\n  Assets:A 1 USD\n".to_string(),
@@ -199,32 +162,38 @@ fn test_parse_dated_line_undated_declaration_ends_the_quiet() {
             "2024-01-02 plugin \"n\"\n  !\n".to_string(),
             vec![(1, 1), (2, 1)],
         ),
-    ]);
-}
-
-/// A declaration bison shifts later on a quiet line ends the quiet there, and
-/// what comes after its first three tokens is reported again (the `open`
-/// after `custom "x" 1`), as are the lines under it.
-#[test]
-fn test_parse_dated_line_declaration_later_on_a_quiet_line() {
-    assert_counts(&[
         (
-            "2024-01-02 123\n  ; c\n2024-01-03 , 2024-01-04 custom \"x\" 1 open Assets:Z\n"
-                .to_string(),
-            vec![(1, 1), (3, 1)],
+            "2024-01-02 ~,option \"a\" \"b\"\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        ("2024-01-02 2024-01-03 open x\n".to_string(), vec![(1, 2)]),
+        (
+            "2024-01-02 2024-01-03 price USD x\n".to_string(),
+            vec![(1, 2)],
         ),
         (
-            "2024-01-02 123\n  ; c\n2024-01-03 , 2024-01-04 custom \"x\" 1\n".to_string(),
+            "2024-01-02 2024-01-03 open ^l USD #t\n".to_string(),
             vec![(1, 1)],
         ),
+        (
+            "2024-01-02 $x #t 2024-1-3 open \"s\" Assets:Z @\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "2024-01-02 2024-01-03 * \"n\"\n  k: \"abc\noption \"title\" \"x\"\n".to_string(),
+            vec![(1, 1), (2, 1), (3, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 2024-01-03 * \"n\"\n  k: \"abc\nx\n\"\n"),
+            vec![(4, 1), (5, 1)],
+        ),
     ]);
 }
 
-/// The declaration bison shifts after an invalid second date is built, and
-/// its defect after its first three tokens is reported beside the date's
-/// error: two errors on the line, as in beancount.
+/// An invalid second date followed by a declaration bison shifts keeps the
+/// line's error beside the date's: two, as in beancount.
 #[test]
-fn test_parse_dated_line_invalid_date_then_a_failing_declaration() {
+fn test_parse_dated_line_invalid_date_then_a_shifted_declaration() {
     let opens = "2024-01-01 open Assets:A\n2024-01-01 open Expenses:B\n";
     assert_counts(&[
         (
@@ -235,25 +204,48 @@ fn test_parse_dated_line_invalid_date_then_a_failing_declaration() {
             format!("{opens}2024-01-02 2024-02-30 2024-01-04 open Assets:Q \"x\"\n"),
             vec![(3, 2)],
         ),
+        (
+            "2024-01-02 2024-13-45 poptag #t\n".to_string(),
+            vec![(1, 2)],
+        ),
+        (
+            "2024-01-02 2024-02-30 * 2024-01-03 price A USD\n".to_string(),
+            vec![(1, 2)],
+        ),
     ]);
 }
 
-/// A resynchronized transaction's body runs on over a string that spans lines
-/// (`k: "abc` / `x` / `"`), as it does in a parse of that transaction.
+/// A line holding a declaration bison shifts ends the window before it, and
+/// keeps its errors (the `open` after `custom "x" 1`; the `poptag` of a tag
+/// never pushed).
 #[test]
-fn test_parse_dated_line_resynchronized_body_with_a_multi_line_string() {
+fn test_parse_dated_line_window_ends_at_a_shifted_declaration() {
     assert_counts(&[
         (
-            format!("{OPENS}2024-01-02 2024-01-03 * \"n\"\n  k: \"abc\nx\n\"\n"),
-            vec![(4, 1), (5, 1)],
+            "2024-01-02 123\n  ; c\n2024-01-03 , 2024-01-04 custom \"x\" 1 open Assets:Z\n"
+                .to_string(),
+            vec![(1, 1), (3, 1)],
         ),
         (
-            format!(
-                "{OPENS}2024-01-02 2024-01-03 * \"n\"\n  note: \"line one\nline two\"\n{POSTINGS}"
-            ),
-            vec![(4, 1)],
+            "2024-01-02 123\n2024-01-03 2024-01-04 poptag #t\n".to_string(),
+            vec![(1, 1), (2, 1)],
         ),
     ]);
+}
+
+/// The state of a `pushtag` left open at the end of the file is still
+/// reported after a dated line.
+#[test]
+fn test_parse_dated_line_keeps_unclosed_pushtag() {
+    let src = format!("{OPENS}2024-01-02 2024/01/03 *\n  ; c\npushtag #a");
+    let errors = parse(&src).errors;
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.kind, ParseErrorKind::UnclosedPushtag(_))),
+        "{errors:?}"
+    );
 }
 
 /// Directives that do open stay as they were: no errors.

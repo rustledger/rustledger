@@ -3808,7 +3808,7 @@ pub(super) fn tags_after_posting_error(
 ) -> crate::ParseError {
     crate::ParseError::new(
         crate::ParseErrorKind::SyntaxError(format!(
-            "{TAGS_AFTER_POSTING} \
+            "tags and links are not allowed after a transaction's first posting \
              (`{tags}`); write them on the header line or on a line before the first posting"
         )),
         Span::new(line_start + bom_offset as usize, end + bom_offset as usize),
@@ -10727,11 +10727,10 @@ fn report_no_metadata_continuations(
 /// beancount (`<BOM>Assets:A`, `<BOM>assets:A`: `bom_led_account`), where
 /// its grammar reduces the transaction before it fails at that token.
 ///
-/// Any other error the parser reports on the transaction's own lines counts
-/// too (`  2024-13-45`, `  5`; #2987, `fails_inside`): beancount's statement
-/// fails there as well, except at the two errors its builder reports while it
-/// still builds the transaction (a tag line after the first posting, a
-/// repeated metadata key).
+/// So does an error on the transaction's own lines at which beancount's
+/// grammar or lexer fails the statement (`  2024-13-45`, `  5`; #2987,
+/// `fails_inside`); an error its builder reports while it still builds the
+/// transaction, or one of rledger's own, leaves the residual reported.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
     let root = super::parser::parse_structured(source);
@@ -10750,20 +10749,11 @@ pub fn transaction_holds_invalid_token(source: &str) -> bool {
 }
 
 /// Whether the parser reports an error inside `range`, the transaction's own
-/// node in `source` (#2987). beancount's grammar fails the statement at any
-/// error on the transaction's lines, a grammar error (`  5`, `  1,,000 USD`)
-/// as well as one of its lexer's (`  2024-13-45`, `  1,50`), and its recovery
-/// discards the transaction. Here the transaction is kept with what the
-/// parser could read, so the errors the parser itself reports there decide,
-/// and no second copy of its rules is needed. `holds_an_invalid_token`
-/// already answers for an invalid token, so this runs the full parse only
-/// for a transaction that holds none.
-///
-/// Three of those errors are its builder's, not its grammar's: beancount
-/// reports them (`Tags or links not allowed after first Posting`,
-/// `Duplicate metadata field on entry`, `Duplicate posting metadata field`)
-/// and still builds the transaction, so they do not count
-/// ([`builds_the_transaction_anyway`]).
+/// node in `source`, at which beancount's grammar or lexer fails the
+/// statement (#2987, [`fails_the_statement`]). Its recovery then discards the
+/// transaction: no residual. `holds_an_invalid_token` already answers for an
+/// invalid token, so this runs the full parse only for a transaction that
+/// holds none.
 fn fails_inside(source: &str, range: rowan::TextRange) -> bool {
     // `source` starts at the transaction's date, so it has no leading BOM
     // and the parser's spans are the tree's offsets.
@@ -10771,48 +10761,45 @@ fn fails_inside(source: &str, range: rowan::TextRange) -> bool {
     crate::parse(source)
         .errors
         .iter()
-        .any(|e| span.contains(&e.span.start) && !builds_the_transaction_anyway(&e.kind))
+        .any(|e| span.contains(&e.span.start) && fails_the_statement(&e.kind))
 }
 
-/// Whether `kind` is an error beancount's transaction builder reports while
-/// it still builds the transaction (#2987): a `#tag` / `^link` line after the
-/// first posting ([`tags_after_posting_error`], #2575) or a repeated metadata
-/// key (`report_duplicate_metadata`, #2893). The messages are matched by the
-/// constants their reports are built from, so the two cannot drift apart.
+/// Whether `kind` is an error at which beancount's lexer or grammar fails a
+/// statement, so its recovery builds no transaction there (#2987): a date
+/// that is no calendar date (its lexer raises), a character or string its
+/// lexer refuses, and the parser's grammar failures, "unexpected input" (the
+/// line's tokens fit no rule; `  5`, `  "s"`, `  1,50`) and an unclosed cost
+/// spec.
 ///
-/// A mid-file BOM's own report (`BomInDirectiveBody`) does not count either:
-/// where the BOM is part of an invalid run, `holds_an_invalid_token` answers
-/// for it, and where beancount reads it into an account
-/// (`  <BOM>Assets:A  2 USD`, `is_bom_account_token`) beancount reports
-/// nothing and keeps the transaction. Nor does the pipe between payee and
-/// narration (`"p" | "n"`, `DeprecatedPipeSymbol`), which beancount's grammar
-/// still accepts.
-fn builds_the_transaction_anyway(kind: &crate::ParseErrorKind) -> bool {
+/// An allow-list on purpose: every other error keeps the transaction's
+/// residual. Those include the checks beancount's builder makes while it
+/// still builds the transaction (a duplicate cost, a negative price, cost and
+/// price currencies that differ, a tag line after the first posting, a
+/// repeated metadata key) and rledger's own diagnostics that beancount does
+/// not give (an amount past `Decimal`'s precision, the deprecated pipe, a
+/// BOM read into an account, trailing tokens after an amount that beancount
+/// reads as one number, `1,,000`). A new diagnostic is on that side too until
+/// it is added here, so it can only leave a residual reported, never drop one
+/// beancount reports. "unexpected input" is the parser's one generic grammar
+/// error, identified by its message as the other recovery passes do.
+fn fails_the_statement(kind: &crate::ParseErrorKind) -> bool {
+    use crate::ParseErrorKind as K;
     match kind {
-        crate::ParseErrorKind::BomInDirectiveBody | crate::ParseErrorKind::DeprecatedPipeSymbol => {
-            true
+        K::InvalidDate(_)
+        | K::InvalidDateValue(_)
+        | K::UnexpectedChar(_)
+        | K::UnexpectedEof
+        | K::UnclosedString
+        | K::InvalidEscape(_)
+        | K::IndentationError => true,
+        K::SyntaxError(message) => {
+            message == "unexpected input"
+                || message.starts_with("unexpected input: ")
+                || message.starts_with("unclosed cost specification")
         }
-        crate::ParseErrorKind::SyntaxError(message) => [
-            TAGS_AFTER_POSTING,
-            DUPLICATE_ENTRY_META,
-            DUPLICATE_POSTING_META,
-        ]
-        .iter()
-        .any(|prefix| message.starts_with(prefix)),
         _ => false,
     }
 }
-
-/// The start of the error for a tag/link line after a transaction's first
-/// posting ([`tags_after_posting_error`]).
-const TAGS_AFTER_POSTING: &str =
-    "tags and links are not allowed after a transaction's first posting";
-/// The start of the error for a repeated metadata key on a transaction
-/// (`report_duplicate_metadata`).
-const DUPLICATE_ENTRY_META: &str = "duplicate metadata field on entry";
-/// The start of the error for a repeated metadata key on a posting
-/// (`report_duplicate_metadata`).
-const DUPLICATE_POSTING_META: &str = "duplicate posting metadata field";
 
 /// Whether `first`, the first token of the line after a transaction's block,
 /// starts that line and is a token beancount's lexer rejects (#2976): an
@@ -11029,7 +11016,7 @@ fn report_duplicate_metadata(
             let mut header_end: Option<usize> = None;
             let mut messages: Vec<String> = repeats(txn, offset, &[], &has_error)
                 .into_iter()
-                .map(|key| format!("{DUPLICATE_ENTRY_META}: `{key}`"))
+                .map(|key| format!("duplicate metadata field on entry: `{key}`"))
                 .collect();
             let mut at = offset;
             for part in txn.children() {
@@ -11050,11 +11037,11 @@ fn report_duplicate_metadata(
                         for key in repeats(posting, at, &POSTING_LOCATION_KEYS, &has_error) {
                             messages.push(if matches!(key, "filename" | "lineno") {
                                 format!(
-                                    "{DUPLICATE_POSTING_META} `{key}`: beancount \
+                                    "duplicate posting metadata field `{key}`: beancount \
                                      sets `filename` and `lineno` on every posting itself"
                                 )
                             } else {
-                                format!("{DUPLICATE_POSTING_META}: `{key}`")
+                                format!("duplicate posting metadata field: `{key}`")
                             });
                         }
                     }

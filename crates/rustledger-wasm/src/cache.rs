@@ -612,9 +612,9 @@ use crate::types::{Error, LedgerOptions};
 /// transaction with a parse error on its own lines (an indented
 /// `2024-13-45`, `1,50`, `5`), or followed directly by a directive whose date
 /// is no calendar date (`2024-02-30 open Assets:C`), has no balance residual
-/// (`E3001`) reported, as beancount discards it; a tag line after the first
-/// posting or a repeated metadata key, which beancount's builder reports
-/// while it keeps the transaction, still has it reported. Every such source
+/// (`E3001`) reported, as beancount discards it; an error beancount's builder
+/// reports while it keeps the transaction, or one of rledger's own, still has
+/// it reported. Every such source
 /// has a parse error, before and after, which the loader's cache is never
 /// saved for; parse errors and parsed directives do not move. Both payloads
 /// here archive validation findings, and an older blob would keep serving the

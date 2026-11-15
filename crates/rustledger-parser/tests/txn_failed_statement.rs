@@ -1,12 +1,12 @@
 //! A transaction whose own lines hold a parse error, or that a directive with
 //! a date that is no calendar date follows (#2987).
 //!
-//! bean-check 3.2.3 fails the statement at any error on the transaction's
-//! lines, a grammar error as well as one of its lexer's, and its recovery
-//! discards the transaction: no balance residual is reported. Two of the
-//! errors it reports there are its builder's, which still builds the
-//! transaction: a tag or link line after the first posting, and a repeated
-//! metadata key; there the residual is reported. Every expectation here was
+//! bean-check 3.2.3 fails the statement at a grammar or lexer error on the
+//! transaction's lines (`  5`, `  2024-13-45`), and its recovery
+//! discards the transaction: no balance residual is reported. The errors its
+//! builder reports while it still builds the transaction (a duplicate cost, a
+//! negative price, a tag line after the first posting, a repeated metadata
+//! key) and rledger's own diagnostics keep it. Every expectation here was
 //! checked against `beancount.loader.load_string` (bean-check 3.2.3).
 
 use rustledger_parser::transaction_holds_invalid_token;
@@ -66,32 +66,57 @@ fn test_transaction_holds_invalid_token_counts_an_invalid_date_directive_after_i
     }
 }
 
-/// beancount's builder reports these and still builds the transaction, so
-/// its residual is reported.
+/// beancount's builder reports these and still builds the transaction, and
+/// rledger's own diagnostics are none of beancount's: the transaction is kept
+/// either way, so its residual is checked.
 #[test]
-fn test_transaction_holds_invalid_token_keeps_a_transaction_its_builder_refuses_a_part_of() {
-    for body in [
-        // A tag or link line after the first posting.
-        "  Assets:A  1 USD\n  Equity:E  -2 USD\n  #t\n",
-        "  Assets:A  1 USD\n  ^l\n  Equity:E  -2 USD\n",
-        "  Assets:A  1 USD\n  Equity:E  -2 USD\n  #t #u\n",
-        // A repeated metadata key, on the transaction and on a posting.
-        "  kk: \"1\"\n  kk: \"2\"\n  Assets:A  1 USD\n  Equity:E  -2 USD\n",
-        "  Assets:A  1 USD\n    pp: 1\n    pp: 2\n  Equity:E  -2 USD\n",
+fn test_transaction_holds_invalid_token_keeps_a_transaction_beancount_builds() {
+    for line in [
+        // A duplicate cost, date or label, cost merging, a duplicate merge
+        // spec in a cost spec.
+        "  Assets:H  1 HOO {1 USD, 2 USD}",
+        "  Assets:H  1 HOO {1 USD, 1 USD}",
+        "  Assets:H  1 HOO {1 USD, 2 USD, 3 USD}",
+        "  Assets:H  1 HOO {{1 USD, 2 USD}}",
+        "  Assets:H  -1 HOO {1 USD, 2 USD}",
+        "  Assets:H  1 HOO {1 USD, 2024-01-01, 2024-01-01}",
+        "  Assets:H  1 HOO {1 USD, \"a\", \"a\"}",
+        "  Assets:H  1 HOO {1 USD, *}",
+        "  Assets:H  1 HOO {*, *}",
+        // A negative price.
+        "  Assets:H  1 HOO @ -1 USD",
+        "  Assets:H  1 HOO @@ -1 USD",
+        "  Assets:H  1 HOO @ -1*1 USD",
+        "  Assets:H  1 HOO @ (-1) USD",
+        "  Assets:H  1 HOO @ 1-2 USD",
+        // A per-unit cost inside `{{ }}`.
+        "  Assets:H  1 HOO {{1 # 2 USD}}",
+        // Cost and price currencies that differ.
+        "  Assets:H  1 HOO {1 USD} @ 2 EUR",
+        "  Assets:H  1 HOO {1 USD} @@ 2 EUR",
+        // A tag or link line after the first posting, a repeated metadata
+        // key on the transaction and on a posting.
+        "  #t",
+        "  #t ^l",
+        "  kk: \"1\"\n  kk: \"2\"",
+        "    pp: 1\n    pp: 2",
+        // rledger's own: a number beancount reads (`1,,000` is 1000 there),
+        // an amount past `Decimal`'s precision, a BOM beancount reads into
+        // an account.
+        "  Assets:A  1,,000 USD",
+        "  Assets:A  123456789012345678901234567890 USD",
+        "  \u{feff}Assets:A  1 USD",
     ] {
-        let src = format!("2024-01-02 * \"x\"\n{body}");
+        let src = format!("2024-01-02 * \"x\"\n  Assets:A  1 USD\n{line}\n  Equity:E  -2 USD\n");
+        assert!(!transaction_holds_invalid_token(&src), "{src:?}");
+        let src = src.replace('\n', "\r\n");
         assert!(!transaction_holds_invalid_token(&src), "{src:?}");
     }
-    // Notices beancount does not give at all: the pipe between payee and
-    // narration, which its grammar accepts, and a BOM it reads into an
-    // account.
-    for src in [
-        "2024-01-02 * \"p\" | \"n\"\n  Assets:A  1 USD\n  Equity:E  -2 USD\n",
-        "2024-01-02 * \"x\"\n  Assets:A  1 USD\n  \u{feff}Equity:E  -2 USD\n",
-    ] {
-        assert!(!transaction_holds_invalid_token(src), "{src:?}");
-    }
-    // A tag line after the first posting, then an error: discarded.
+    // The deprecated pipe between payee and narration, which beancount's
+    // grammar accepts.
+    let src = "2024-01-02 * \"p\" | \"n\"\n  Assets:A  1 USD\n  Equity:E  -2 USD\n";
+    assert!(!transaction_holds_invalid_token(src), "{src:?}");
+    // A tag line after the first posting, then a grammar error: discarded.
     let src = txn("  #t\n  5\n");
     assert!(transaction_holds_invalid_token(&src), "{src:?}");
 }

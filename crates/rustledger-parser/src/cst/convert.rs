@@ -10726,6 +10726,11 @@ fn report_no_metadata_continuations(
 /// (an account, a number, `~`, `*`) or with BOMs that start an account in
 /// beancount (`<BOM>Assets:A`, `<BOM>assets:A`: `bom_led_account`), where
 /// its grammar reduces the transaction before it fails at that token.
+///
+/// So does an error on the transaction's own lines at which beancount's
+/// grammar or lexer fails the statement (`  2024-13-45`, `  5`; #2987,
+/// `fails_inside`); an error its builder reports while it still builds the
+/// transaction, or one of rledger's own, leaves the residual reported.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
     let root = super::parser::parse_structured(source);
@@ -10740,6 +10745,60 @@ pub fn transaction_holds_invalid_token(source: &str) -> bool {
             .next_sibling()
             .and_then(|next| next.first_token())
             .is_some_and(|t| line_leads_with_an_invalid_token(source, &t))
+        || fails_inside(source, txn.text_range())
+}
+
+/// Whether the parser reports an error inside `range`, the transaction's own
+/// node in `source`, at which beancount's grammar or lexer fails the
+/// statement (#2987, [`fails_the_statement`]). Its recovery then discards the
+/// transaction: no residual. `holds_an_invalid_token` already answers for an
+/// invalid token, so this runs the full parse only for a transaction that
+/// holds none.
+fn fails_inside(source: &str, range: rowan::TextRange) -> bool {
+    // `source` starts at the transaction's date, so it has no leading BOM
+    // and the parser's spans are the tree's offsets.
+    let span = usize::from(range.start())..usize::from(range.end());
+    crate::parse(source)
+        .errors
+        .iter()
+        .any(|e| span.contains(&e.span.start) && fails_the_statement(&e.kind))
+}
+
+/// Whether `kind` is an error at which beancount's lexer or grammar fails a
+/// statement, so its recovery builds no transaction there (#2987): a date
+/// that is no calendar date (its lexer raises), a character or string its
+/// lexer refuses, and the parser's grammar failures, "unexpected input" (the
+/// line's tokens fit no rule; `  5`, `  "s"`, `  1,50`) and an unclosed cost
+/// spec.
+///
+/// An allow-list on purpose: every other error keeps the transaction's
+/// residual. Those include the checks beancount's builder makes while it
+/// still builds the transaction (a duplicate cost, a negative price, cost and
+/// price currencies that differ, a tag line after the first posting, a
+/// repeated metadata key) and rledger's own diagnostics that beancount does
+/// not give (an amount past `Decimal`'s precision, the deprecated pipe, a
+/// BOM read into an account, trailing tokens after an amount that beancount
+/// reads as one number, `1,,000`). A new diagnostic is on that side too until
+/// it is added here, so it can only leave a residual reported, never drop one
+/// beancount reports. "unexpected input" is the parser's one generic grammar
+/// error, identified by its message as the other recovery passes do.
+fn fails_the_statement(kind: &crate::ParseErrorKind) -> bool {
+    use crate::ParseErrorKind as K;
+    match kind {
+        K::InvalidDate(_)
+        | K::InvalidDateValue(_)
+        | K::UnexpectedChar(_)
+        | K::UnexpectedEof
+        | K::UnclosedString
+        | K::InvalidEscape(_)
+        | K::IndentationError => true,
+        K::SyntaxError(message) => {
+            message == "unexpected input"
+                || message.starts_with("unexpected input: ")
+                || message.starts_with("unclosed cost specification")
+        }
+        _ => false,
+    }
 }
 
 /// Whether `first`, the first token of the line after a transaction's block,

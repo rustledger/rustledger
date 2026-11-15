@@ -93,6 +93,28 @@ fn test_parse_capital_glued_to_a_string_in_the_flag_position() {
     // quote that opens a string of its own.
     let src = format!("{OPENS}2024-01-02 T\"x\n  Assets:A  1 USD\n  Assets:B \"\n");
     assert_eq!(per_line(&src), vec![(3, 1), (5, 1)], "{src:?}");
+    // A `%` comment glued to the capital, past a blank: `T%x` and `y`.
+    for src in [
+        format!("{OPENS}2024-01-02 T%x y\n{postings}"),
+        format!("{OPENS}2024-01-02 T%x y\n{postings}").replace('\n', "\r\n"),
+    ] {
+        assert_eq!(per_line(&src), vec![(3, 2)], "{src:?}");
+    }
+}
+
+/// A ` T(` inside a string is no lone capital: the dated window over a failed
+/// line (#2979) is not given up for it, so the postings under
+/// `2024-01-02 ~ "a T("` are quiet, as in beancount, where they were each
+/// reported.
+#[test]
+fn test_parse_capital_inside_a_string_does_not_end_the_dated_window() {
+    for src in [
+        format!("{OPENS}2024-01-02 ~ \"a T(\"\n  Assets:A  1 USD\n  Assets:B\n"),
+        format!("{OPENS}2024-01-02 ~ \"a T(\"\n  Assets:A  1 USD\n  Assets:B\n")
+            .replace('\n', "\r\n"),
+    ] {
+        assert_eq!(per_line(&src), vec![(3, 1)], "{src:?}");
+    }
 }
 
 /// What did not change: a string that closes inside the run keeps the

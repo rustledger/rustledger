@@ -9853,7 +9853,9 @@ fn quiet_after_invalid_tokens(
 /// no window, and a line holding one ends a window before it, keeping its
 /// errors. A failed dated line inside a quiet window starts with a date bison
 /// shifts, so when that is the last token owed, the line is reported and
-/// starts a window of its own.
+/// starts a window of its own (in a dated line's window a date alone on its
+/// line counts too). A line a BOM starts inside a dated line's window starts
+/// its own window there, under the BOM line's rules above.
 ///
 /// A mid-file BOM at the start of a line is beancount's invalid token, so the
 /// statement it is in, or starts, fails right there, and bison's recovery
@@ -9965,29 +9967,61 @@ fn quiet_after_failed_line_starts(
     // account, ...: `identify_directive` opens no node for the line), so the
     // indented lines under it are as quiet as after a BOM line, where each was
     // an orphan `unexpected input` here.
+    // Every column-0 line that starts with a date and opens no directive, by
+    // where it starts, and whether a token follows the date on it.
+    let dated_lines: Vec<(usize, bool)> = items
+        .iter()
+        .filter_map(|&(pos, kind)| {
+            let at_line_start = pos == 0 || stripped.as_bytes()[pos - 1] == b'\n';
+            if kind != K::ERROR_NODE || !at_line_start {
+                return None;
+            }
+            let n = crate::logos_lexer::leading_date_len(&stripped[pos..])?;
+            let rest = &stripped[pos + n..];
+            let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+            let after = line.trim_start_matches([' ', '\t']);
+            if !(line.is_empty() || line.len() > after.len() || line == "\r") {
+                return None;
+            }
+            Some((
+                pos,
+                !after.trim_end_matches('\r').is_empty() && !after.starts_with(';'),
+            ))
+        })
+        .collect();
+    // A date with nothing after it but blanks or a comment starts no window:
+    // beancount fails there at the line's end, which it reports on the next
+    // line, and that is not modeled here.
     let mut triggers: Vec<(usize, bool)> = invalid
         .iter()
         .filter(|r| is_line_start_bom_token(stripped, r.start, &stripped[(*r).clone()]))
         .map(|r| (r.start, false))
-        .chain(items.iter().filter_map(|&(pos, kind)| {
-            let at_line_start = pos == 0 || stripped.as_bytes()[pos - 1] == b'\n';
-            // A date with nothing after it but blanks or a comment is not one:
-            // beancount fails there at the line's end, which it reports on the
-            // next line, and that is not modeled here.
-            let dated = crate::logos_lexer::leading_date_len(&stripped[pos..]).is_some_and(|n| {
-                let rest = &stripped[pos + n..];
-                let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
-                let after = line.trim_start_matches([' ', '\t']);
-                line.len() > after.len()
-                    && !after.trim_end_matches('\r').is_empty()
-                    && !after.starts_with(';')
-            });
-            (kind == K::ERROR_NODE && at_line_start && dated).then_some((pos, true))
-        }))
+        .chain(
+            dated_lines
+                .iter()
+                .filter(|&&(_, token_after)| token_after)
+                .map(|&(pos, _)| (pos, true)),
+        )
         .collect();
     triggers.sort_unstable_by_key(|&(start, _)| start);
-    // Whether a column-0 line at `pos` is one of the dated lines above.
-    let dated_line_at = |pos: usize| triggers.binary_search(&(pos, true)).is_ok();
+    // Whether a column-0 line at `pos` starts with a date and opens no
+    // directive: bison shifts that date. After a BOM line only one with a
+    // token after the date counts, as before (#2956); after a dated line a
+    // date alone (`2024-01-02`) counts too.
+    let dated_line_at = |pos: usize, in_dated_window: bool| {
+        dated_lines
+            .binary_search_by_key(&pos, |&(start, _)| start)
+            .is_ok_and(|i| in_dated_window || dated_lines[i].1)
+    };
+    // Whether a line a BOM starts begins in `from..=to`: such a line has its
+    // own window (#2956), which a dated line's window hands over to there.
+    let bom_line_in = |from: usize, to: usize| {
+        let i = triggers.partition_point(|&(start, _)| start < from);
+        triggers[i..]
+            .iter()
+            .take_while(|&&(start, _)| start <= to)
+            .any(|&(_, dated)| !dated)
+    };
     // Where bison's recovery shifts a declaration on `line` and ends: after a
     // dated line, any declaration ([`first_resync_point`]); after a BOM line,
     // a dated header after a blank ([`first_dated_header`]), as #2956 models
@@ -10026,6 +10060,11 @@ fn quiet_after_failed_line_starts(
             // The line with its `\n`, so a `\r` before it lexes as the line
             // ending's, not as a stray one at the end of the input.
             let with_ending = &stripped[pos..(line_end + 1).min(stripped.len())];
+            // A line a BOM starts inside a dated line's window starts its own
+            // window there, under #2956's rules.
+            if dated_line && bom_line_in(pos, line_end) {
+                break;
+            }
             if line.trim_matches([' ', '\t', '\r']).is_empty()
                 || crate::logos_lexer::beancount_ignores_line(line)
             {
@@ -10045,7 +10084,7 @@ fn quiet_after_failed_line_starts(
                 // After a dated line, a line holding a declaration bison shifts
                 // ends the window before it: that line keeps its errors.
                 if starts_directive
-                    || (owed == 1 && dated_line_at(pos))
+                    || (owed == 1 && dated_line_at(pos, dated_line))
                     || (dated_line && ends_recovery(with_ending, true))
                 {
                     break;

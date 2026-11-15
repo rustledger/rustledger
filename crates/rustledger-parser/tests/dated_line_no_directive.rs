@@ -248,6 +248,47 @@ fn test_parse_dated_line_keeps_unclosed_pushtag() {
     );
 }
 
+/// A line a BOM starts inside a dated line's window starts its own window
+/// there, under the BOM line's rules (#2956), which keep the line after it
+/// quiet even when that line holds a declaration bison would shift.
+#[test]
+fn test_parse_dated_line_window_hands_over_to_a_bom_line() {
+    let cases: Vec<(String, Vec<(usize, usize)>)> = [
+        "  option \"a\" \"b\"",
+        "  ~,option \"a\" \"b\"",
+        "  2024-01-04 * \"x\"",
+    ]
+    .iter()
+    .map(|third| {
+        (
+            format!("2024-01-02 123\n\u{feff}  Assets:A 1 USD\n{third}\n"),
+            vec![(1, 1), (2, 1)],
+        )
+    })
+    .collect();
+    assert_counts(&cases);
+}
+
+/// A date alone on its line, where the window owes its last token, is a
+/// date bison shifts: the window ends and the line keeps its error.
+#[test]
+fn test_parse_dated_line_lone_date_at_the_last_owed_token() {
+    assert_counts(&[
+        (
+            "2024-01-02 123\n\n2024-01-02".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+        (
+            "2024-01-02 123\n;c\n2024-01-02".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+        (
+            "\n2024-01-02 { $x\n\n2024-01-02".to_string(),
+            vec![(2, 2), (4, 1)],
+        ),
+    ]);
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

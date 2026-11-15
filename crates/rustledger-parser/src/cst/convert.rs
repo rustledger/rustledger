@@ -11099,25 +11099,71 @@ fn name_mid_line_hash_comments(errors: &mut [crate::ParseError], stripped: &str,
             prev_hash = Some(span.start);
         }
     }
+    // Linear in the source and the error list (#2989). Each marker used to
+    // scan back to its line's start and through every error, so a line of
+    // `#!#!...` cost its length once per marker. The markers come in order,
+    // so the line start is carried forward from the last one, and each
+    // line's first non-blank is found once. A marker's window of errors,
+    // `line_start..=at` or `at` alone, never starts before the last one's,
+    // and an error moved to a marker's `#` is before every later window: so
+    // on a list sorted by start (as `parse_via_cst_inner` leaves it) a
+    // cursor finds the same first match a search from the front did.
+    let bytes = stripped.as_bytes();
+    let sorted = errors.is_sorted_by_key(|e| e.span.start);
+    let mut cursor = 0;
+    let mut scanned_to = 0;
+    let mut line_start = 0;
+    let mut first_non_blank: Option<usize> = None;
     for at in markers {
         let marker = &stripped[at..at + 2];
-        let line_start = stripped[..at].rfind('\n').map_or(0, |i| i + 1);
+        #[cfg(test)]
+        crate::logos_lexer::test_counters::MID_LINE_MARKER_STEPS
+            .with(|c| c.set(c.get() + (at - scanned_to)));
+        if let Some(i) = bytes[scanned_to..at].iter().rposition(|&b| b == b'\n') {
+            line_start = scanned_to + i + 1;
+            first_non_blank = None;
+        }
+        scanned_to = at;
         // Only a marker that leads its line (after its indentation) stands
         // for the line's whole error. After another token, an error before
         // the `#` is that token's (`$x #+y`, a stray `\r`), and only one the
         // line reports at the `#` itself is the marker's.
-        let leads = stripped[line_start..at]
-            .trim_start_matches([' ', '\t'])
-            .is_empty();
-        let Some(e) = errors.iter_mut().find(|e| {
-            e.span.start.checked_sub(bom).is_some_and(|s| {
-                if leads {
-                    (line_start..=at).contains(&s)
-                } else {
-                    s == at
-                }
-            })
-        }) else {
+        let non_blank = *first_non_blank.get_or_insert_with(|| {
+            let blanks = bytes[line_start..]
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t')
+                .unwrap_or(bytes.len() - line_start);
+            #[cfg(test)]
+            crate::logos_lexer::test_counters::MID_LINE_MARKER_STEPS
+                .with(|c| c.set(c.get() + blanks));
+            line_start + blanks
+        });
+        let leads = non_blank >= at;
+        let lo = if leads { line_start } else { at };
+        let in_window = |e: &crate::ParseError| {
+            e.span
+                .start
+                .checked_sub(bom)
+                .is_some_and(|s| (lo..=at).contains(&s))
+        };
+        let found = if sorted {
+            while errors
+                .get(cursor)
+                .is_some_and(|e| e.span.start.checked_sub(bom).is_none_or(|s| s < lo))
+            {
+                cursor += 1;
+                #[cfg(test)]
+                crate::logos_lexer::test_counters::MID_LINE_MARKER_STEPS
+                    .with(|c| c.set(c.get() + 1));
+            }
+            errors.get_mut(cursor).filter(|e| in_window(e))
+        } else {
+            #[cfg(test)]
+            crate::logos_lexer::test_counters::MID_LINE_MARKER_STEPS
+                .with(|c| c.set(c.get() + errors.len()));
+            errors.iter_mut().find(|e| in_window(e))
+        };
+        let Some(e) = found else {
             continue;
         };
         let crate::ParseErrorKind::SyntaxError(msg) = &e.kind else {

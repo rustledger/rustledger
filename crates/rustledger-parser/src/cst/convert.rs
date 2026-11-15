@@ -10068,17 +10068,16 @@ fn quiet_after_failed_line_starts(
             #[cfg(test)]
             crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
                 .with(|c| c.set(c.get() + (end - prev_start)));
-            let i = errors.partition_point(|e| e.span.start < prev_start + off);
-            if errors.get(i).is_some_and(|e| e.span.start < end + off) {
-                return true;
-            }
             let prev = &stripped[prev_start..end - 1];
-            if !(prev.trim_matches([' ', '\t', '\r']).is_empty()
-                || crate::logos_lexer::beancount_ignores_line(prev))
-            {
-                return false;
+            // A blank or skipped line, in beancount's reading (a stray `\r`
+            // before a comment included), is looked past, whatever this
+            // parser reports on it.
+            if blank_or_comment_line(prev) || crate::logos_lexer::beancount_ignores_line(prev) {
+                end = prev_start;
+                continue;
             }
-            end = prev_start;
+            let i = errors.partition_point(|e| e.span.start < prev_start + off);
+            return errors.get(i).is_some_and(|e| e.span.start < end + off);
         }
         false
     };
@@ -10104,6 +10103,7 @@ fn quiet_after_failed_line_starts(
             && end <= (line_end + 1).min(stripped.len())
             && !dated_line_at(pos)
             && !crate::logos_lexer::beancount_ignores_line(&stripped[pos..line_end])
+            && !blank_or_comment_line(&stripped[pos..line_end])
             && !after_a_failed_line(pos)
             && fails())
         .then_some((pos, Trigger::Unreadable))
@@ -10240,6 +10240,7 @@ fn quiet_after_failed_line_starts(
             }
             if line.trim_matches([' ', '\t', '\r']).is_empty()
                 || crate::logos_lexer::beancount_ignores_line(line)
+                || (kind == Trigger::Unreadable && blank_or_comment_line(line))
             {
                 owed -= 1;
                 if owed == 0 {
@@ -10435,7 +10436,20 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
     })
 }
 
-/// Whether `line`, past its first word if `skip_first_word`, may hold a token
+/// Whether beancount reads `line` as a blank line: nothing but blanks and
+/// stray `\r`s (its lexer skips `[ \t\r]+`), then nothing or a `;` comment
+/// (`;.*`). This parser reads a stray `\r` before a comment as an error of its
+/// own (`\r;c`), which the recovery windows of
+/// [`quiet_after_failed_line_starts`] after an unreadable line must not take
+/// for a line with tokens (#2993).
+fn blank_or_comment_line(line: &str) -> bool {
+    let rest = line.trim_start_matches([' ', '\t', '\r']);
+    rest.is_empty() || rest.starts_with(';')
+}
+
+/// Whether `line`, past its first character if `skip_first_char` (the start
+/// of the token the line's statement failed at; a date glued right after it,
+/// `@2024-1-2`, is one bison shifts), may hold a token
 /// beancount's grammar shifts while it recovers from an error (#2993): its
 /// only error rule is `declarations: declarations error`, so it discards
 /// every token but one a `declarations` can take next, an end of line, a date
@@ -10447,15 +10461,15 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
 /// substring. That finds every such token, and some text that is none (inside
 /// a string or an invalid run), where the line then keeps its errors, which is
 /// the side this pass errs on. Linear in the line.
-fn holds_a_recovery_shift(line: &str, skip_first_word: bool) -> bool {
+fn holds_a_recovery_shift(line: &str, skip_first_char: bool) -> bool {
     const KEYWORDS: [&str; 7] = [
         "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
     ];
     #[cfg(test)]
     crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
         .with(|c| c.set(c.get() + line.len()));
-    let rest = if skip_first_word {
-        line.find([' ', '\t']).map_or("", |i| &line[i..])
+    let rest = if skip_first_char {
+        line.char_indices().nth(1).map_or("", |(i, _)| &line[i..])
     } else {
         line
     };

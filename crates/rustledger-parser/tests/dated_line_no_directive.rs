@@ -361,6 +361,62 @@ fn test_parse_dated_line_invalid_second_date_after_an_error_line() {
     assert!(counts.contains(&(3, 2)), "{counts:?}");
 }
 
+/// A lone capital after a second date is a transaction's flag to beancount,
+/// which shifts that header: the line starts no window, so the lines after
+/// it keep their errors.
+#[test]
+fn test_parse_dated_line_lone_capital_flag_starts_no_window() {
+    let open = "2024-01-01 open Assets:A\n\n";
+    assert_counts(&[
+        (
+            format!("{open}2024-01-02 2024-01-03 T\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 2024-01-03 T\n;c\n  Assets:A 1 USD\n"),
+            vec![(3, 1), (5, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 2024-01-03 P\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 2024-01-03 T \"n\"\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+        (
+            format!("{open}2024-01-02 2024-01-03 T ; c\n#x\n"),
+            vec![(3, 1), (4, 1)],
+        ),
+    ]);
+}
+
+/// A lone capital glued to the line's end is an invalid token of its own to
+/// beancount, so the line keeps its error beside the invalid date's.
+#[test]
+fn test_parse_dated_line_invalid_second_date_then_a_glued_lone_capital() {
+    assert_counts(&[
+        (
+            "2024-01-01 open Assets:A\r\n\r\n2024-01-02 2024-13-45 T\r\n".to_string(),
+            vec![(3, 2)],
+        ),
+        (
+            "2024-01-01 open Assets:A\n\n2024-01-02 2024-13-45 T".to_string(),
+            vec![(3, 2)],
+        ),
+        (
+            "2024-01-02 2024-13-45 : 2024-00-10 T\r\n".to_string(),
+            vec![(1, 3)],
+        ),
+        ("2024-01-02 2024-13-45 : 2024-00-10 T".to_string(), vec![(1, 3)]),
+        (
+            "2024-01-01 open Assets:A\n2024-01-01 balance Assets:A 0 USD\n2023-12-31 2024-13-45 USD T\r\n"
+                .to_string(),
+            vec![(3, 2)],
+        ),
+    ]);
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

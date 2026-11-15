@@ -10009,7 +10009,7 @@ fn quiet_after_failed_line_starts(
         if dated_line {
             first_resync_point(line).is_some()
         } else {
-            first_dated_header(line).is_some()
+            first_dated_header(line, false).is_some()
         }
     };
     // The dated lines whose `unexpected input` stands for an invalid date
@@ -10048,7 +10048,15 @@ fn quiet_after_failed_line_starts(
                 crate::logos_lexer::leading_date_len(rest)
                     .is_some_and(|m| parse_date_token(&rest[..m]).is_none())
             });
-            if second_date_invalid && !after_an_error_line && first_resync_point(line).is_none() {
+            // Nor when a lone capital glued to the line's end (`T\r`, `T` at
+            // the end of the input) is an invalid token of its own there.
+            let with_ending = &stripped[start..(line_end + 1).min(stripped.len())];
+            let glued_capital = holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
+            if second_date_invalid
+                && !after_an_error_line
+                && !glued_capital
+                && first_resync_point(line).is_none()
+            {
                 invalid_second_dates.push(start);
             }
         }
@@ -10243,7 +10251,7 @@ fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
 /// starts a transaction. Linear in the line.
 fn first_resync_point(line: &str) -> Option<(bool, usize)> {
     use crate::logos_lexer::{Token, TokenIter};
-    let dated = first_dated_header(line);
+    let dated = first_dated_header(line, true);
     // Not only after a blank: glued to punctuation (`~,option`) the keyword
     // is a token of its own too, and shifted the same.
     let undated = TokenIter::new_mid_line(line, true, 0).find_map(|(token, span)| {
@@ -10272,11 +10280,12 @@ fn first_resync_point(line: &str) -> Option<(bool, usize)> {
 /// that its quiet after an error ends there (`quiet_after_failed_line_starts`),
 /// with where its date starts in `line`: `true` when it starts a transaction
 /// (a flag or `txn` after the date), `false` when it starts another directive
-/// (a keyword after it). A date glued to what comes before it
-/// (`<BOM>2024-01-02`) is part of beancount's invalid token, not one. Linear
+/// (a keyword after it). With `lone_capital_flag`, a lone capital after the
+/// date counts as a transaction flag, as beancount reads it. A date glued to
+/// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid token, not one. Linear
 /// in the line, which it lexes from its start as the middle of a line, so no
 /// line-start rule hides any of it.
-fn first_dated_header(line: &str) -> Option<(bool, usize)> {
+fn first_dated_header(line: &str, lone_capital_flag: bool) -> Option<(bool, usize)> {
     use crate::logos_lexer::{Token, TokenIter};
     // A date after a blank starts with a digit right after one; without one
     // the line is not lexed at all.
@@ -10298,6 +10307,18 @@ fn first_dated_header(line: &str) -> Option<(bool, usize)> {
             }
             Token::Star | Token::Flag(_) | Token::Pending | Token::Hash | Token::Txn
                 if date.is_some() =>
+            {
+                return date.map(|at| (true, at));
+            }
+            // A lone capital (`T`, `P`, `X`), which the lexer reads as a
+            // currency, is a transaction's flag to beancount there too. Asked
+            // for after a dated line only; a BOM line's window keeps #2956's
+            // reading.
+            Token::Currency(c)
+                if lone_capital_flag
+                    && date.is_some()
+                    && c.len() == 1
+                    && c.as_bytes()[0].is_ascii_uppercase() =>
             {
                 return date.map(|at| (true, at));
             }

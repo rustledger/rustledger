@@ -1619,7 +1619,52 @@ impl<'src> Iterator for TokenIter<'src> {
                     let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
                         && self.at_line_start
                         && span.start == self.last_newline_end;
-                    let end = if text.starts_with('\r') || bom_starts_line {
+                    // The run of BOMs that starts a line keeps its own extent
+                    // only while what follows it lexes as beancount lexes the
+                    // rest of its token (#2956). Two shapes do not:
+                    //
+                    // - The BOMs start an account in beancount
+                    //   (`bom_led_account`) and the account starts with a
+                    //   `:` (`<BOM>:A`): here `:A` at the start of the line
+                    //   would be a line beancount skips, hiding the rest of
+                    //   it. The token takes in the BOMs and that account, as
+                    //   a BOM-led one mid-line does.
+                    // - They start no account, so beancount's invalid token
+                    //   runs to the next blank, and the run starts with a
+                    //   line-start form beancount skips (`;`, `%`, `#`, `!`,
+                    //   `&`, `?`, `:`) or holds a `"` or a `;`: here that
+                    //   would open a comment or a string reaching past the
+                    //   run. The token runs to the blank like any other
+                    //   BOM-led one (`<BOM>; c x` is `'<BOM>;'`, `'c'` and
+                    //   `'x'` there, and `<BOM>~"x` opens no string).
+                    //
+                    // Layout is no longer at stake in either: a non-blank
+                    // follows the BOMs. Decided once, at the run's first BOM
+                    // (each later one keeps its own extent when the run
+                    // does), and the token consumes what it reads, so a run
+                    // and the word after it are read once.
+                    let first_of_run =
+                        bom_starts_line && !source[..span.start].ends_with(crate::bom::BOM_CHAR);
+                    let line_start_bom_end = if first_of_run {
+                        let after_run = &text[leading_bom_run(text)..];
+                        if after_run.starts_with([' ', '\t', '\r', '\n']) || after_run.is_empty() {
+                            None
+                        } else if let Some((_, account_end)) = bom_led_account(text) {
+                            after_run
+                                .starts_with(':')
+                                .then_some(span.start + account_end)
+                        } else {
+                            let word_end = text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len());
+                            (after_run.starts_with([';', '%', '#', '!', '&', '?', ':'])
+                                || text[..word_end].contains(['"', ';']))
+                            .then_some(span.start + word_end)
+                        }
+                    } else {
+                        None
+                    };
+                    let end = if let Some(end) = line_start_bom_end {
+                        end
+                    } else if text.starts_with('\r') || bom_starts_line {
                         span.end
                     } else if let Some((run, account_end)) = bom_led_account(text) {
                         // A run of BOMs beancount reads as an account's start
@@ -2619,13 +2664,24 @@ mod tests {
 
     /// At the start of a line a BOM still keeps its own extent (layout
     /// transparency for concatenated files, #2928 leaves it as it was): the
-    /// date after it lexes, and so does a quote, each BOM being one token.
+    /// date after it lexes, each BOM being one token. Except where what
+    /// follows would not lex as beancount lexes the rest of its token
+    /// (#2956): a run holding a `"` or a `;`, or starting with a line start
+    /// beancount skips, is one invalid token with the BOMs, so the quote
+    /// opens no string and the `;` no comment; and an account beancount reads
+    /// the BOMs into that starts with `:` is one token with them, so the `:`
+    /// is no skipped line.
     #[test]
     fn test_tokenize_line_start_bom_keeps_own_extent() {
         let bom = crate::bom::BOM;
+        let run = format!("{bom}{bom}\"q");
+        let glued = format!("{bom};c");
+        let account = format!("{bom}{bom}:A");
         for (source, errors) in [
             (format!("x\n{bom}2024-01-02 open Assets:A\n"), vec![bom]),
-            (format!("x\n{bom}{bom}\"q\"\n"), vec![bom, bom]),
+            (format!("x\n{bom}{bom}\"q r\"\n"), vec![run.as_str(), "r\""]),
+            (format!("x\n{bom};c y\n"), vec![glued.as_str(), "y"]),
+            (format!("x\n{bom}{bom}:A y\n"), vec![account.as_str(), "y"]),
         ] {
             let mut want = vec!["x"];
             want.extend(errors);

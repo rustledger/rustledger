@@ -602,6 +602,58 @@ mod tests {
         );
     }
 
+    /// A line-start BOM glued to a comment start, or a run of them glued to
+    /// an account beancount reads them into, is one token with what follows
+    /// (#2956). The quick fix still deletes each BOM and nothing else.
+    #[test]
+    #[allow(clippy::mutable_key_type)]
+    fn test_bom_removal_code_action_for_bom_glued_to_its_line() {
+        use lsp_types::{
+            CodeActionContext, PartialResultParams, TextDocumentIdentifier, Uri,
+            WorkDoneProgressParams,
+        };
+        for (source, boms) in [
+            ("2024-01-01 open Assets:Bank USD\n\u{FEFF}; c x\n", vec![0]),
+            (
+                "2024-01-01 open Assets:Bank USD\n\u{FEFF}\u{FEFF}:A c\n",
+                vec![0, 1],
+            ),
+        ] {
+            let result = parse(source);
+            let uri: Uri = "file:///test.bean".parse().unwrap();
+            let params = CodeActionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range: Range::new(Position::new(0, 0), Position::new(100, 0)),
+                context: CodeActionContext::default(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            };
+            let response = handle_code_actions(&params, source, &result, PositionEncoding::Utf16)
+                .expect("expected at least one code action");
+            let mut ranges: Vec<Range> = response
+                .into_iter()
+                .filter_map(|a| match a {
+                    lsp_types::CodeActionOrCommand::CodeAction(action)
+                        if action.title.contains("Remove") =>
+                    {
+                        action.edit.and_then(|e| e.changes)
+                    }
+                    _ => None,
+                })
+                .flat_map(|changes| changes[&uri].clone())
+                .inspect(|edit| assert!(edit.new_text.is_empty(), "{source:?}"))
+                .map(|edit| edit.range)
+                .collect();
+            ranges.sort_by_key(|r| r.start.character);
+            ranges.dedup();
+            let expected: Vec<Range> = boms
+                .iter()
+                .map(|&c| Range::new(Position::new(1, c), Position::new(1, c + 1)))
+                .collect();
+            assert_eq!(ranges, expected, "{source:?}");
+        }
+    }
+
     /// Two non-adjacent mid-line BOMs in a single source produce
     /// quick-fix actions whose TextEdits cover BOTH BOMs (whether
     /// emitted as one action with two edits, or two actions with one

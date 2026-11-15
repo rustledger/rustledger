@@ -983,6 +983,14 @@ impl<'src> TokenIter<'src> {
     /// Lexes on a clone of the lexer, dropped unless it is returned. Linear:
     /// a run with an error becomes one error token, so it is not lexed again,
     /// and a clean run is skipped by every later lone capital in it.
+    /// A lexer over the visible source standing at `at`: its span ends there,
+    /// so a caller that sizes a token by the lexer's span ends it at `at`.
+    fn lexer_at(&self, at: usize) -> logos::Lexer<'src, Token<'src>> {
+        let mut lexer = Token::lexer(&self.source[..self.lex_end]);
+        lexer.bump(at);
+        lexer
+    }
+
     fn error_later_in_run(
         &mut self,
         from: usize,
@@ -995,25 +1003,84 @@ impl<'src> TokenIter<'src> {
                 .unwrap_or(rest.len());
         #[cfg(test)]
         test_counters::CAPITAL_RUN_SCANNED_BYTES.with(|c| c.set(c.get() + (run_end - from)));
+        let bytes = self.source.as_bytes();
         let mut peek = self.lexer.clone();
-        while let Some(result) = peek.next() {
-            let at = peek.span().start;
-            if at >= run_end {
+        loop {
+            // No blank inside the run, so the next token starts right where
+            // the last one ended.
+            let pos = peek.span().end;
+            if pos >= run_end {
                 break;
             }
-            // A `#!` or `#+` here is mid-line, so it is a `#` and the token
-            // after it (the rewrite in `next`), and an error later in its
-            // line is in the run: lex on right after the `#`.
-            if matches!(result, Ok(Token::Shebang(_) | Token::EmacsDirective(_))) {
-                peek = Token::lexer(&self.source[..self.lex_end]);
-                peek.bump(at + 1);
-                continue;
+            // Tokens that can reach past the run are decided from the run's
+            // own bytes, never lexed to their end: lexing a comment to its
+            // line's end, or a string to its closing quote, for every capital
+            // on a line of `A;x A;x ...` cost the rest of the line each time
+            // (quadratic). A comment (`;`, `%`, `#!`, `#+`) runs to the line
+            // break, so it reaches past the run exactly when the run ends at
+            // a blank; a string does when no unescaped `"` closes it inside
+            // the run (#2977: see the hand-back below).
+            match bytes[pos] {
+                b';' | b'%' => {
+                    if matches!(bytes.get(run_end), Some(b' ' | b'\t')) {
+                        return Some((run_end, self.lexer_at(run_end)));
+                    }
+                    // A comment to the run's end: nothing after it in the run.
+                    break;
+                }
+                // A `#!` or `#+` here is mid-line, so it is a `#` and the
+                // token after it (the rewrite in `next`), and an error later
+                // in its line is in the run: lex on right after the `#`.
+                b'#' if matches!(bytes.get(pos + 1), Some(b'!' | b'+')) => {
+                    peek = Token::lexer(&self.source[..self.lex_end]);
+                    peek.bump(pos + 1);
+                    continue;
+                }
+                b'"' => {
+                    let mut i = pos + 1;
+                    let mut closed = false;
+                    while i < run_end {
+                        match bytes[i] {
+                            b'\\' => i += 2,
+                            b'"' => {
+                                closed = true;
+                                break;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    #[cfg(test)]
+                    test_counters::CAPITAL_PEEK_LEXED_BYTES.with(|c| c.set(c.get() + (i - pos)));
+                    if !closed {
+                        return Some((run_end, self.lexer_at(run_end)));
+                    }
+                }
+                _ => {}
             }
+            let Some(result) = peek.next() else { break };
+            #[cfg(test)]
+            test_counters::CAPITAL_PEEK_LEXED_BYTES
+                .with(|c| c.set(c.get() + (peek.span().end - pos)));
+            let at = peek.span().start;
             if result.is_err() {
                 if self.source[at..].starts_with('\r') {
                     break;
                 }
                 return Some((at, peek));
+            }
+            // A token that starts in the run and reaches past its end: a
+            // string with a blank or a line break inside it (`A@"x` then
+            // `foo"` on the next line), or a comment (`A;x y`), both caught
+            // above before they are lexed. beancount's invalid token is
+            // `[^ \t\n\r]+`, so its run ends at the blank and the quote or
+            // `;` is part of it, opening nothing; the next line lexes on its
+            // own (#2977). That run is one invalid token here too: the error
+            // ends at the run's end, and lexing resumes there. The lexer
+            // handed back stands at the run's end (its span ends there), so
+            // the `Err` arm sizes the error to the run and does not take it
+            // for a stray quote's (`error_start` is past the quote).
+            if peek.span().end > run_end {
+                return Some((run_end, self.lexer_at(run_end)));
             }
             // The run's last token a lone capital glued to a stray `\r` that
             // the capital rule in `next` makes an invalid token (#2966):
@@ -1309,6 +1376,12 @@ pub(crate) mod test_counters {
         /// Bytes `TokenIter::error_later_in_run` scanned for the end of a run
         /// after a lone capital, on this thread.
         pub(crate) static CAPITAL_RUN_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+        /// Bytes `TokenIter::error_later_in_run`'s lookahead lexed or
+        /// stepped over inside a run (the tokens it lexed, wherever they
+        /// end, and the string bytes it read for a closing quote), on this
+        /// thread.
+        pub(crate) static CAPITAL_PEEK_LEXED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
         /// Bytes logos scanned into the error spans the `Err` arm received,
         /// and bytes the BOM-run and account lookaheads looked at, on this
@@ -2101,6 +2174,38 @@ mod tests {
                 .filter(|(t, _)| matches!(t, Token::Error(_)))
                 .count();
             assert_eq!(found, errors, "{label}");
+        }
+    }
+
+    /// The lookahead after a lone capital never lexes a comment or string
+    /// past the capital's run (#2977). Each `A;x` on a line used to lex its
+    /// comment to the line's end and throw it away, as the run ends at the
+    /// blank, so the next capital lexed the rest of the line again; `%`,
+    /// `#!` and a string with no closing quote in the run did the same.
+    #[test]
+    fn test_tokenize_lossless_lone_capital_lookahead_reads_no_token_past_its_run() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            ("`;` comments", "A;x ".repeat(N) + "\n"),
+            (
+                "`;` comments in an open",
+                "2024-01-01 open Assets:A ".to_string() + &"T;x ".repeat(N) + "\n",
+            ),
+            ("`%` comments", "A%x ".repeat(N) + "\n"),
+            ("`#!` lines", "A#!x ".repeat(N) + "\n"),
+            ("open strings", "A\"x ".repeat(N) + "\n"),
+            ("escaped blanks", "A\"x\\ ".repeat(N) + "\n"),
+            ("closed strings", "A\"x\" ".repeat(N) + "\n"),
+        ] {
+            test_counters::CAPITAL_PEEK_LEXED_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(&src);
+            let lexed = test_counters::CAPITAL_PEEK_LEXED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                lexed <= 2 * src.len(),
+                "{label}: lexed {lexed} bytes of a {}-byte input",
+                src.len()
+            );
+            assert!(!tokens.is_empty(), "{label}");
         }
     }
 

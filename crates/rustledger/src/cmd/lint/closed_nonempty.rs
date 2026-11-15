@@ -235,13 +235,14 @@ mod tests {
         (err, shown)
     }
 
-    /// A transaction with two elided postings (which booking cannot resolve)
-    /// and a `close`: the transaction is left out of the balances.
+    /// A transaction whose first posting has a number but no currency, beside
+    /// an elided posting (which booking cannot resolve: "cannot infer
+    /// currency"), and a `close`: the transaction is left out of the balances.
     const UNBOOKABLE: &str = concat!(
         "2024-01-01 open Assets:Cash\n",
         "2024-01-01 open Expenses:Food\n",
         "2024-01-02 * \"lunch\"\n",
-        "  Assets:Cash\n",
+        "  Assets:Cash  12.50\n",
         "  Expenses:Food\n",
         "2024-12-31 close Assets:Cash\n",
     );

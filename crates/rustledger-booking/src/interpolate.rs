@@ -1124,6 +1124,93 @@ pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
     groups
 }
 
+/// Elided postings that compete for one residual, so interpolation cannot
+/// solve them: what `rustledger-validate` reports as E3002.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousElision {
+    /// The posting the diagnostic belongs on, by index into `txn.postings`.
+    ///
+    /// Where beancount reports it (`parser/booking_full.py`): with more than
+    /// one fully-elided posting ("auto-posting"), its "You may not have more
+    /// than one auto-posting per currency" goes on the LAST of them; otherwise
+    /// its "Too many missing numbers for currency group" goes on the first
+    /// unknown, in posting order, of the crowded group (beancount sorts a
+    /// group's postings by index, and a fully-elided posting is one of every
+    /// group's unknowns).
+    pub posting: usize,
+    /// Currency groups holding more than one unknown, with their counts, in
+    /// order of first appearance.
+    pub crowded: Vec<(Currency, u32)>,
+    /// How many elided unknowns the transaction has in all.
+    pub unknowns: usize,
+    /// Whether one of them is fully elided, so it joins every group.
+    pub has_unassigned: bool,
+    /// Indices of every elided unknown, in posting order.
+    pub postings: Vec<usize>,
+}
+
+/// The E3002 condition on `txn`, or `None` when interpolation can solve every
+/// elided posting.
+///
+/// From the canonical grouping ([`elided_unknown_groups`]): more than one
+/// unknown in one currency group, or a fully-elided posting beside any other
+/// unknown (it can absorb any residual, so beancount refuses the combination
+/// outright).
+///
+/// Shared by the validator, which reports it, and by every booking surface,
+/// which uses [`crate::BookingError::restates_ambiguous_elision`] to leave out
+/// the booking failure that is this same refusal in other words (#2998).
+#[must_use]
+pub fn ambiguous_elision(txn: &Transaction) -> Option<AmbiguousElision> {
+    let groups = elided_unknown_groups(txn);
+    let mut per_currency: Vec<(Currency, u32, usize)> = Vec::new();
+    let mut unassigned: Vec<usize> = Vec::new();
+    for (i, group) in &groups {
+        match group {
+            UnknownGroup::Currency(c) => match per_currency.iter_mut().find(|(k, _, _)| k == c) {
+                Some(entry) => entry.1 += 1,
+                None => per_currency.push((c.clone(), 1, *i)),
+            },
+            UnknownGroup::Unassigned => unassigned.push(*i),
+        }
+    }
+    let ambiguous = if unassigned.is_empty() {
+        per_currency.iter().any(|&(_, n, _)| n > 1)
+    } else {
+        groups.len() > 1
+    };
+    if !ambiguous {
+        return None;
+    }
+    let posting = if unassigned.len() > 1 {
+        // `unassigned` is in posting order: beancount names the last one.
+        *unassigned.last()?
+    } else {
+        // The first unknown, in posting order, of a crowded group. With one
+        // fully-elided posting it joins every group, so every group holding
+        // an unknown of its own is crowded and the elided posting is one of
+        // its unknowns; without one, only groups of two or more count.
+        let threshold = if unassigned.is_empty() { 2 } else { 1 };
+        per_currency
+            .iter()
+            .filter(|&&(_, n, _)| n >= threshold)
+            .map(|&(_, _, first)| first)
+            .chain(unassigned.first().copied())
+            .min()?
+    };
+    Some(AmbiguousElision {
+        posting,
+        crowded: per_currency
+            .into_iter()
+            .filter(|&(_, n, _)| n > 1)
+            .map(|(c, n, _)| (c, n))
+            .collect(),
+        unknowns: groups.len(),
+        has_unassigned: !unassigned.is_empty(),
+        postings: groups.iter().map(|&(i, _)| i).collect(),
+    })
+}
+
 /// Interpolate missing amounts in a transaction.
 ///
 /// This function:
@@ -5095,5 +5182,151 @@ mod tests {
         // The contract is "reports", not "returns Ok": either outcome is fine,
         // a panic is not. Before the fix this line aborted the process.
         let _ = engine.book_and_interpolate(&txn);
+    }
+
+    /// #2998: where beancount 3.2.3 reports an ambiguous elision, checked
+    /// with `beancount.loader.load_string`: the last fully-elided posting
+    /// when there are several ("You may not have more than one auto-posting
+    /// per currency"), else the first unknown of the crowded group ("Too many
+    /// missing numbers for currency group"), the fully-elided posting among
+    /// them.
+    #[test]
+    fn test_ambiguous_elision_names_beancounts_posting() {
+        let usd = |account: &str, n| Posting::new(account, Amount::new(n, "USD"));
+        let usd_only = |account: &str| {
+            Posting::with_incomplete(account, IncompleteAmount::CurrencyOnly("USD".into()))
+        };
+        let posting_of = |postings: Vec<Posting>| {
+            let txn = postings.into_iter().fold(
+                Transaction::new(date(2024, 1, 2), "t"),
+                Transaction::with_synthesized_posting,
+            );
+            ambiguous_elision(&txn).map(|a| a.posting)
+        };
+
+        // Two fully elided: the last (beancount line 8 of `* / A 1 USD / B / C`).
+        assert_eq!(
+            posting_of(vec![
+                usd("Assets:A", dec!(1)),
+                Posting::auto("Assets:B"),
+                Posting::auto("Assets:C")
+            ]),
+            Some(2)
+        );
+        // Three fully elided: still the last.
+        assert_eq!(
+            posting_of(vec![
+                usd("Assets:A", dec!(1)),
+                Posting::auto("Assets:B"),
+                Posting::auto("Assets:C"),
+                Posting::auto("Assets:D"),
+            ]),
+            Some(3)
+        );
+        // The fully elided postings first: still the last of them.
+        assert_eq!(
+            posting_of(vec![
+                Posting::auto("Assets:B"),
+                usd("Assets:A", dec!(1)),
+                Posting::auto("Assets:C")
+            ]),
+            Some(2)
+        );
+        // Two currency-only postings in USD: the first.
+        assert_eq!(
+            posting_of(vec![
+                usd("Assets:A", dec!(1)),
+                usd_only("Assets:B"),
+                usd_only("Assets:C")
+            ]),
+            Some(1)
+        );
+        // One fully elided beside a USD unknown: the first unknown in posting
+        // order, the elided one included (`A / B USD` -> B; `A / B` with the
+        // elided first -> it).
+        assert_eq!(
+            posting_of(vec![
+                usd("Assets:A", dec!(1)),
+                usd_only("Assets:B"),
+                Posting::auto("Assets:C")
+            ]),
+            Some(1)
+        );
+        assert_eq!(
+            posting_of(vec![
+                Posting::auto("Assets:C"),
+                usd("Assets:A", dec!(1)),
+                usd_only("Assets:B")
+            ]),
+            Some(0)
+        );
+        // Not ambiguous: one elided posting, or one unknown per currency.
+        assert_eq!(
+            posting_of(vec![usd("Assets:A", dec!(1)), Posting::auto("Assets:B")]),
+            None
+        );
+        assert_eq!(
+            posting_of(vec![
+                usd("Assets:A", dec!(1)),
+                Posting::new("Assets:A", Amount::new(dec!(2), "EUR")),
+                usd_only("Assets:B"),
+                Posting::with_incomplete("Assets:C", IncompleteAmount::CurrencyOnly("EUR".into())),
+            ]),
+            None
+        );
+    }
+
+    /// #2998: a booking failure restates E3002 only when it is the same
+    /// refusal: `MultipleMissing` in a group E3002 counts (any group, with a
+    /// fully elided posting), or `CannotInferCurrency` for one of its elided
+    /// postings. A failure with another cause is kept.
+    #[test]
+    fn test_restates_ambiguous_elision_only_for_the_same_cause() {
+        use crate::BookingError;
+        let two_usd = Transaction::new(date(2024, 1, 2), "t")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1), "USD")))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:B",
+                IncompleteAmount::CurrencyOnly("USD".into()),
+            ))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:C",
+                IncompleteAmount::CurrencyOnly("USD".into()),
+            ));
+        let missing = |c: &str| {
+            BookingError::Interpolation(InterpolationError::MultipleMissing {
+                currency: c.into(),
+                count: 2,
+            })
+        };
+        let cannot_infer = |a: &str| {
+            BookingError::Interpolation(InterpolationError::CannotInferCurrency {
+                account: a.into(),
+            })
+        };
+        assert!(missing("USD").restates_ambiguous_elision(&two_usd));
+        assert!(!missing("EUR").restates_ambiguous_elision(&two_usd));
+        assert!(cannot_infer("Assets:B").restates_ambiguous_elision(&two_usd));
+        assert!(!cannot_infer("Assets:A").restates_ambiguous_elision(&two_usd));
+        assert!(
+            !BookingError::NotBooked {
+                account: "Assets:B".into()
+            }
+            .restates_ambiguous_elision(&two_usd)
+        );
+
+        let two_auto = Transaction::new(date(2024, 1, 2), "t")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:B"))
+            .with_synthesized_posting(Posting::auto("Assets:C"));
+        // A fully elided posting joins every group, so any group's refusal is it.
+        assert!(missing("EUR").restates_ambiguous_elision(&two_auto));
+
+        // Nothing ambiguous: never a restatement.
+        let fine = Transaction::new(date(2024, 1, 2), "t")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:B"));
+        assert!(!missing("USD").restates_ambiguous_elision(&fine));
+        assert!(!cannot_infer("Assets:B").restates_ambiguous_elision(&fine));
     }
 }

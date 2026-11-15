@@ -414,13 +414,15 @@ mod tests {
         path
     }
 
-    /// A transaction with two elided postings (line 4 is its first posting),
-    /// which booking cannot resolve, and a `close`.
+    /// A transaction whose first posting (line 4) has a number but no
+    /// currency, beside an elided posting, which booking cannot resolve
+    /// ("cannot infer currency"), and a `close`. (Two elided postings are a
+    /// validator E3002 since #2998, which is the booking failure for them.)
     const UNBOOKABLE: &str = concat!(
         "2024-01-01 open Assets:Cash\n",
         "2024-01-01 open Expenses:Food\n",
         "2024-01-02 * \"lunch\"\n",
-        "  Assets:Cash\n",
+        "  Assets:Cash  12.50\n",
         "  Expenses:Food\n",
         "2024-12-31 close Assets:Cash\n",
     );
@@ -439,6 +441,33 @@ mod tests {
         assert!(
             err.starts_with(&format!(
                 "{}: cannot inspect a ledger whose processing failed: {}:4: BOOK: interpolation failed",
+                path.display(),
+                path.display()
+            )),
+            "{err}"
+        );
+    }
+
+    /// #2998: two elided postings booking cannot tell apart are one E3002, on
+    /// the last of them, and that E3002 is the booking failure: the lint still
+    /// refuses the ledger.
+    #[test]
+    fn test_load_booked_refuses_two_elided_postings_as_e3002() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger(
+            dir.path(),
+            concat!(
+                "2024-01-01 open Assets:Cash\n",
+                "2024-01-01 open Expenses:Food\n",
+                "2024-01-02 * \"lunch\"\n",
+                "  Assets:Cash\n",
+                "  Expenses:Food\n",
+            ),
+        );
+        let err = load_booked(&path).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!(
+                "{}: cannot inspect a ledger whose processing failed: {}:5: E3002: ",
                 path.display(),
                 path.display()
             )),

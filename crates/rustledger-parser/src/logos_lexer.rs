@@ -979,6 +979,32 @@ impl<'src> TokenIter<'src> {
         self.lexer = lexer;
     }
 
+    /// A lexer over the visible source standing at `at`: its span ends there,
+    /// so a caller that sizes a token by the lexer's span ends it at `at`.
+    fn lexer_at(&self, at: usize) -> logos::Lexer<'src, Token<'src>> {
+        let mut lexer = Token::lexer(&self.source[..self.lex_end]);
+        lexer.bump(at);
+        lexer
+    }
+
+    /// The one-character token `next` splits off a `#!`, `#+` or `%`
+    /// comment token that starts where the lexer stands, when it would split
+    /// it: a `#` (HASH) for a `#!` or `#+` that is not at column 0, and a `%`
+    /// (FLAG) unless it starts a column-0 line beancount ignores. The same
+    /// conditions as the rewrites in `next`, decided from the bytes so the
+    /// comment is never lexed to its line end only to be thrown away (#2989).
+    fn split_comment_start(&self) -> Option<Token<'src>> {
+        let start = self.lex_end - self.lexer.remainder().len();
+        let at_column_0 = self.at_line_start && start == self.last_newline_end;
+        match &self.source.as_bytes()[start..self.lex_end] {
+            [b'#', b'!' | b'+', ..] if !at_column_0 => Some(Token::Hash),
+            [b'%', ..] if !(at_column_0 && beancount_ignores_line(&self.source[start..])) => {
+                Some(Token::Flag(&self.source[start..=start]))
+            }
+            _ => None,
+        }
+    }
+
     /// The first lexer error in the run of non-blank characters that goes on
     /// at `from`, right after a lone capital: its start, and a lexer that has
     /// just produced it. `None`, and the run remembered as clean, when every
@@ -990,14 +1016,6 @@ impl<'src> TokenIter<'src> {
     /// Lexes on a clone of the lexer, dropped unless it is returned. Linear:
     /// a run with an error becomes one error token, so it is not lexed again,
     /// and a clean run is skipped by every later lone capital in it.
-    /// A lexer over the visible source standing at `at`: its span ends there,
-    /// so a caller that sizes a token by the lexer's span ends it at `at`.
-    fn lexer_at(&self, at: usize) -> logos::Lexer<'src, Token<'src>> {
-        let mut lexer = Token::lexer(&self.source[..self.lex_end]);
-        lexer.bump(at);
-        lexer
-    }
-
     fn error_later_in_run(
         &mut self,
         from: usize,
@@ -1402,6 +1420,15 @@ pub(crate) mod test_counters {
         /// thread.
         pub(crate) static ERROR_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Bytes of `#!`, `#+` and `%` comment tokens logos lexed to their
+        /// line end only for `TokenIter::next` to split off their first
+        /// character, on this thread (#2989).
+        pub(crate) static SPLIT_COMMENT_LEXED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+        /// Source bytes and errors `name_mid_line_hash_comments` stepped over
+        /// for its markers, on this thread (#2989).
+        pub(crate) static MID_LINE_MARKER_STEPS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -1414,24 +1441,36 @@ impl<'src> Iterator for TokenIter<'src> {
         }
         let source = self.source;
         loop {
-            let Some(result) = self.lexer.next() else {
-                // Line-at-a-time mode (see the `Err` arm): move on to the
-                // next line while still before `chunk_until`, then back to
-                // the whole rest of the source; stop at its real end.
-                if self.lex_end < source.len() {
-                    let from = self.lex_end;
-                    self.lex_end = if from < self.chunk_until {
-                        line_chunk_end(source, from)
-                    } else {
-                        source.len()
-                    };
-                    self.restart_lexer(from);
-                    continue;
-                }
-                return None;
+            // A `#!`, `#+` or `%` that the rewrites below would split into
+            // its first character: emit that character here, before logos
+            // lexes the comment token to its line end only for it to be
+            // thrown away. On a line repeating `1#!` or `x %`, each split
+            // relexed the rest of the line, which was quadratic (#2989). The
+            // token then goes through every step below, as the split one did,
+            // so an indented one still gets its `Indent`.
+            let (mut result, mut span) = if let Some(token) = self.split_comment_start() {
+                let start = self.lex_end - self.lexer.remainder().len();
+                self.lexer.bump(1);
+                (Ok(token), start..start + 1)
+            } else {
+                let Some(result) = self.lexer.next() else {
+                    // Line-at-a-time mode (see the `Err` arm): move on to the
+                    // next line while still before `chunk_until`, then back to
+                    // the whole rest of the source; stop at its real end.
+                    if self.lex_end < source.len() {
+                        let from = self.lex_end;
+                        self.lex_end = if from < self.chunk_until {
+                            line_chunk_end(source, from)
+                        } else {
+                            source.len()
+                        };
+                        self.restart_lexer(from);
+                        continue;
+                    }
+                    return None;
+                };
+                (result, self.lexer.span())
             };
-            let mut result = result;
-            let mut span = self.lexer.span();
             if let Some(end) = self.stray_cr_trivia_end(&result, &span) {
                 self.lexer.bump(end - span.end);
                 span.end = end;
@@ -1552,6 +1591,11 @@ impl<'src> Iterator for TokenIter<'src> {
                     && span.start == self.last_newline_end
                     && beancount_ignores_line(&source[span.start..]))
             {
+                // `split_comment_start` takes every such `%` before logos
+                // lexes it, so this is a fallback; counted so the linear-cost
+                // test sees it if that ever stops being so.
+                #[cfg(test)]
+                test_counters::SPLIT_COMMENT_LEXED_BYTES.with(|c| c.set(c.get() + span.len()));
                 self.restart_lexer(span.start + 1);
                 span.end = span.start + 1;
                 result = Ok(Token::Flag(&source[span.clone()]));
@@ -1569,6 +1613,10 @@ impl<'src> Iterator for TokenIter<'src> {
             if matches!(result, Ok(Token::Shebang(_) | Token::EmacsDirective(_)))
                 && !(self.at_line_start && span.start == self.last_newline_end)
             {
+                // A fallback, as for `%` above: `split_comment_start` takes
+                // these first.
+                #[cfg(test)]
+                test_counters::SPLIT_COMMENT_LEXED_BYTES.with(|c| c.set(c.get() + span.len()));
                 self.restart_lexer(span.start + 1);
                 span.end = span.start + 1;
                 result = Ok(Token::Hash);
@@ -2269,6 +2317,71 @@ mod tests {
             assert!(
                 scanned <= 2 * src.len(),
                 "{label}: scanned {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+        }
+    }
+
+    /// A `#!`, `#+` or `%` that `next` splits into its first character is
+    /// never lexed to its line end first (#2989). Each one on a line used to
+    /// be lexed as a comment token to the line's end and thrown away, so a
+    /// line repeating `1#!` or `x %` lexed the rest of the line once per
+    /// repetition. Column 0 is covered too: a `#!` there stays a comment, a
+    /// `%` there a comment unless its line is a bare `%`.
+    #[test]
+    fn test_tokenize_lossless_split_comment_is_not_lexed_to_its_line_end() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            ("`1#!` run", "1".to_string() + &"#!1".repeat(N) + "\n"),
+            ("`#!#!` run", "x ".to_string() + &"#!".repeat(N) + "\n"),
+            ("`#+#+` run", "x ".to_string() + &"#+".repeat(N) + "\n"),
+            ("`A#!` run", "A".to_string() + &"#!A".repeat(N) + "\n"),
+            ("`A#+` run", "A".to_string() + &"#+A".repeat(N) + "\n"),
+            (
+                "`#!T` after a flag",
+                "2024-01-02 P".to_string() + &"#!T".repeat(N) + "\n",
+            ),
+            ("`x %` words", "x ".to_string() + &"%x ".repeat(N) + "\n"),
+            ("`%%` run", "x ".to_string() + &"%".repeat(N) + "\n"),
+            ("indented `#!`", "  ".to_string() + &"#!x".repeat(N) + "\n"),
+            ("column-0 lines", "#!x\n%y\n#+z\n".repeat(N)),
+        ] {
+            test_counters::SPLIT_COMMENT_LEXED_BYTES.with(|c| c.set(0));
+            let _ = tokenize_lossless(&src);
+            let lexed = test_counters::SPLIT_COMMENT_LEXED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                lexed <= 2 * src.len(),
+                "{label}: lexed {lexed} split-comment bytes of a {}-byte input",
+                src.len()
+            );
+        }
+    }
+
+    /// Naming the mid-line `#!` and `#+` markers in a parse's errors steps
+    /// over each source byte and each error a bounded number of times
+    /// (#2989). Each marker used to scan back to its line's start and search
+    /// the error list from the front, so a line of `#!#!...` cost its length
+    /// per marker, and a file of indented `  #+x` lines the whole error list
+    /// per line.
+    #[test]
+    fn test_parse_mid_line_markers_are_named_in_linear_steps() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            ("`#!#!` run", "x ".to_string() + &"#!".repeat(N) + "\n"),
+            ("`1#!` run", "1".to_string() + &"#!1".repeat(N) + "\n"),
+            (
+                "`#+` run after blanks",
+                " ".repeat(N) + &"#+".repeat(N) + "\n",
+            ),
+            ("indented `#+` lines", "  #+x\n".repeat(N)),
+            ("`#!` after a posting", "  Assets:A 1 USD #!x\n".repeat(N)),
+        ] {
+            test_counters::MID_LINE_MARKER_STEPS.with(|c| c.set(0));
+            let _ = crate::parse(&src);
+            let steps = test_counters::MID_LINE_MARKER_STEPS.with(std::cell::Cell::get);
+            assert!(
+                steps <= 3 * src.len(),
+                "{label}: {steps} steps for a {}-byte input",
                 src.len()
             );
         }

@@ -1434,12 +1434,12 @@ impl<'src> Iterator for TokenIter<'src> {
             // `Assets:a` is `Invalid token: 'Assets:a'`. Here a lone capital is
             // a `Currency` (or a `Flag`) wherever it stands, and what follows
             // lexes on its own (`Assets:a` is `A`, the key `ssets:` and an
-            // error `a`). So when the rest of its run of non-blank characters
-            // holds an error, the run from the capital on is one error, as
-            // there. Only then: a capital glued to tokens that all lex
-            // (`{1 V, 2024-01-01}`, `T#!`) is still a token here, and the
-            // parser's glued one-letter rules report it (`directive_header`,
-            // `txn_header`).
+            // error `a`). So the run from the capital to the next blank is one
+            // error, as there. When the rest of the run holds an error, this
+            // lookahead finds it and hands back a lexer standing at the run's
+            // end (it also decides the stray-`\r` chains of #2966); otherwise
+            // the rule after it makes the capital the error, which the `Err`
+            // arm runs to the blank.
             if is_lone_capital(&result)
                 && span.end >= self.capital_run_clean_until
                 && let Some((at, lexer)) = self.error_later_in_run(span.end)
@@ -1447,6 +1447,36 @@ impl<'src> Iterator for TokenIter<'src> {
                 error_start = at;
                 span.end = lexer.span().end;
                 self.lexer = lexer;
+                result = Err(());
+            }
+            // A lone capital glued to a non-blank whose run otherwise lexes
+            // (`U~SD`, `U?SD`, `V,`, `T#!`): the run is beancount's invalid
+            // token all the same (#2982). It was a token here, and the
+            // parser's glued one-letter rules reported it, one error, which
+            // matched on a clean line. After an earlier invalid token on the
+            // line, the line's construct checks are quieted
+            // (`quiet_after_invalid_tokens`), that error with them, so
+            // `  Assets:A  $ U~SD` lost the `'U~SD'` beancount reports; and a
+            // first glued capital reported through grammar errors (sometimes
+            // two) stood before the line's first invalid token, so a later
+            // one was miscounted. Lexed as beancount lexes it, the run is the
+            // line's invalid token wherever it stands; the `Err` arm runs it
+            // to the next blank. A capital before a blank, a `\r` (the
+            // stray-`\r` rule below decides it) or the end of the source is
+            // left to the rules that already handle it, and so is a
+            // transaction's flag (`flag_position`) and a run a flag leads
+            // (`capital_rule_applies`): `txn_header`'s glued-flag rule reports
+            // it and keeps the transaction (`2024-01-02 P;c`), and an indented
+            // date's flag keeps beancount's two errors there (#2966's
+            // `identify_directive` arm reads only a one-letter error as one).
+            if is_lone_capital(&result)
+                && self.flag_position(span.start).is_none()
+                && self.capital_rule_applies(span.start)
+                && source
+                    .as_bytes()
+                    .get(span.end)
+                    .is_some_and(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            {
                 result = Err(());
             }
             // A `\r` that is not part of a line ending is none of the three
@@ -2158,7 +2188,8 @@ mod tests {
     fn test_tokenize_lossless_lone_capital_lookahead_is_linear() {
         const N: usize = 20_000;
         for (label, src, errors) in [
-            ("clean run", "{1 ".to_string() + &"V,".repeat(N) + "}\n", 0),
+            // A glued run is one invalid token, as in beancount (#2982).
+            ("glued run", "{1 ".to_string() + &"V,".repeat(N) + "}\n", 1),
             ("error at its end", "V,".repeat(N) + "$\n", 1),
         ] {
             test_counters::CAPITAL_RUN_SCANNED_BYTES.with(|c| c.set(0));

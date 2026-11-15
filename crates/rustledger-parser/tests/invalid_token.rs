@@ -73,6 +73,11 @@ fn test_tokenize_lossless_invalid_token_runs_to_the_next_blank() {
         ("R\u{4}\u{16}", &["R\u{4}\u{16}"][..]),
         ("  Assets:a 1 USD\n", &["Assets:a"][..]),
         ("U$SD\n", &["U$SD"][..]),
+        // Glued to tokens that all lex, the run is still beancount's invalid
+        // token (#2982): `V,`, `T#!`, `U~SD`.
+        ("{1 V, 2024-01-01}\n", &["V,"][..]),
+        ("T#!\n", &["T#!"][..]),
+        ("U~SD\n", &["U~SD"][..]),
         // A Unicode digit is no number (`[0-9]` there).
         ("\u{96b}$\u{96b}\n", &["\u{96b}$\u{96b}"][..]),
     ] {
@@ -81,14 +86,7 @@ fn test_tokenize_lossless_invalid_token_runs_to_the_next_blank() {
 }
 
 #[test]
-fn test_tokenize_lossless_tokens_beancount_rejects_but_rledger_reads_still_lex() {
-    // A lone capital glued to tokens that all lex stays a currency: beancount
-    // reads each of these as an invalid token (`V,`, `T#!`, `U~SD`), and here
-    // they lex as tokens, which the parser's glued one-letter rules then
-    // reject.
-    for src in ["{1 V, 2024-01-01}\n", "T#!\n", "U~SD\n"] {
-        assert_eq!(error_tokens(src), Vec::<&str>::new(), "{src:?}");
-    }
+fn test_tokenize_lossless_mid_file_bom_keeps_its_own_extent() {
     // A mid-file BOM keeps its own extent, so the directive of a
     // concatenated file after it still parses.
     assert_eq!(

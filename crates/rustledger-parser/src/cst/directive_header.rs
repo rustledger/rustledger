@@ -703,7 +703,7 @@ mod tests {
         for (line, at, found_end) in [
             ("2024-01-01 open! Assets:A\n", "!", false),
             ("2024-01-01 open Assets:A USD @\n", "@", false),
-            ("2024-01-01 open Assets:A U*SD\n", "U", false),
+            ("2024-01-01 open Assets:A U*SD\n", "U*SD", false),
             ("2024-01-01 open Assets:A ,,USD\n", ",", false),
             ("2024-01-01 open Assets:A USD,\n", ",", true),
             ("2024-01-01 price HOOL ? 10 USD\n", "?", false),
@@ -715,9 +715,9 @@ mod tests {
             ("plugin \"a\" \"b\" \"c\"\n", "\"c\"", false),
             ("pushtag #a #b\n", "#b", false),
             ("popmeta kk: 1\n", "1", false),
-            ("2024-01-01 open Assets:A U,SD\n", "U", false),
-            ("2024-01-01 open Assets:A V, USD\n", "V", false),
-            ("2024-01-01 open Assets:A USD,E,UR\n", "E", false),
+            ("2024-01-01 open Assets:A U,SD\n", "U,SD", false),
+            ("2024-01-01 open Assets:A V, USD\n", "V,", false),
+            ("2024-01-01 open Assets:A USD,E,UR\n", "E,UR", false),
         ] {
             let (d, text) = defect(line).unwrap_or_else(|| panic!("{line:?} must be rejected"));
             assert_eq!(text, at, "{line:?}");

@@ -9835,14 +9835,19 @@ fn quiet_after_invalid_tokens(
 /// A dated line that opens no directive (`2024-01-02 123 * "n"`, a second
 /// date, an account, a currency, ...: `identify_directive` opens no node for
 /// it) fails the same way: beancount reads the date and fails at the token
-/// after it, and its recovery starts there. One difference: when the line
-/// holds, after a blank, a transaction's header (`2024-01-02 2024-01-03 * "n"`),
-/// bison shifts that header and builds the transaction, so the indented lines
-/// under it are its body, which takes the errors a parse of that transaction
-/// gives them (a posting or metadata line none, `  "s"` its own) in place of
-/// the orphan lines' errors here. A failed dated line inside a quiet window
-/// starts with a date bison shifts, so when that is the last token owed, the
-/// line is reported and starts a window of its own.
+/// after it, and its recovery starts there. A date with nothing after it but
+/// blanks or a comment is not such a line: beancount fails at the line's
+/// end and reports that on the next line, which is not modeled. When the
+/// line holds, after a blank, a declaration bison shifts there
+/// ([`first_resync_point`]: `2024-01-02 2024-01-03 * "n"`,
+/// `2024-01-02 option "a" "b"`), that declaration is built, so it and the
+/// indented lines under it take the errors a parse of that declaration gives
+/// them (a transaction's posting or metadata line none, `  "s"` its own, the
+/// `unexpected INDENT` after an `option`) in place of the errors here. So does
+/// such a declaration later on a quiet line, which is quiet only before it. A
+/// failed dated line inside a quiet window starts with a date bison shifts, so
+/// when that is the last token owed, the line is reported and starts a window
+/// of its own.
 ///
 /// A mid-file BOM at the start of a line is beancount's invalid token, so the
 /// statement it is in, or starts, fails right there, and bison's recovery
@@ -9858,7 +9863,8 @@ fn quiet_after_invalid_tokens(
 /// (its date and keyword are the tokens that end it), once two blank or
 /// skipped lines have been read, or after a line (the BOM line included)
 /// holding a dated header after a blank, which bison shifts there in the
-/// middle of the line ([`holds_a_dated_header`]).
+/// middle of the line, or holding an undated declaration's keyword after a
+/// blank ([`first_resync_point`]).
 ///
 /// On a quiet line only the grammar's errors go (syntax errors, construct
 /// checks, a BOM diagnostic that stands for one, and the account-name and
@@ -9960,11 +9966,16 @@ fn quiet_after_failed_line_starts(
         .map(|r| (r.start, false))
         .chain(items.iter().filter_map(|&(pos, kind)| {
             let at_line_start = pos == 0 || stripped.as_bytes()[pos - 1] == b'\n';
+            // A date with nothing after it but blanks or a comment is not one:
+            // beancount fails there at the line's end, which it reports on the
+            // next line, and that is not modeled here.
             let dated = crate::logos_lexer::leading_date_len(&stripped[pos..]).is_some_and(|n| {
-                stripped[pos + n..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+                let rest = &stripped[pos + n..];
+                let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+                let after = line.trim_start_matches([' ', '\t']);
+                line.len() > after.len()
+                    && !after.trim_end_matches('\r').is_empty()
+                    && !after.starts_with(';')
             });
             (kind == K::ERROR_NODE && at_line_start && dated).then_some((pos, true))
         }))
@@ -9972,6 +9983,13 @@ fn quiet_after_failed_line_starts(
     triggers.sort_unstable_by_key(|&(start, _)| start);
     // Whether a column-0 line at `pos` is one of the dated lines above.
     let dated_line_at = |pos: usize| triggers.binary_search(&(pos, true)).is_ok();
+    // Whether a position is inside one of the invalid tokens (the lexer's).
+    let in_invalid_token = |at: usize| {
+        let i = invalid.partition_point(|r| r.start <= at);
+        i.checked_sub(1)
+            .and_then(|i| invalid.get(i))
+            .is_some_and(|r| at < r.end)
+    };
     // The body of a transaction bison resynchronizes to on a dated line
     // (below): its range, and the errors a parse of that transaction gives
     // there, which take the place of the orphan-line errors here.
@@ -9986,43 +10004,23 @@ fn quiet_after_failed_line_starts(
         };
         let mut pos = start + nl + 1;
         walked_to = pos;
-        // A dated header later on the line is shifted, and with the line
-        // ending that is the three tokens: no quiet after it.
-        match first_dated_header(&stripped[start..=start + nl]) {
-            // On a dated line, bison's recovery shifts a transaction's header
-            // there (`2024-01-02 2024-01-03 * "n"`) and builds that
-            // transaction, so the indented lines under it are its body: a
-            // posting or metadata line is no error, and any other line is the
-            // error it is in a transaction (`  "s"`). They are what a parse of
-            // the transaction from that date says of them. Its body ends at
-            // the first blank or column-0 line, as every transaction's does.
-            Some((true, at)) if dated_line => {
-                let mut end = pos;
-                while stripped[end..].starts_with([' ', '\t']) {
-                    let rest = &stripped[end..];
-                    let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
-                    if rest[..line_len]
-                        .trim_matches([' ', '\t', '\r', '\n'])
-                        .is_empty()
-                    {
-                        break;
-                    }
-                    end += line_len;
-                }
-                if end > pos {
-                    let from = start + at;
-                    let shift = from + off;
-                    let body_errors = parse_via_cst_opts(&stripped[from..end], false)
-                        .errors
-                        .into_iter()
-                        .filter(|e| e.span.start + from >= pos)
-                        .map(|mut e| {
-                            e.span = Span::new(e.span.start + shift, e.span.end + shift);
-                            e
-                        })
-                        .collect();
-                    resynced.push((pos..end, body_errors));
-                }
+        // A declaration bison shifts later on the line ends its recovery
+        // there, and with the line ending that is the three tokens: no quiet
+        // after it ([`first_resync_point`]). On a dated line that declaration
+        // is built (`2024-01-02 2024-01-03 * "n"`, `2024-01-02 option "a"
+        // "b"`), so it and the indented lines under it are what a parse of
+        // that declaration from there says of them: a transaction's posting or
+        // metadata line is no error, any other line the error it is there
+        // (`  "s"`, the `unexpected INDENT` after an `option`), as are the
+        // declaration's own defects on its line.
+        match first_resync_point(&stripped[start..=start + nl]) {
+            Some((_, at)) if dated_line => {
+                let from = start + at;
+                let end = resync_block_end(stripped, from, pos);
+                resynced.push((
+                    from..end,
+                    resync_block_errors(stripped, from, end, off, in_invalid_token),
+                ));
                 walked_to = end;
                 continue;
             }
@@ -10063,10 +10061,26 @@ fn quiet_after_failed_line_starts(
                     .find(|r| lexed(r))
                     .is_some_and(|r| readable_start_of_an_error_line(&stripped[content..r.start]))
                     || holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
-                quiet.push((pos, line_end, stands_for_token));
+                // A declaration bison shifts later on the line ends the quiet
+                // there: the line is quiet only before it, and the declaration
+                // and its block are what a parse of them says, as on a dated
+                // line above (`2024-01-03 , 2024-01-04 custom "x" 1 open
+                // Assets:Z`: the `open` is reported).
+                let resync = first_resync_point(with_ending);
+                quiet.push((
+                    pos,
+                    resync.map_or(line_end, |(_, at)| pos + at - 1),
+                    stands_for_token,
+                ));
                 owed = 2;
-                if holds_a_dated_header(with_ending) {
-                    walked_to = line_end + 1;
+                if let Some((_, at)) = resync {
+                    let from = pos + at;
+                    let end = resync_block_end(stripped, from, (line_end + 1).min(stripped.len()));
+                    resynced.push((
+                        from..end,
+                        resync_block_errors(stripped, from, end, off, in_invalid_token),
+                    ));
+                    walked_to = end;
                     break;
                 }
             }
@@ -10075,22 +10089,31 @@ fn quiet_after_failed_line_starts(
         }
     }
     if !resynced.is_empty() {
-        // Only an error that lies within a body is replaced: one that starts
-        // there and runs on (an unclosed `pushtag` whose span takes in the
-        // comment lines before it) is no body line's.
+        // The state of `pushtag` / `pushmeta` is the whole file's, which a
+        // parse of one block does not know: those errors stay as the whole
+        // parse gives them (an unclosed `pushtag` whose span takes in a
+        // block's comment lines), and the block's own are not taken.
+        let stateful = |e: &crate::ParseError| {
+            matches!(
+                e.kind,
+                crate::ParseErrorKind::UnclosedPushtag(_)
+                    | crate::ParseErrorKind::UnclosedPushmeta(_)
+                    | crate::ParseErrorKind::InvalidPoptag(_)
+                    | crate::ParseErrorKind::InvalidPopmeta(_)
+            )
+        };
         errors.retain(|e| {
             let at = e.span.start.saturating_sub(off);
-            let to = e.span.end.saturating_sub(off);
-            let i = resynced.partition_point(|(body, _)| body.start <= at);
-            i.checked_sub(1).is_none_or(|i| {
-                let body = &resynced[i].0;
-                !(body.contains(&at) && to <= body.end)
-            })
+            let i = resynced.partition_point(|(block, _)| block.start <= at);
+            stateful(e)
+                || i.checked_sub(1)
+                    .is_none_or(|i| !resynced[i].0.contains(&at))
         });
         errors.extend(
             resynced
                 .into_iter()
-                .flat_map(|(_, body_errors)| body_errors),
+                .flat_map(|(_, block_errors)| block_errors)
+                .filter(|e| !stateful(e)),
         );
         errors.sort_by_key(|e| e.span.start);
     }
@@ -10199,21 +10222,200 @@ fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
     })
 }
 
-/// Whether `line` holds, after a blank, a date and then a directive keyword or
-/// a transaction flag: tokens that bison's recovery, discarding what it
-/// cannot read, shifts as the start of a declaration, so that its quiet after
-/// an error ends there (`quiet_after_failed_line_starts`). A date glued to
-/// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid
-/// token, not one. Linear in the line, which it lexes from its start as the
-/// middle of a line, so no line-start rule hides any of it.
-fn holds_a_dated_header(line: &str) -> bool {
-    first_dated_header(line).is_some()
+/// The first point in `line`, after a blank, where bison's recovery shifts a
+/// declaration and ends: a dated header ([`first_dated_header`]), or an
+/// undated declaration's keyword (`option`, `include`, `plugin`, `pushtag`,
+/// `poptag`, `pushmeta`, `popmeta`), whichever comes first. `true` when it
+/// starts a transaction. Linear in the line.
+fn first_resync_point(line: &str) -> Option<(bool, usize)> {
+    use crate::logos_lexer::{Token, TokenIter};
+    let dated = first_dated_header(line);
+    if !line.contains([' ', '\t']) {
+        return dated;
+    }
+    let mut after_blank = false;
+    let undated = TokenIter::new_mid_line(line, true, 0).find_map(|(token, span)| {
+        let found = after_blank
+            && matches!(
+                token,
+                Token::Option_
+                    | Token::Include
+                    | Token::Plugin
+                    | Token::Pushtag
+                    | Token::Poptag
+                    | Token::Pushmeta
+                    | Token::Popmeta
+            );
+        after_blank = matches!(token, Token::Whitespace(_));
+        found.then_some((false, span.start))
+    });
+    match (dated, undated) {
+        (Some(d), Some(u)) => Some(if d.1 <= u.1 { d } else { u }),
+        (d, u) => d.or(u),
+    }
 }
 
-/// The first dated header in `line` that [`holds_a_dated_header`] finds, and
-/// where its date starts in `line`: `true` when it starts a transaction (a
-/// flag or `txn` after the date), `false` when it starts another directive (a
-/// keyword after it).
+/// Where the block of a declaration bison shifts at `from` ends, its first
+/// line running from `from` and its body starting at `body`: after the
+/// indented lines that follow, up to the first blank or column-0 line. A
+/// line inside a string that runs over line ends belongs to the block
+/// whatever its start (`k: "abc` / `x` / `"`), as it does in a parse of the
+/// block.
+fn resync_block_end(stripped: &str, from: usize, body: usize) -> usize {
+    // A quote that never closes opens no string in beancount's lexer.
+    let closes = |from: usize| {
+        let mut in_string = false;
+        let mut at = from;
+        while at < stripped.len() {
+            let end = stripped[at..].find('\n').map_or(stripped.len(), |i| at + i);
+            in_string = leaves_a_string_open(&stripped[at..end], in_string);
+            if !in_string {
+                return true;
+            }
+            at = end + 1;
+        }
+        !in_string
+    };
+    let mut in_string = leaves_a_string_open(&stripped[from..body], false) && closes(from);
+    let mut end = body;
+    while end < stripped.len() {
+        let rest = &stripped[end..];
+        let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+        let line = &rest[..line_len];
+        if !in_string
+            && (!line.starts_with([' ', '\t'])
+                || line.trim_matches([' ', '\t', '\r', '\n']).is_empty())
+        {
+            break;
+        }
+        in_string = leaves_a_string_open(line, in_string) && (in_string || closes(end));
+        end += line_len;
+    }
+    end
+}
+
+/// Whether `text` leaves a string open, given whether it starts in one: a
+/// `"` opens or closes one, a `\` in one escapes the character after it, and
+/// a `;` outside one starts a comment that runs to the end of the line.
+/// Linear in `text`.
+fn leaves_a_string_open(text: &str, mut in_string: bool) -> bool {
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if in_string {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match c {
+                '"' => in_string = true,
+                ';' => while chars.next().is_some_and(|c| c != '\n') {},
+                _ => {}
+            }
+        }
+    }
+    in_string
+}
+
+/// The errors a parse of the declaration bison shifts at `from` gives on its
+/// block, `from..end`, placed in the whole source (`off` is the BOM offset).
+///
+/// On the declaration's own line bison is still recovering: it reports no
+/// syntax error until it has shifted three tokens since its error, so a
+/// grammar error there is reported only from the declaration's fourth token
+/// on (`2024-01-02 2024-01-03 txn }`: none for the `}`; `2024-01-02
+/// 2024-02-30 2024-01-04 open Assets:Q *`: the `*`). The lexer's errors there
+/// (`in_invalid_token`, asked of a position in `stripped`; an invalid date)
+/// and the checks of the entry it builds (an invalid booking method) are
+/// reported wherever they stand, and the lines under it as a parse of it
+/// reports them.
+fn resync_block_errors(
+    stripped: &str,
+    from: usize,
+    end: usize,
+    off: usize,
+    in_invalid_token: impl Fn(usize) -> bool,
+) -> Vec<crate::ParseError> {
+    use crate::logos_lexer::{Token, TokenIter};
+    let block = &stripped[from..end];
+    let first_line = &block[..block.find('\n').unwrap_or(block.len())];
+    // Where the fourth token bison shifts on the declaration's line starts,
+    // in `block`: counted from the declaration's date, and again after each
+    // of the lexer's errors there (an invalid token, an invalid date), which
+    // is an error of its own that its recovery starts over from.
+    let mut shifted = 0usize;
+    let mut reported_from = None;
+    for (token, span) in TokenIter::new_mid_line(first_line, true, 0) {
+        match token {
+            Token::Whitespace(_)
+            | Token::Comment(_)
+            | Token::PercentComment(_)
+            | Token::Newline => {}
+            Token::Date(text) if parse_date_token(text).is_none() => {
+                shifted = 0;
+                reported_from = None;
+            }
+            _ if in_invalid_token(from + span.start) => {
+                shifted = 0;
+                reported_from = None;
+            }
+            _ => {
+                if shifted == 3 && reported_from.is_none() {
+                    reported_from = Some(span.start);
+                }
+                shifted += 1;
+            }
+        }
+    }
+    let reported_from = reported_from.unwrap_or(first_line.len() + 1);
+    let shift = from + off;
+    parse_via_cst_opts(block, false)
+        .errors
+        .into_iter()
+        .filter(|e| {
+            e.span.start >= reported_from
+                || !is_recovery_quiet_kind(&e.kind)
+                || in_invalid_token(from + e.span.start)
+        })
+        .map(|mut e| {
+            e.span = Span::new(e.span.start + shift, e.span.end + shift);
+            e
+        })
+        .collect()
+}
+
+/// Whether an error of this kind is one bison's recovery keeps quiet: a
+/// grammar error. Not the lexer's (an invalid date, a BOM) or the builder's.
+const fn is_recovery_quiet_kind(kind: &crate::ParseErrorKind) -> bool {
+    matches!(
+        kind,
+        crate::ParseErrorKind::SyntaxError(_)
+            | crate::ParseErrorKind::Expected(_)
+            | crate::ParseErrorKind::UnexpectedChar(_)
+            | crate::ParseErrorKind::UnexpectedEof
+            | crate::ParseErrorKind::MissingField(_)
+            | crate::ParseErrorKind::MissingAccount
+            | crate::ParseErrorKind::MissingAmount
+            | crate::ParseErrorKind::MissingCurrency
+            | crate::ParseErrorKind::MissingDirective
+            | crate::ParseErrorKind::IndentationError
+            | crate::ParseErrorKind::MissingNewline
+    )
+}
+
+/// The first place in `line` holding, after a blank, a date and then a
+/// directive keyword or a transaction flag: tokens that bison's recovery,
+/// discarding what it cannot read, shifts as the start of a declaration, so
+/// that its quiet after an error ends there (`quiet_after_failed_line_starts`),
+/// with where its date starts in `line`: `true` when it starts a transaction
+/// (a flag or `txn` after the date), `false` when it starts another directive
+/// (a keyword after it). A date glued to what comes before it
+/// (`<BOM>2024-01-02`) is part of beancount's invalid token, not one. Linear
+/// in the line, which it lexes from its start as the middle of a line, so no
+/// line-start rule hides any of it.
 fn first_dated_header(line: &str) -> Option<(bool, usize)> {
     use crate::logos_lexer::{Token, TokenIter};
     // A date after a blank starts with a digit right after one; without one

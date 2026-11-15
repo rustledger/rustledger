@@ -181,6 +181,81 @@ fn test_parse_dated_line_keeps_unclosed_pushtag() {
     );
 }
 
+/// An undated declaration after the date (`option`, `include`, `plugin`) is
+/// one bison shifts there, which ends its recovery: an indented line after it
+/// is reported (`unexpected INDENT` after an `option`).
+#[test]
+fn test_parse_dated_line_undated_declaration_ends_the_quiet() {
+    assert_counts(&[
+        (
+            "2024-01-02 option \"a\" \"b\"\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "2024-01-02 include \"n\"\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "2024-01-02 plugin \"n\"\n  !\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+    ]);
+}
+
+/// A declaration bison shifts later on a quiet line ends the quiet there, and
+/// what comes after its first three tokens is reported again (the `open`
+/// after `custom "x" 1`), as are the lines under it.
+#[test]
+fn test_parse_dated_line_declaration_later_on_a_quiet_line() {
+    assert_counts(&[
+        (
+            "2024-01-02 123\n  ; c\n2024-01-03 , 2024-01-04 custom \"x\" 1 open Assets:Z\n"
+                .to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+        (
+            "2024-01-02 123\n  ; c\n2024-01-03 , 2024-01-04 custom \"x\" 1\n".to_string(),
+            vec![(1, 1)],
+        ),
+    ]);
+}
+
+/// The declaration bison shifts after an invalid second date is built, and
+/// its defect after its first three tokens is reported beside the date's
+/// error: two errors on the line, as in beancount.
+#[test]
+fn test_parse_dated_line_invalid_date_then_a_failing_declaration() {
+    let opens = "2024-01-01 open Assets:A\n2024-01-01 open Expenses:B\n";
+    assert_counts(&[
+        (
+            format!("{opens}2024-01-02 2024-13-45 2024-01-04 open Assets:Q *\n"),
+            vec![(3, 2)],
+        ),
+        (
+            format!("{opens}2024-01-02 2024-02-30 2024-01-04 open Assets:Q \"x\"\n"),
+            vec![(3, 2)],
+        ),
+    ]);
+}
+
+/// A resynchronized transaction's body runs on over a string that spans lines
+/// (`k: "abc` / `x` / `"`), as it does in a parse of that transaction.
+#[test]
+fn test_parse_dated_line_resynchronized_body_with_a_multi_line_string() {
+    assert_counts(&[
+        (
+            format!("{OPENS}2024-01-02 2024-01-03 * \"n\"\n  k: \"abc\nx\n\"\n"),
+            vec![(4, 1), (5, 1)],
+        ),
+        (
+            format!(
+                "{OPENS}2024-01-02 2024-01-03 * \"n\"\n  note: \"line one\nline two\"\n{POSTINGS}"
+            ),
+            vec![(4, 1)],
+        ),
+    ]);
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

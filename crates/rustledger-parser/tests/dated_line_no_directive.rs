@@ -478,6 +478,20 @@ fn test_parse_dated_line_misgrouped_number() {
             "2024-01-02 2024-13-45 ( 1,0002024 'x\n".to_string(),
             vec![(1, 3)],
         ),
+        // One doubled comma after a single digit is a number in beancount
+        // (#2976), so its recovery quiets the line as for any number.
+        (
+            format!("{OPENS}2024-01-02 123 * \"n\"\n  Assets:A  1,,000 USD\n"),
+            vec![(4, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 123 * \"n\"\n  Assets:A  1,,000,000 USD\n"),
+            vec![(4, 1)],
+        ),
+        (
+            format!("{OPENS}2024-01-02 123 * \"n\"\n  Assets:A  11,,111 USD\n"),
+            vec![(4, 1), (5, 1)],
+        ),
     ]);
 }
 

@@ -226,6 +226,11 @@ pub struct ProcessedLedger {
     /// [`Self::errors_beside_validation`] instead, so one cause is one error,
     /// as in `rledger check`. Such a failure still blocks queries.
     pub restates_e3002: Vec<bool>,
+    /// The lines of the E3002s [`run_validation`] reports for the transactions
+    /// whose booking failure [`Self::restates_e3002`] marks: a surface that
+    /// leaves those failures out moves exactly these E3002s to where the
+    /// failure was (#2998).
+    pub restated_e3002_lines: Vec<u32>,
     /// Raw parse result, needed by editor features and `ParsedLedger`.
     pub parse_result: ParserResult,
     pub lookup: LineLookup,
@@ -294,6 +299,47 @@ impl ProcessedLedger {
     }
 }
 
+/// For each booking failure in `ledger` that restates an E3002
+/// ([`rustledger_loader::LedgerError::restates_ambiguous_elision`]), the line
+/// the validator reports that E3002 on: the posting
+/// [`rustledger_booking::ambiguous_elision`] names, or the transaction when
+/// that posting has no source location, as the validator places it (#2998).
+fn restated_e3002_lines(ledger: &rustledger_loader::Ledger) -> Vec<u32> {
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.restates_ambiguous_elision())
+        .filter_map(|e| {
+            let (start, _) = e.source_span?;
+            let file_id = e.file_id?;
+            // The refused transaction the failure is in: the latest-starting
+            // one at or before it (a span can run up to the next directive's
+            // start, where a failure placed on that directive begins).
+            let refused = ledger
+                .booking_refused
+                .iter()
+                .filter_map(|&i| ledger.directives.get(i))
+                .filter(|d| d.file_id == file_id && d.span.start <= start && start <= d.span.end)
+                .max_by_key(|d| d.span.start)?;
+            let Directive::Transaction(txn) = &refused.value else {
+                return None;
+            };
+            let posting = txn
+                .postings
+                .get(rustledger_booking::ambiguous_elision(txn)?.posting)?;
+            let (file_id, offset) = if rustledger_core::is_source_file_id(posting.file_id)
+                && posting.span != rustledger_core::Span::ZERO
+            {
+                (posting.file_id, posting.span.start)
+            } else {
+                (refused.file_id, refused.span.start)
+            };
+            let line = ledger.source_map.locate(file_id, offset)?.line;
+            u32::try_from(line).ok()
+        })
+        .collect()
+}
+
 /// Parse, book, and process a Beancount source string.
 ///
 /// This is the common entry point for all processing functions.
@@ -332,6 +378,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 option_errors,
                 query_blocked: true,
                 restates_e3002: Vec::new(),
+                restated_e3002_lines: Vec::new(),
                 parse_result,
                 lookup,
             };
@@ -385,6 +432,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                     .map(Error::from)
                     .collect(),
             );
+            let restated_e3002_lines = restated_e3002_lines(&ledger);
             let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
@@ -419,6 +467,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 query_option_errors,
                 query_blocked,
                 restates_e3002,
+                restated_e3002_lines,
                 parse_result,
                 lookup,
             }
@@ -437,6 +486,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 option_errors,
                 query_blocked: true,
                 restates_e3002: Vec::new(),
+                restated_e3002_lines: Vec::new(),
                 parse_result,
                 lookup,
             }

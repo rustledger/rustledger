@@ -288,14 +288,16 @@ impl ParsedLedger {
         // one cause, one error, as `rledger check` gives (#2998): the E3002
         // takes its place in the soundness list, as the loader makes it the
         // booking failure, so every gate below still stops on the refused
-        // transaction. A WASM error does not name its transaction, so with
-        // any such failure every E3002 moves; that ledger's gates were
-        // already closed by the failure.
+        // transaction. Only the E3002s of those transactions move
+        // (`restated_e3002_lines`); another transaction's E3002 stays a
+        // validation finding, as the loader leaves it.
         let mut parse_errors = load.errors_beside_validation();
-        if parse_errors.len() < load.errors.len() {
-            let (refusals, findings) = validation_errors
-                .into_iter()
-                .partition(|e| e.code.as_deref() == Some("E3002"));
+        if !load.restated_e3002_lines.is_empty() {
+            let (refusals, findings) = validation_errors.into_iter().partition(|e| {
+                e.code.as_deref() == Some("E3002")
+                    && e.line
+                        .is_some_and(|l| load.restated_e3002_lines.contains(&l))
+            });
             parse_errors.extend::<Vec<_>>(refusals);
             validation_errors = findings;
         }
@@ -1492,6 +1494,43 @@ pub mod option_warning_severity_tests {
         single.extend(crate::helpers::run_validation(&load));
         let single: Vec<_> = single.iter().map(|e| (e.code.as_deref(), e.line)).collect();
         assert_eq!(single, vec![(Some("E3002"), Some(7))], "{single:?}");
+    }
+
+    /// #2998: only the E3002 of the transaction whose `BOOK` was left out
+    /// moves to the load errors. Transaction "z" keeps its `BOOK` (a "cannot
+    /// infer currency" for `Assets:C`, which a non-elided posting also uses),
+    /// so its E3002 stays a validation finding, as the loader leaves it;
+    /// transaction "y"'s `BOOK` restates its E3002, which takes its place.
+    #[test]
+    fn only_the_restated_transactions_e3002_moves() {
+        let opens = "2020-01-01 open Assets:A\n2020-01-01 open Assets:B\n\
+2020-01-01 open Assets:C\n2020-01-01 open Assets:D\n\n";
+        let z = concat!(
+            "2024-01-02 * \"z\"\n  Assets:A\n  Assets:B  7 EUR\n  Assets:D  10 USD\n",
+            "  Assets:C  5\n  Assets:C  EUR\n",
+        );
+        let y = "\n2024-01-03 * \"y\"\n  Assets:A  1 USD\n  Assets:B\n  Assets:C\n";
+        let found = |src: &str| {
+            let parsed = ParsedLedger::new(src);
+            let list = |errors: &[Error]| -> Vec<(Option<String>, Option<u32>)> {
+                let mut v: Vec<_> = errors.iter().map(|e| (e.code.clone(), e.line)).collect();
+                v.sort();
+                v
+            };
+            (list(&parsed.parse_errors), list(&parsed.validation_errors))
+        };
+        let code = |c: &str, l: u32| (Some(c.to_string()), Some(l));
+
+        // Both: y's E3002 (line 16) replaces its BOOK; z's BOOK (line 10)
+        // stays a load error and z's E3002 (line 7) a finding.
+        let (load, findings) = found(&format!("{opens}{z}{y}"));
+        assert_eq!(load, vec![code("BOOK", 10), code("E3002", 16)], "{load:?}");
+        assert_eq!(findings, vec![code("E3002", 7)], "{findings:?}");
+
+        // Only the unrelated kept BOOK: nothing moves.
+        let (load, findings) = found(&format!("{opens}{z}"));
+        assert_eq!(load, vec![code("BOOK", 10)], "{load:?}");
+        assert_eq!(findings, vec![code("E3002", 7)], "{findings:?}");
     }
 
     /// And an option ERROR must not disable them either: it does not make the

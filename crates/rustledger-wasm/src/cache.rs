@@ -571,7 +571,17 @@ use crate::types::{Error, LedgerOptions};
 /// error-free load, holds none of them; both payloads here archive a source
 /// with parse errors and its directives, and an older blob would keep serving
 /// the old ones. (v117 was taken by #2983.)
-pub const CACHE_VERSION: u32 = 118;
+/// v119: loader v75, unchanged; PARSER OUTPUT changed (#2979). The indented
+/// lines under a column-0 dated line that opens no directive
+/// (`2024-01-02 123 * "n"`) keep only the lexer's errors until beancount's
+/// recovery would report again, where each was an orphan line's error, and an
+/// invalid date right after the line's date is that line's one error. Every
+/// source that changes holds such a line, which keeps its own error, so a
+/// parse error, before and after: the loader's cache, saved only for an
+/// error-free load, holds none of them, and parsed directives do not move;
+/// both payloads here archive a source with parse errors, and an older blob
+/// would keep serving the old ones. (v118 was taken by #2984.)
+pub const CACHE_VERSION: u32 = 119;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

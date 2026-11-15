@@ -493,7 +493,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     report_duplicate_metadata(source_file.syntax(), bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
-    quiet_after_line_start_bom_lines(&mut errors, source_file.syntax(), stripped, bom_offset);
+    quiet_after_failed_line_starts(&mut errors, source_file.syntax(), stripped, bom_offset);
     drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset, &grammar_failures);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
@@ -9812,9 +9812,27 @@ fn quiet_after_invalid_tokens(
     });
 }
 
-/// Keep the lines after a line a BOM starts as quiet as beancount keeps them
-/// (#2956): only the lexer's own errors there, until its grammar has read
-/// three tokens again.
+/// Keep the lines after a line a BOM starts (#2956), or a column-0 dated line
+/// that opens no directive (#2979), as quiet as beancount keeps them: only the
+/// lexer's own errors there, until its grammar has read three tokens again.
+///
+/// A dated line that opens no directive (`2024-01-02 123 * "n"`, a second
+/// date, an account, a currency, ...: `identify_directive` opens no node for
+/// it) fails the same way: beancount reads the date and fails at the token
+/// after it, and its recovery starts there. A date with nothing after it but
+/// blanks or a comment is not such a line: beancount fails there at the line's
+/// end and reports that on the next line, which is not modeled. Where bison
+/// would shift a declaration ([`first_resync_point`]: a dated header after a
+/// blank, `2024-01-02 2024-01-03 * "n"`, or an undated declaration's keyword,
+/// `2024-01-02 option "a" "b"`), its recovery ends and it builds that
+/// declaration; that is not modeled either, so a dated line holding one starts
+/// no window, a column-0 line holding one ends a window before it, keeping its
+/// errors, and an indented one is quiet and ends the window after it, as
+/// beancount reports the line after it. A failed dated line inside a quiet window starts with a date bison
+/// shifts, so when that is the last token owed, the line is reported and
+/// starts a window of its own (in a dated line's window a date alone on its
+/// line counts too). A line a BOM starts inside a dated line's window starts
+/// its own window there, under the BOM line's rules above.
 ///
 /// A mid-file BOM at the start of a line is beancount's invalid token, so the
 /// statement it is in, or starts, fails right there, and bison's recovery
@@ -9830,7 +9848,8 @@ fn quiet_after_invalid_tokens(
 /// (its date and keyword are the tokens that end it), once two blank or
 /// skipped lines have been read, or after a line (the BOM line included)
 /// holding a dated header after a blank, which bison shifts there in the
-/// middle of the line ([`holds_a_dated_header`]).
+/// middle of the line, or holding an undated declaration's keyword after a
+/// blank ([`first_resync_point`]).
 ///
 /// On a quiet line only the grammar's errors go (syntax errors, construct
 /// checks, a BOM diagnostic that stands for one, and the account-name and
@@ -9849,12 +9868,11 @@ fn quiet_after_invalid_tokens(
 ///
 /// The same recovery follows any line whose first token beancount cannot
 /// read (`$x` and the postings under it), which is not modeled here (#2872);
-/// this is the line a BOM starts.
+/// these are the line a BOM starts and the dated line.
 ///
-/// `errors` is sorted by start and stays so. Asked only when the source holds
-/// a mid-file BOM; walks the green tree once and each line after a BOM line
-/// at most once.
-fn quiet_after_line_start_bom_lines(
+/// `errors` is sorted by start and stays so. Walks the green tree once and
+/// lexes each line after a failed line at most once.
+fn quiet_after_failed_line_starts(
     errors: &mut Vec<crate::ParseError>,
     root: &crate::SyntaxNode,
     stripped: &str,
@@ -9862,7 +9880,7 @@ fn quiet_after_line_start_bom_lines(
 ) {
     use crate::SyntaxKind as K;
     use rowan::Language as _;
-    if errors.is_empty() || !stripped.contains(crate::bom::BOM_CHAR) {
+    if errors.is_empty() {
         return;
     }
     let off = bom_offset as usize;
@@ -9919,21 +9937,159 @@ fn quiet_after_line_start_bom_lines(
     // The quiet lines: (line start, line end, whether the line's error stands
     // for its first invalid token), in source order.
     let mut quiet: Vec<(usize, usize, bool)> = Vec::new();
+    // The lines the recovery starts after: each line a BOM starts (its BOM's
+    // start), and each column-0 line that starts with a date and opens no
+    // directive (its date's start, `true`; #2979). There beancount reads the
+    // date and fails at the token after it (a second date, a number, an
+    // account, ...: `identify_directive` opens no node for the line), so the
+    // indented lines under it are as quiet as after a BOM line, where each was
+    // an orphan `unexpected input` here.
+    // Every column-0 line that starts with a date and opens no directive, by
+    // where it starts, and whether a token follows the date on it.
+    let dated_lines: Vec<(usize, bool)> = items
+        .iter()
+        .filter_map(|&(pos, kind)| {
+            let at_line_start = pos == 0 || stripped.as_bytes()[pos - 1] == b'\n';
+            if kind != K::ERROR_NODE || !at_line_start {
+                return None;
+            }
+            let n = crate::logos_lexer::leading_date_len(&stripped[pos..])?;
+            let rest = &stripped[pos + n..];
+            let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+            let after = line.trim_start_matches([' ', '\t']);
+            // A comment glued to the date (`2024-01-02;c`, `2024-01-02%x`)
+            // leaves it alone on its line too.
+            let comment = |t: &str| t.starts_with([';', '%']);
+            // A date glued to anything but a flag (`2024/1/3:`, `2024-01-03,`)
+            // is a date bison shifts too, the next token its failure; one
+            // glued to a flag (`2024-01-03*`) is left as it was.
+            let glued = line.starts_with(|c: char| {
+                !c.is_whitespace() && !matches!(c, '*' | '!' | '&' | '#' | '?' | '%')
+            });
+            if !(line.is_empty()
+                || line.len() > after.len()
+                || line == "\r"
+                || comment(line)
+                || glued)
+            {
+                return None;
+            }
+            Some((
+                pos,
+                !glued && !after.trim_end_matches('\r').is_empty() && !comment(after),
+            ))
+        })
+        .collect();
+    // A date with nothing after it but blanks or a comment starts no window:
+    // beancount fails there at the line's end, which it reports on the next
+    // line, and that is not modeled here.
+    let mut triggers: Vec<(usize, bool)> = invalid
+        .iter()
+        .filter(|r| is_line_start_bom_token(stripped, r.start, &stripped[(*r).clone()]))
+        .map(|r| (r.start, false))
+        .chain(
+            dated_lines
+                .iter()
+                .filter(|&&(_, token_after)| token_after)
+                .map(|&(pos, _)| (pos, true)),
+        )
+        .collect();
+    triggers.sort_unstable_by_key(|&(start, _)| start);
+    // Whether a column-0 line at `pos` starts with a date and opens no
+    // directive, a token after the date or not: bison shifts that date.
+    let dated_line_at = |pos: usize| {
+        dated_lines
+            .binary_search_by_key(&pos, |&(start, _)| start)
+            .is_ok()
+    };
+    // Whether a line a BOM starts begins in `from..=to`: such a line has its
+    // own window (#2956), which a dated line's window hands over to there.
+    let bom_line_in = |from: usize, to: usize| {
+        let i = triggers.partition_point(|&(start, _)| start < from);
+        triggers[i..]
+            .iter()
+            .take_while(|&&(start, _)| start <= to)
+            .any(|&(_, dated)| !dated)
+    };
+    // Where bison's recovery shifts a declaration on `line` and ends: after a
+    // dated line, any declaration ([`first_resync_point`]); after a BOM line,
+    // a dated header after a blank ([`first_dated_header`]), as #2956 models
+    // it. The window is not modeled past that point: from there the errors
+    // stay as the parse gives them.
+    let ends_recovery = |line: &str, dated_line: bool| {
+        if dated_line {
+            first_resync_point(line).is_some()
+        } else {
+            first_dated_header(line, false).is_some()
+        }
+    };
+    // The dated lines whose `unexpected input` stands for an invalid date
+    // right after their date (below).
+    let mut invalid_second_dates: Vec<usize> = Vec::new();
     let mut walked_to = 0usize;
-    for range in &invalid {
-        if range.start < walked_to
-            || !is_line_start_bom_token(stripped, range.start, &stripped[range.clone()])
-        {
+    for &(start, dated_line) in &triggers {
+        if start < walked_to {
             continue;
         }
-        let Some(nl) = stripped[range.start..].find('\n') else {
+        // An invalid date right after a dated line's date is where beancount's
+        // grammar fails, and that date's own error is the line's one error
+        // (`2024-01-02 2024-02-30`): beancount builds dates in its lexer. Not
+        // when a declaration bison shifts follows on the line, whose own
+        // errors are not modeled (`2024-01-02 2024-13-45 poptag #t`), nor
+        // right after a line with an error of its own: beancount reports some
+        // of those on the next line, this one (a date alone on its line, a
+        // flag-only posting `  !`, an `open` with no account). Only outside a
+        // BOM line's window, which this pass leaves as #2956 has it: such a
+        // line inside one is walked there.
+        if dated_line {
+            let line_end = stripped[start..]
+                .find('\n')
+                .map_or(stripped.len(), |i| start + i);
+            let line = &stripped[start..line_end];
+            let prev_start = stripped[..start.saturating_sub(1)]
+                .rfind('\n')
+                .map_or(0, |i| i + 1);
+            // Whether an error starts on the line before (`errors` is sorted).
+            let after_an_error_line = start > 0 && {
+                let i = errors.partition_point(|e| e.span.start < prev_start + off);
+                errors.get(i).is_some_and(|e| e.span.start < start + off)
+            };
+            let second_date_invalid = crate::logos_lexer::leading_date_len(line).is_some_and(|n| {
+                let rest = line[n..].trim_start_matches([' ', '\t']);
+                crate::logos_lexer::leading_date_len(rest)
+                    .is_some_and(|m| parse_date_token(&rest[..m]).is_none())
+            });
+            // Nor when a lone capital glued to the line's end (`T\r`, `T` at
+            // the end of the input) is an invalid token of its own there.
+            let with_ending = &stripped[start..(line_end + 1).min(stripped.len())];
+            let glued_capital = holds_a_glued_lone_capital(with_ending, line_end == stripped.len())
+                || holds_a_lone_capital_glued_to_a_non_blank(line)
+                // Nor when a number on it is beancount's lexer error (`1,2024`),
+                // which the line's error stands for.
+                || holds_a_misgrouped_number(line);
+            if second_date_invalid
+                && !after_an_error_line
+                && !glued_capital
+                && first_resync_point(line).is_none()
+            {
+                invalid_second_dates.push(start);
+            }
+        }
+        let Some(nl) = stripped[start..].find('\n') else {
             break;
         };
-        let mut pos = range.start + nl + 1;
+        let mut pos = start + nl + 1;
         walked_to = pos;
-        // A dated header later on the BOM line is shifted, and with the line
-        // ending that is the three tokens: no quiet after it.
-        if holds_a_dated_header(&stripped[range.start..=range.start + nl]) {
+        // A declaration bison shifts later on the line ends its recovery
+        // there, and with the line ending that is the three tokens: no quiet
+        // after it.
+        // Nor does a dated line holding a lone capital glued to a character no
+        // currency continues with (`T"`): beancount reads an invalid run from
+        // there, which this pass does not model.
+        let trigger_line = &stripped[start..=start + nl];
+        if ends_recovery(trigger_line, dated_line)
+            || (dated_line && holds_a_lone_capital_glued_to_a_non_blank(trigger_line))
+        {
             continue;
         }
         // Tokens left to shift before beancount reports again.
@@ -9946,6 +10102,11 @@ fn quiet_after_line_start_bom_lines(
             // The line with its `\n`, so a `\r` before it lexes as the line
             // ending's, not as a stray one at the end of the input.
             let with_ending = &stripped[pos..(line_end + 1).min(stripped.len())];
+            // A line a BOM starts inside a dated line's window starts its own
+            // window there, under #2956's rules.
+            if dated_line && bom_line_in(pos, line_end) {
+                break;
+            }
             if line.trim_matches([' ', '\t', '\r']).is_empty()
                 || crate::logos_lexer::beancount_ignores_line(line)
             {
@@ -9959,17 +10120,35 @@ fn quiet_after_line_start_bom_lines(
                     && items
                         .binary_search_by_key(&pos, |&(s, _)| s)
                         .is_ok_and(|i| items[i].1 != K::ERROR_NODE);
-                if starts_directive {
+                // A dated line that opens no directive starts with a date bison
+                // shifts: when that is the last token owed, its failure after
+                // the date is reported, and the recovery starts again after it.
+                // After a dated line, a line holding a declaration bison shifts
+                // ends the window before it: that line keeps its errors.
+                if starts_directive
+                    || (dated_line
+                        && ((owed == 1 && dated_line_at(pos))
+                            || (!indented && ends_recovery(with_ending, true))
+                            || holds_a_lone_capital_glued_to_a_non_blank(line)))
+                {
                     break;
                 }
                 let content = pos + (line.len() - line.trim_start_matches([' ', '\t']).len());
                 let stands_for_token = on_line(pos, line_end)
                     .find(|r| lexed(r))
                     .is_some_and(|r| readable_start_of_an_error_line(&stripped[content..r.start]))
-                    || holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
+                    || holds_a_glued_lone_capital(with_ending, line_end == stripped.len())
+                    // A number beancount's lexer rejects (`1,50`) is an error
+                    // its recovery does not quiet; the line's error stands
+                    // for it. After a dated line only (#2956's windows as they
+                    // were).
+                    || (dated_line && holds_a_misgrouped_number(line));
                 quiet.push((pos, line_end, stands_for_token));
                 owed = 2;
-                if holds_a_dated_header(with_ending) {
+                // A declaration bison shifts on an indented line (a column-0
+                // one ended the window above) is no error of its own there,
+                // but ends the recovery: the line after it is reported.
+                if ends_recovery(with_ending, dated_line) {
                     walked_to = line_end + 1;
                     break;
                 }
@@ -9977,6 +10156,15 @@ fn quiet_after_line_start_bom_lines(
             pos = line_end + 1;
             walked_to = pos;
         }
+    }
+    if !invalid_second_dates.is_empty() {
+        errors.retain(|e| {
+            !(matches!(e.kind, crate::ParseErrorKind::SyntaxError(_))
+                && e.span
+                    .start
+                    .checked_sub(off)
+                    .is_some_and(|at| invalid_second_dates.binary_search(&at).is_ok()))
+        });
     }
     if quiet.is_empty() {
         return;
@@ -10057,6 +10245,64 @@ fn quiet_after_line_start_bom_lines(
     });
 }
 
+/// Whether `line` holds a number beancount's lexer rejects: a run of digits
+/// and commas, ending in a digit, whose commas are not thousands separators
+/// (`1,50`, `1234,567`, `1,000,0`; beancount reports `ValueError: Invalid
+/// number format`). Its integer part must be one to three digits and then
+/// groups of three (`01,000`, `12,345,678` are numbers). The lexer here reads
+/// such a run as numbers and commas, which the grammar rejects. A run starts
+/// where a number token starts, so the digits of a date or an account do not
+/// count. Linear in the line.
+fn holds_a_misgrouped_number(line: &str) -> bool {
+    use crate::logos_lexer::{Token, TokenIter};
+    if !line.contains(',') {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    let mut scanned_to = 0usize;
+    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
+        if !matches!(token, Token::Number(_)) || span.start < scanned_to {
+            return false;
+        }
+        let mut end = span.start;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b',') {
+            end += 1;
+        }
+        while end > span.start && bytes[end - 1] == b',' {
+            end -= 1;
+        }
+        scanned_to = end;
+        let run = &line[span.start..end];
+        if !run.contains(',') {
+            return false;
+        }
+        let mut groups = run.split(',');
+        let first_ok = groups.next().is_some_and(|g| (1..=3).contains(&g.len()));
+        !(first_ok && groups.all(|g| g.len() == 3))
+    })
+}
+
+/// Whether `line` holds, after a blank, a capital glued to punctuation that no
+/// currency or account continues with (`T"`, `T#`, `P(`): beancount's `CAPITAL` needs
+/// a blank after it, so it reads the run from there as an invalid token, while
+/// the lexer here may read the capital otherwise (`T"` opens a string). Linear
+/// in the line.
+fn holds_a_lone_capital_glued_to_a_non_blank(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    (1..bytes.len()).any(|i| {
+        matches!(bytes[i - 1], b' ' | b'\t')
+            && bytes[i].is_ascii_uppercase()
+            && bytes.get(i + 1).is_some_and(|&c| {
+                !(c.is_ascii_alphanumeric()
+                    || c >= 0x80
+                    || matches!(
+                        c,
+                        b'\'' | b'.' | b'_' | b'-' | b':' | b' ' | b'\t' | b'\r' | b'\n'
+                    ))
+            })
+    })
+}
+
 /// Whether `line` holds a lone capital beancount reads as the start of an
 /// invalid token, which the lexer here reads as a one-letter currency or
 /// flag: one glued to the character after it (`T#!`, `A$`, `B\r` on a CRLF
@@ -10064,7 +10310,7 @@ fn quiet_after_line_start_bom_lines(
 /// (the rule `invalid_runs` reads a heading's rest by), or one at the very
 /// end of the input (`at_eof`, no line ending after the line). `line` holds
 /// its `\n`, so a CRLF line's `\r` lexes as its line ending. On a line
-/// quiet after a line a BOM starts (`quiet_after_line_start_bom_lines`) the
+/// quiet after a line a BOM starts (`quiet_after_failed_line_starts`) the
 /// line's error stands for that token, as it does on an ordinary error line,
 /// so it is kept. Linear in the line, lexed as the middle of a line.
 fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
@@ -10083,39 +10329,126 @@ fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
     })
 }
 
-/// Whether `line` holds, after a blank, a date and then a directive keyword or
-/// a transaction flag: tokens that bison's recovery, discarding what it
-/// cannot read, shifts as the start of a declaration, so that its quiet after
-/// an error ends there (`quiet_after_line_start_bom_lines`). A date glued to
-/// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid
-/// token, not one. Linear in the line, which it lexes from its start as the
-/// middle of a line, so no line-start rule hides any of it.
-fn holds_a_dated_header(line: &str) -> bool {
+/// The first point in `line` where bison's recovery shifts a declaration and
+/// ends: a dated header after a blank ([`first_dated_header`]), or an undated
+/// declaration's keyword (`option`, `include`, `plugin`, `pushtag`, `poptag`,
+/// `pushmeta`, `popmeta`) past the line's start, whichever comes first. `true` when it
+/// starts a transaction. Linear in the line.
+fn first_resync_point(line: &str) -> Option<(bool, usize)> {
+    use crate::logos_lexer::{Token, TokenIter};
+    let dated = first_dated_header(line, true);
+    // Not only after a blank: glued to punctuation (`~,option`) the keyword
+    // is a token of its own too, and shifted the same.
+    let undated = TokenIter::new_mid_line(line, true, 0).find_map(|(token, span)| {
+        let found = span.start > 0
+            && matches!(
+                token,
+                Token::Option_
+                    | Token::Include
+                    | Token::Plugin
+                    | Token::Pushtag
+                    | Token::Poptag
+                    | Token::Pushmeta
+                    | Token::Popmeta
+            );
+        found.then_some((false, span.start))
+    });
+    match (dated, undated) {
+        (Some(d), Some(u)) => Some(if d.1 <= u.1 { d } else { u }),
+        (d, u) => d.or(u),
+    }
+}
+
+/// The first place in `line` holding, after a blank, a date and then a
+/// directive keyword or a transaction flag: tokens that bison's recovery,
+/// discarding what it cannot read, shifts as the start of a declaration, so
+/// that its quiet after an error ends there (`quiet_after_failed_line_starts`),
+/// with where its date starts in `line`: `true` when it starts a transaction
+/// (a flag or `txn` after the date), `false` when it starts another directive
+/// (a keyword after it). With `after_a_dated_line`, a lone capital after the
+/// date counts as a transaction flag, and a date glued after punctuation
+/// beancount lexes as a token of its own (`,` `:` `|` `~` `@` `{` `}` `(` `)`
+/// `+` `-` `/`) counts as after a blank, as beancount reads them; a BOM line's
+/// window keeps #2956's reading without them. A date glued to
+/// what comes before it (`<BOM>2024-01-02`) is part of beancount's invalid token, not one. Linear
+/// in the line, which it lexes from its start as the middle of a line, so no
+/// line-start rule hides any of it.
+fn first_dated_header(line: &str, after_a_dated_line: bool) -> Option<(bool, usize)> {
     use crate::logos_lexer::{Token, TokenIter};
     // A date after a blank starts with a digit right after one; without one
     // the line is not lexed at all.
-    if !line
-        .as_bytes()
-        .windows(2)
-        .any(|w| matches!(w[0], b' ' | b'\t') && w[1].is_ascii_digit())
-    {
-        return false;
+    // A date after a blank, or after punctuation beancount lexes as a token
+    // of its own (`,2024-01-03`, `:2024-01-03`, `|2024-01-03`), starts with a
+    // digit right after one; without one the line is not lexed at all.
+    if !line.as_bytes().windows(2).any(|w| {
+        let separator = matches!(w[0], b' ' | b'\t')
+            || (after_a_dated_line
+                && matches!(
+                    w[0],
+                    b',' | b':'
+                        | b'|'
+                        | b'~'
+                        | b'@'
+                        | b'{'
+                        | b'}'
+                        | b'('
+                        | b')'
+                        | b'+'
+                        | b'-'
+                        | b'/'
+                ));
+        separator && w[1].is_ascii_digit()
+    }) {
+        return None;
     }
     let mut after_blank = false;
-    let mut date = false;
-    for (token, _) in TokenIter::new_mid_line(line, true, 0) {
+    let mut date = None;
+    for (token, span) in TokenIter::new_mid_line(line, true, 0) {
         match token {
             Token::Whitespace(_) => after_blank = true,
             Token::Date(_) => {
-                date = after_blank;
+                date = after_blank.then_some(span.start);
                 after_blank = false;
             }
-            Token::Star
-            | Token::Flag(_)
-            | Token::Pending
-            | Token::Hash
-            | Token::Txn
-            | Token::Open
+            Token::Comma
+            | Token::Colon
+            | Token::Pipe
+            | Token::Tilde
+            | Token::At
+            | Token::AtAt
+            | Token::LBrace
+            | Token::RBrace
+            | Token::LDoubleBrace
+            | Token::RDoubleBrace
+            | Token::LParen
+            | Token::RParen
+            | Token::Plus
+            | Token::Minus
+            | Token::Slash
+                if after_a_dated_line =>
+            {
+                // A date right after it is shifted as after a blank.
+                date = None;
+                after_blank = true;
+            }
+            Token::Star | Token::Flag(_) | Token::Pending | Token::Hash | Token::Txn
+                if date.is_some() =>
+            {
+                return date.map(|at| (true, at));
+            }
+            // A lone capital (`T`, `P`, `X`), which the lexer reads as a
+            // currency, is a transaction's flag to beancount there too. Asked
+            // for after a dated line only; a BOM line's window keeps #2956's
+            // reading.
+            Token::Currency(c)
+                if after_a_dated_line
+                    && date.is_some()
+                    && c.len() == 1
+                    && c.as_bytes()[0].is_ascii_uppercase() =>
+            {
+                return date.map(|at| (true, at));
+            }
+            Token::Open
             | Token::Close
             | Token::Balance
             | Token::Pad
@@ -10126,17 +10459,17 @@ fn holds_a_dated_header(line: &str) -> bool {
             | Token::Price
             | Token::Commodity
             | Token::Custom
-                if date =>
+                if date.is_some() =>
             {
-                return true;
+                return date.map(|at| (false, at));
             }
             _ => {
-                date = false;
+                date = None;
                 after_blank = false;
             }
         }
     }
-    false
+    None
 }
 
 /// Whether beancount's grammar for the indented line `stripped[line_start..

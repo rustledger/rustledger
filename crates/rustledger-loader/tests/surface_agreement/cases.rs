@@ -44,6 +44,10 @@
 //   complete in beancount too, so its residual is reported, and so it is
 //   when the BOMs start an account (`<BOM>Assets:A`), where beancount's
 //   grammar reduces the transaction before it fails at that account.
+// - So it is for a line led by any other token beancount's lexer rejects
+//   (`$x`, `x`, `2024-13-45`, `1,50`, `T@`), right after the transaction's
+//   block: beancount discards the transaction and reports only the token,
+//   where rledger reported its residual too (#2976).
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -300,6 +304,41 @@ garbage
                 code: "P0026",
                 line: 7,
                 message: "Invalid token: UTF-8 BOM",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "a column-0 invalid token after a transaction discards its residual",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"discarded before an invalid token\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+$x
+
+2024-01-03 * \"complete before a blank line\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+
+$x
+",
+        findings: &[
+            Finding {
+                code: "P0012",
+                line: 7,
+                message: "parse error: unexpected input",
+            },
+            Finding {
+                code: "E3001",
+                line: 9,
+                message: "Transaction does not balance: residual -1 USD",
+            },
+            Finding {
+                code: "P0012",
+                line: 13,
+                message: "parse error: unexpected input",
             },
         ],
         closes_nonempty: false,

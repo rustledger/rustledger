@@ -10249,7 +10249,12 @@ fn quiet_after_failed_line_starts(
 /// and commas, ending in a digit, whose commas are not thousands separators
 /// (`1,50`, `1234,567`, `1,000,0`; beancount reports `ValueError: Invalid
 /// number format`). Its integer part must be one to three digits and then
-/// groups of three (`01,000`, `12,345,678` are numbers). The lexer here reads
+/// groups of three (`01,000`, `12,345,678` are numbers). One more form passes
+/// beancount's validator, though its documented rule does not allow it: a
+/// single digit, a doubled comma, then groups of three (`1,,000`,
+/// `1,,000,000`, `0,,111`; `11,,111` and `1,,111,,111` are errors), checked
+/// against bean-check 3.2.3 over every run of digits and commas up to nine
+/// long (#2976). The lexer here reads
 /// such a run as numbers and commas, which the grammar rejects. A run starts
 /// where a number token starts, so the digits of a date or an account do not
 /// count. Linear in the line.
@@ -10276,9 +10281,18 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
         if !run.contains(',') {
             return false;
         }
-        let mut groups = run.split(',');
-        let first_ok = groups.next().is_some_and(|g| (1..=3).contains(&g.len()));
-        !(first_ok && groups.all(|g| g.len() == 3))
+        let mut groups = run.split(',').peekable();
+        let first = groups.next().map_or(0, str::len);
+        // beancount's one doubled comma: right after a single leading digit.
+        if first == 1 && groups.peek().is_some_and(|g| g.is_empty()) {
+            groups.next();
+        }
+        let mut any = false;
+        let rest_ok = groups.all(|g| {
+            any = true;
+            g.len() == 3
+        });
+        !((1..=3).contains(&first) && any && rest_ok)
     })
 }
 
@@ -10682,17 +10696,21 @@ fn report_no_metadata_continuations(
 /// transaction (#2954), so the parser's rule is the only one. `false` when
 /// `source` does not start with a transaction.
 ///
-/// A line a BOM starts right where the transaction's block would go on (the
-/// next line, with no blank or comment line between) counts too (#2956):
-/// beancount's statement fails at that BOM, its invalid token, and is
-/// discarded with everything before it, while here the block ends at the
-/// line and the transaction is kept with the postings above it. A
-/// directive's span runs to the next directive's start, so `source` holds
-/// that line when there is one. After a blank or comment line the
-/// transaction is complete in beancount too, and kept with its findings; so
-/// it is when the BOMs start an account in beancount (`<BOM>Assets:A`,
-/// `<BOM>assets:A`: `bom_led_account`), where its grammar reduces the transaction before
-/// it fails at that account.
+/// A line led by a token beancount's lexer rejects right where the
+/// transaction's block would go on (the next line, with no blank or
+/// column-0 comment line between; an indented comment does not end the
+/// block) counts too: a line a BOM starts (#2956), or one led by any other
+/// invalid token (`$x`, `x`, `2024-13-45`, `1,50`, `T@`; #2976,
+/// `line_leads_with_an_invalid_token`). beancount's statement fails at
+/// that token and is discarded with everything before it, while here the
+/// block ends at the line and the transaction is kept with the postings
+/// above it. A directive's span runs to the next directive's start, so
+/// `source` holds that line when there is one. After a blank or column-0
+/// comment line the transaction is complete in beancount too, and kept with
+/// its findings; so it is when the line starts with a token beancount lexes
+/// (an account, a number, `~`, `*`) or with BOMs that start an account in
+/// beancount (`<BOM>Assets:A`, `<BOM>assets:A`: `bom_led_account`), where
+/// its grammar reduces the transaction before it fails at that token.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
     let root = super::parser::parse_structured(source);
@@ -10706,15 +10724,44 @@ pub fn transaction_holds_invalid_token(source: &str) -> bool {
         || txn
             .next_sibling()
             .and_then(|next| next.first_token())
-            .is_some_and(|t| {
-                let start = usize::from(t.text_range().start());
-                // BOMs beancount reads into an account (`<BOM>Assets:A`) are
-                // no invalid token there: its grammar reduces the transaction
-                // before failing at that account, and keeps it.
-                t.kind() == crate::SyntaxKind::ERROR_TOKEN
-                    && is_line_start_bom_token(source, start, t.text())
-                    && crate::logos_lexer::bom_led_account(&source[start..]).is_none()
-            })
+            .is_some_and(|t| line_leads_with_an_invalid_token(source, &t))
+}
+
+/// Whether `first`, the first token of the line after a transaction's block,
+/// starts that line and is a token beancount's lexer rejects (#2976): an
+/// invalid token here (`$x`, `x`, `k:`, a control character), a date that is
+/// no calendar date (`2024-13-45`: `parse_date_token`), a number beancount
+/// refuses (`1,50`: `holds_a_misgrouped_number`), or a lone capital glued to
+/// what follows it (`T@`: `holds_a_glued_lone_capital`), which this lexer
+/// reads as tokens of their own. beancount's statement fails at that token,
+/// and its recovery discards the transaction before it. A token beancount
+/// lexes (an account, a number, `~`, `*`, a tag, a keyword) fails its grammar
+/// only once the transaction is reduced, so the transaction is kept; so it is
+/// for BOMs beancount reads into an account (`<BOM>Assets:A`,
+/// `bom_led_account`), #2956.
+fn line_leads_with_an_invalid_token(source: &str, first: &crate::SyntaxToken) -> bool {
+    use crate::SyntaxKind as K;
+    let start = usize::from(first.text_range().start());
+    if start == 0 || source.as_bytes()[start - 1] != b'\n' {
+        return false;
+    }
+    let rest = &source[start..];
+    let line = rest.find('\n').map_or(rest, |end| &rest[..=end]);
+    // The token's word, with the blank after it when there is one, so a
+    // lone capital is glued only to what is in the word.
+    let word = line.find([' ', '\t']).map_or(line, |blank| &line[..=blank]);
+    match first.kind() {
+        K::ERROR_TOKEN => {
+            !is_line_start_bom_token(source, start, first.text())
+                || crate::logos_lexer::bom_led_account(rest).is_none()
+        }
+        K::DATE => parse_date_token(first.text()).is_none(),
+        K::NUMBER => holds_a_misgrouped_number(word),
+        K::CURRENCY | K::FLAG => {
+            first.text().len() == 1 && holds_a_glued_lone_capital(word, !line.ends_with('\n'))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than

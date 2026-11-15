@@ -581,7 +581,17 @@ use crate::types::{Error, LedgerOptions};
 /// error-free load, holds none of them, and parsed directives do not move;
 /// both payloads here archive a source with parse errors, and an older blob
 /// would keep serving the old ones. (v118 was taken by #2984.)
-pub const CACHE_VERSION: u32 = 119;
+/// v120: loader v75, unchanged; both payloads' findings move (#2976). A
+/// transaction followed directly by a line led by a token beancount's lexer
+/// rejects (`$x`, `2024-13-45`, `1,50`, `T@`) has no balance residual
+/// (`E3001`) reported, as beancount discards it, where only a line a BOM
+/// starts did that before; and a number with one doubled comma after a single
+/// digit (`1,,000`), a number in beancount, no longer keeps a line's error
+/// on the lines #2979 keeps quiet. Every such source has a parse error, before
+/// and after, which the loader's cache is never saved for; parsed directives
+/// do not move. Both payloads here archive validation findings and parse
+/// errors, and an older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 120;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

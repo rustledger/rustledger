@@ -3807,6 +3807,61 @@ mod tests {
         errors
     }
 
+    /// #2998: E3002 is on the posting beancount 3.2.3 reports it on (the last
+    /// of several fully elided postings), not on the transaction; a posting
+    /// with no source location leaves it on the transaction.
+    #[test]
+    fn e3002_is_on_the_posting_beancount_names() {
+        let opens = ["Assets:A", "Assets:B", "Assets:C"]
+            .map(|a| at(0, Directive::Open(Open::new(date(2024, 1, 1), a))));
+        let txn = at(
+            100,
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "x")
+                    .with_posting(posting_at(
+                        110,
+                        Posting::new("Assets:A", Amount::new(dec!(1), "USD")),
+                    ))
+                    .with_posting(posting_at(130, Posting::auto("Assets:B")))
+                    .with_posting(posting_at(150, Posting::auto("Assets:C"))),
+            ),
+        );
+        let early: Vec<_> = opens.iter().cloned().chain([txn]).collect();
+        let errors = across(&early, &opens);
+        let e3002: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::MultipleInterpolation)
+            .collect();
+        assert_eq!(e3002.len(), 1, "{errors:?}");
+        assert_eq!(
+            e3002[0].span,
+            Some(rustledger_parser::Span::new(150, 159)),
+            "on the last elided posting: {errors:?}"
+        );
+
+        let synthesized = at(
+            100,
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "x")
+                    .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1), "USD")))
+                    .with_synthesized_posting(Posting::auto("Assets:B"))
+                    .with_synthesized_posting(Posting::auto("Assets:C")),
+            ),
+        );
+        let early: Vec<_> = opens.iter().cloned().chain([synthesized]).collect();
+        let errors = across(&early, &opens);
+        let e3002: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::MultipleInterpolation)
+            .collect();
+        assert_eq!(e3002.len(), 1, "{errors:?}");
+        assert_eq!(
+            e3002[0].span,
+            Some(rustledger_parser::Span::new(100, 150)),
+            "on the transaction: {errors:?}"
+        );
+    }
+
     /// [`across`], with booking having refused `refused` (each one is in
     /// `early` and not in `late`, as the loader sets refused transactions
     /// aside).

@@ -32,8 +32,9 @@ pub use book::{
     posting_lot_total, present_inventory,
 };
 pub use interpolate::{
-    InterpolationError, InterpolationResult, Rollback, UnknownGroup, elided_unknown_groups,
-    interpolate, interpolate_in_place, interpolate_with_tolerance_map, interpolate_with_tolerances,
+    AmbiguousElision, InterpolationError, InterpolationResult, Rollback, UnknownGroup,
+    ambiguous_elision, elided_unknown_groups, interpolate, interpolate_in_place,
+    interpolate_with_tolerance_map, interpolate_with_tolerances,
 };
 pub use pad::{
     PadError, PadOrigin, PadPlan, PadResult, PaddedAtCost, PlannedPadding,

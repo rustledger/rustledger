@@ -169,6 +169,9 @@ pub fn validate_transaction_late(
 /// error already reported for the token (#2954). A transaction whose block a
 /// line led by a mid-file BOM breaks into is one too: beancount discards that
 /// statement whole, while here it keeps the postings above the line (#2956).
+/// So it is for a parse error on the transaction's own lines, and for a line
+/// right after it that builds no directive (#2987), which is why the line
+/// after the span is read too ([`line_at`]).
 /// The balance check asks this only once it has found a residual, so a
 /// ledger that balances never reads its source here. `false` without a
 /// location or without the text
@@ -181,11 +184,46 @@ fn kept_under_error_recovery(
     let Some((span, file_id)) = location else {
         return false;
     };
-    options
-        .source_lines
-        .as_ref()
-        .and_then(|lines| lines.text(file_id, span.start..span.end))
+    let Some(lines) = options.source_lines.as_ref() else {
+        return false;
+    };
+    lines
+        .text(file_id, span.start..span.end)
+        .map(|mut text| {
+            text.push_str(&line_at(lines, file_id, span.end));
+            text
+        })
         .is_some_and(|text| rustledger_parser::transaction_holds_invalid_token(&text))
+}
+
+/// The line of file `file_id` that starts at byte `start`, with its line
+/// break, or as much of it as the text gives (none at the file's end).
+///
+/// A directive's span runs to the next directive's start, so a line after a
+/// transaction that builds no directive (`2024-02-30 open Assets:B`, a date
+/// that is no calendar date) is outside the span when nothing follows it;
+/// beancount's statement fails at that line all the same (#2987), so the
+/// parser's rule reads it too. Read in chunks, and a character at a time
+/// where a chunk would run past the file's end or split a character, since
+/// [`crate::SourceLines::text`] gives no slice it cannot cut there.
+fn line_at(lines: &crate::SourceLines, file_id: u16, start: usize) -> String {
+    const CHUNK: usize = 64;
+    let mut line = String::new();
+    let mut at = start;
+    loop {
+        let piece = lines
+            .text(file_id, at..at + CHUNK)
+            .or_else(|| (1..=4).find_map(|width| lines.text(file_id, at..at + width)));
+        let Some(piece) = piece else {
+            return line;
+        };
+        if let Some(end) = piece.find('\n') {
+            line.push_str(&piece[..=end]);
+            return line;
+        }
+        at += piece.len();
+        line.push_str(&piece);
+    }
 }
 
 /// Whether `txn.postings[i]` is the first posting in `txn` to its account.

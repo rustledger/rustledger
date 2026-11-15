@@ -608,7 +608,18 @@ use crate::types::{Error, LedgerOptions};
 /// error, before and after (the glued one-letter rules reported the capital),
 /// which the loader's cache is never saved for. Both payloads here archive
 /// parse errors, and an older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 122;
+/// v123: loader v75, unchanged; both payloads' findings move (#2987). A
+/// transaction with a parse error on its own lines (an indented
+/// `2024-13-45`, `1,50`, `5`), or followed directly by a directive whose date
+/// is no calendar date (`2024-02-30 open Assets:C`), has no balance residual
+/// (`E3001`) reported, as beancount discards it; a tag line after the first
+/// posting or a repeated metadata key, which beancount's builder reports
+/// while it keeps the transaction, still has it reported. Every such source
+/// has a parse error, before and after, which the loader's cache is never
+/// saved for; parse errors and parsed directives do not move. Both payloads
+/// here archive validation findings, and an older blob would keep serving the
+/// old ones.
+pub const CACHE_VERSION: u32 = 123;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

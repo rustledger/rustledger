@@ -48,6 +48,12 @@
 //   (`$x`, `x`, `2024-13-45`, `1,50`, `T@`), right after the transaction's
 //   block: beancount discards the transaction and reports only the token,
 //   where rledger reported its residual too (#2976).
+// - So it is for any parse error on the transaction's own lines (an
+//   indented `2024-13-45`), and for a column-0 directive whose date is no
+//   calendar date right after the block, which builds no directive and so
+//   was outside the transaction's span when it ends the file. A tag line
+//   after the first posting is beancount's builder's error, not its
+//   grammar's: the transaction is kept and its residual reported (#2987).
 
 /// One finding every surface must report.
 #[allow(dead_code)] // each surface reads the fields it needs
@@ -339,6 +345,50 @@ $x
                 code: "P0012",
                 line: 13,
                 message: "parse error: unexpected input",
+            },
+        ],
+        closes_nonempty: false,
+    },
+    SurfaceCase {
+        name: "a parse error on a transaction's lines, or an invalid-date directive after it, discards its residual",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"discarded at an indented invalid date\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+  2024-13-45
+
+2024-01-03 * \"kept: a tag line after a posting\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+  #t
+
+2024-01-04 * \"discarded before an invalid-date directive\"
+  Assets:A  1 USD
+  Assets:B  -2 USD
+2024-02-30 open Assets:C
+",
+        findings: &[
+            Finding {
+                code: "P0015",
+                line: 7,
+                message: "invalid date: month 13 out of range",
+            },
+            Finding {
+                code: "E3001",
+                line: 9,
+                message: "Transaction does not balance: residual -1 USD",
+            },
+            Finding {
+                code: "P0012",
+                line: 12,
+                message: "parse error: tags and links are not allowed after a transaction's first posting (`#t`); write them on the header line or on a line before the first posting",
+            },
+            Finding {
+                code: "P0015",
+                line: 17,
+                message: "invalid date: day 30 out of range for 2024-02",
             },
         ],
         closes_nonempty: false,

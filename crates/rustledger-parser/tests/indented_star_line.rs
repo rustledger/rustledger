@@ -234,8 +234,10 @@ fn test_parse_column0_heading_is_still_silenced() {
             opens: &[A, B],
         },
         Case {
+            // Line 4 is inside the recovery from `@@ junk` (#2993): only its
+            // invalid token's own error, as in bean-check 3.2.3.
             src: "2024-01-01 open Assets:A\n@@ junk\n* heading\n  * ind\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 33), (28, 32), (43, 51), (47, 50)],
+            errors: &[(25, 33), (28, 32), (47, 50)],
             comments: &[(33, 43)],
             opens: &[A, B],
         },

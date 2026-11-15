@@ -619,7 +619,15 @@ use crate::types::{Error, LedgerOptions};
 /// saved for; parse errors and parsed directives do not move. Both payloads
 /// here archive validation findings, and an older blob would keep serving the
 /// old ones.
-pub const CACHE_VERSION: u32 = 123;
+/// v124: loader v75, unchanged; parse errors move (#2993). The lines after a
+/// column-0 line beancount cannot read (`$`, a marker alone on its line
+/// `!`, `pushmeta k: "v"`) report only the lexer's own errors until its
+/// recovery ends, so an orphan posting or a second marker line there is no
+/// error of its own. Every such source has a parse error, before and after,
+/// which the loader's cache is never saved for; parsed directives do not
+/// move. Both payloads here archive parse errors, and an older blob would
+/// keep serving the old ones.
+pub const CACHE_VERSION: u32 = 124;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

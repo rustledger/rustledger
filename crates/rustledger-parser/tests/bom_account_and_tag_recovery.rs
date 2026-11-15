@@ -250,9 +250,10 @@ fn test_parse_bom_account_no_longer_stands_in_for_a_missed_error() {
 /// Known, documented in the PR: the tag-side counterpart. Where the header
 /// defect now stands in place of the tag and link errors, a line whose extra
 /// tag errors made up for something rledger already misses counts what it
-/// counts with its tags and links removed: a mid-line `T#!` (one invalid
-/// token in beancount), `U?SD` (one invalid token in beancount, valid tokens
-/// here), a second grammar error after `NULL`; and `{#t`, which rledger lexes
+/// counts with its tags and links removed: a second grammar error after
+/// `NULL`; (a mid-line `T#!` and `U?SD`, one invalid token each in beancount,
+/// were two more such rows, and count beancount's 2 since #2982 lexes them
+/// as beancount does); and `{#t`, which rledger lexes
 /// as a `{#` and an invalid run where beancount reads a `{` and a tag, so it
 /// counts one more than beancount, as it does with no second tag.
 #[test]
@@ -262,19 +263,19 @@ fn test_parse_tag_errors_no_longer_stand_in_for_a_missed_error() {
         (
             "2024-01-02 event \"a\" \"b\" \"s\" T#! #t #u",
             "2024-01-02 event \"a\" \"b\" \"s\" T#!",
-            1,
+            2,
             2,
         ),
         (
             "2024-01-02 balance Assets:A 1 USD { U?SD #t #u",
             "2024-01-02 balance Assets:A 1 USD { U?SD",
-            1,
+            2,
             2,
         ),
         (
             "2024-01-02 price HOOL 1 USD USD U?SD #t^l",
             "2024-01-02 price HOOL 1 USD USD U?SD",
-            1,
+            2,
             2,
         ),
         (

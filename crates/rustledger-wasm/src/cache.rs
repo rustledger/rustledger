@@ -600,7 +600,15 @@ use crate::types::{Error, LedgerOptions};
 /// one-letter rules reported the capital), which the loader's cache is never
 /// saved for. Both payloads here archive parse errors, and an older blob
 /// would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 121;
+/// v122: loader v75, unchanged; parse errors move (#2982). Any lone capital
+/// glued to a non-blank that starts no longer currency or account
+/// (`U~SD`, `U?SD`, `V,`, `T#!`) is, with the rest of its run, one invalid
+/// token, as in beancount, also where the run otherwise lexes; a
+/// transaction's flag position is unchanged. Every such source has a parse
+/// error, before and after (the glued one-letter rules reported the capital),
+/// which the loader's cache is never saved for. Both payloads here archive
+/// parse errors, and an older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 122;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

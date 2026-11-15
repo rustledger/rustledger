@@ -63,9 +63,10 @@ fn string_after_tag_is_rejected() {
 
 /// #2008 case 4 — `test-cases_SyntaxErrors.ErrorInTransactionLine.beancount`.
 ///
-/// beancount rejects `A:*:B` at the lexer (`Invalid token: 'A:*:B'`). We reach
-/// the same verdict structurally: `A` lexes as a one-character `CURRENCY`,
-/// which is a valid flag *in the flag position* and junk after a string.
+/// beancount rejects `A:*:B` at the lexer (`Invalid token: 'A:*:B'`), and so do
+/// we since #2982: a lone capital glued to what follows it starts an invalid
+/// token that runs to the next blank. One error, that token's, and no header
+/// error beside it.
 #[test]
 fn junk_after_the_narration_is_rejected() {
     let src = "2013-05-01 open Assets:US:Cash\n\
@@ -73,17 +74,18 @@ fn junk_after_the_narration_is_rejected() {
                2013-05-02 * \"Dinner\" A:*:B\n\
                \x20 Expenses:Restaurant               100 USD\n\
                \x20 Assets:US:Cash                   -100 USD\n";
-    let errs = header_errors(src);
-    assert_eq!(
-        errs.len(),
-        1,
-        "expected exactly one header error, got {errs:?}"
-    );
+    let errs: Vec<String> = parse(src)
+        .errors
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
     assert!(
-        errs[0].contains("in transaction header"),
+        errs[0].contains("unexpected input"),
         "wrong diagnostic: {}",
         errs[0]
     );
+    assert!(header_errors(src).is_empty());
 }
 
 /// #2008 cases 6 and 7 — `ParserEntryTypes.TransactionThreeStrings` and
@@ -317,11 +319,13 @@ fn deprecated_pipe_is_not_reported_twice() {
     );
 }
 
-/// Only one defect is reported per header: `A:*:B` lexes into five tokens that
-/// would each trip the rule, and beancount reports one error per transaction.
+/// Only one defect is reported per header: two stray tokens after the
+/// narration would each trip the rule, and beancount reports one error per
+/// transaction. (`A:*:B`, the original shape here, is one invalid token since
+/// #2982; see `junk_after_the_narration_is_rejected`.)
 #[test]
 fn one_defect_per_header() {
-    let src = "2013-05-02 * \"Dinner\" A:*:B\n\x20 Expenses:R  100 USD\n\x20 Assets:C -100 USD\n";
+    let src = "2013-05-02 * \"Dinner\" USD EUR\n\x20 Expenses:R  100 USD\n\x20 Assets:C -100 USD\n";
     assert_eq!(header_errors(src).len(), 1);
 }
 

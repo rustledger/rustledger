@@ -88,16 +88,14 @@ fn test_parse_header_amount_check_ending_at_an_invalid_token_is_that_token_alone
     }
 }
 
-/// A known mismatch (#2982), unchanged from main for the same line without
-/// the dropped check: a sign or a `balance`/`price` amount, then any invalid
-/// token, then later on the line a capital-led word with a character our
-/// lexer reads as a token of its own (`U~SD`, `U?SD`, `U%SD`), which
-/// beancount reads as one more invalid token and we do not. Main's sign or
-/// amount check stood in for that missing error; with it dropped the line
-/// counts what main counts without it. beancount counts 2 on every line
-/// below, signed or not; we count 1. Pinned so a fix of #2982 shows up here.
+/// A sign or a `balance`/`price` amount, then any invalid token, then later
+/// on the line a capital-led word with a character of its own (`U~SD`,
+/// `U?SD`, `U%SD`): beancount reads that word as one more invalid token, and
+/// so do we since #2982, so every line below counts beancount's 2, signed or
+/// not. (Before #2982 the word lexed as valid tokens and counted 1 once
+/// #2981 dropped the sign check that had stood in for it.)
 #[test]
-fn test_parse_check_dropped_before_a_word_we_do_not_read_as_invalid() {
+fn test_parse_check_dropped_before_a_capital_led_invalid_word() {
     // A posting: the sign, then the first invalid token (`$`, `'`, `x`,
     // `.5`, a control character, a backtick), then the word.
     for signed in [
@@ -111,7 +109,7 @@ fn test_parse_check_dropped_before_a_word_we_do_not_read_as_invalid() {
         // The analog: the same line without its sign.
         for amount in [signed, &signed[1..]] {
             let src = format!("{OPENS}2024-01-02 *\n  Assets:B  1 USD\n  Assets:A  {amount}\n");
-            assert_eq!(per_line(&src), vec![(5, 1)], "{src:?}");
+            assert_eq!(per_line(&src), vec![(5, 2)], "{src:?}");
         }
     }
     // A header: the amount check ends at the first invalid token (`2x`,
@@ -124,9 +122,9 @@ fn test_parse_check_dropped_before_a_word_we_do_not_read_as_invalid() {
         "2024-01-02 balance Assets:A 2x U?SD",
         "2024-01-02 price HOOL 2x U?SD",
     ] {
-        assert_eq!(per_line(&format!("{line}\n")), vec![(1, 1)], "{line:?}");
+        assert_eq!(per_line(&format!("{line}\n")), vec![(1, 2)], "{line:?}");
         let src = format!("{OPENS}{line}\n");
-        assert_eq!(per_line(&src), vec![(3, 1)], "{src:?}");
+        assert_eq!(per_line(&src), vec![(3, 2)], "{src:?}");
     }
 }
 

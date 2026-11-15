@@ -50,6 +50,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use rustledger_parser::cst::parse_red_only;
+use rustledger_parser::logos_lexer::{Token, tokenize_lossless};
 use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse};
 
 const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
@@ -1399,9 +1400,45 @@ const fn signed(n: usize) -> i64 {
 
 /// Whether an accepted further-than-main line holds: for its cause, or
 /// because main was closer to beancount only by not reading the rest of a
-/// line (`main_read_less`).
+/// line (`main_read_less`), or only by missing a lone capital's invalid
+/// run (`main_missed_glued_capitals`).
 fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
-    cause_holds(a, w) || main_read_less(w)
+    cause_holds(a, w) || main_read_less(w) || main_missed_glued_capitals(w)
+}
+
+/// Whether main's count for the line is exactly rledger's less the line's
+/// invalid tokens led by a lone capital glued to a non-alphanumeric
+/// (`T#!`, `U~SD`), which main lexed as valid tokens (#2982): the whole of
+/// what the line counts beyond main is those tokens, each one invalid token
+/// in beancount too, which main missed, so main was closer only by that
+/// miss offsetting an error the line already counts that beancount does not.
+///
+/// Like `main_read_less`, it says why main was closer, whatever the line's
+/// cause.
+fn main_missed_glued_capitals(w: &Worse) -> bool {
+    let line_start: usize = w
+        .input
+        .split_inclusive('\n')
+        .take(w.line - 1)
+        .map(str::len)
+        .sum();
+    let line_end = w.input[line_start..]
+        .find('\n')
+        .map_or(w.input.len(), |i| line_start + i);
+    let glued = tokenize_lossless(&w.input)
+        .into_iter()
+        .filter(|(t, span)| {
+            span.start >= line_start
+                && span.start < line_end
+                && matches!(t, Token::Error(text)
+                    if text.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+                        && text
+                            .as_bytes()
+                            .get(1)
+                            .is_some_and(|b| !b.is_ascii_alphanumeric()))
+        })
+        .count();
+    glued > 0 && w.rl.checked_sub(glued) == Some(w.main)
 }
 
 /// Whether main's count for the line is exactly what rledger counts with

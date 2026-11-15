@@ -914,6 +914,12 @@ pub(crate) struct TokenIter<'src> {
     /// either; skipping it keeps a long run of glued one-letter tokens
     /// (`V,V,V,...`) linear.
     capital_run_clean_until: usize,
+    /// End of the last run of non-blank characters that a transaction's flag
+    /// leads (`capital_rule_applies` false for it, #2982). A lone capital
+    /// before it is in that run, where the glued-capital rule never applies;
+    /// skipping it keeps a long flag-led run (`P"x"T"x"T...`) linear instead of
+    /// rescanning the run back to its start for each of its capitals.
+    flag_led_run_until: usize,
     /// Set on the clones `cr_chain_is_trivia` reads ahead with, where a lone
     /// capital glued to a stray `\r` is left a token: the walk decides those
     /// itself, so no lookahead starts another (#2966).
@@ -943,6 +949,7 @@ impl<'src> TokenIter<'src> {
             last_newline_end: 0,
             stray_cr_failed_until: 0,
             capital_run_clean_until: 0,
+            flag_led_run_until: 0,
             peeking: false,
             cr_chain_until: 0,
             cr_chain_is_trivia: false,
@@ -1302,6 +1309,8 @@ impl TokenIter<'_> {
             .iter()
             .rposition(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
             .map_or(0, |i| i + 1);
+        #[cfg(test)]
+        test_counters::CAPITAL_RULE_SCANNED_BYTES.with(|c| c.set(c.get() + (at - run_start)));
         // A run glued to a date (`2024-01-02P@T`) is led by what follows it.
         let lead = match leading_date_len(&self.source[run_start..at]) {
             Some(n) => run_start + n,
@@ -1383,6 +1392,11 @@ pub(crate) mod test_counters {
         /// thread.
         pub(crate) static CAPITAL_PEEK_LEXED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Bytes `TokenIter::capital_rule_applies` scanned back for the start
+        /// of a run, and the glued-capital rule scanned forward for its end, on
+        /// this thread (#2982).
+        pub(crate) static CAPITAL_RULE_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
         /// Bytes logos scanned into the error spans the `Err` arm received,
         /// and bytes the BOM-run and account lookaheads looked at, on this
         /// thread.
@@ -1434,12 +1448,12 @@ impl<'src> Iterator for TokenIter<'src> {
             // `Assets:a` is `Invalid token: 'Assets:a'`. Here a lone capital is
             // a `Currency` (or a `Flag`) wherever it stands, and what follows
             // lexes on its own (`Assets:a` is `A`, the key `ssets:` and an
-            // error `a`). So when the rest of its run of non-blank characters
-            // holds an error, the run from the capital on is one error, as
-            // there. Only then: a capital glued to tokens that all lex
-            // (`{1 V, 2024-01-01}`, `T#!`) is still a token here, and the
-            // parser's glued one-letter rules report it (`directive_header`,
-            // `txn_header`).
+            // error `a`). So the run from the capital to the next blank is one
+            // error, as there. When the rest of the run holds an error, this
+            // lookahead finds it and hands back a lexer standing at the run's
+            // end (it also decides the stray-`\r` chains of #2966); otherwise
+            // the rule after it makes the capital the error, which the `Err`
+            // arm runs to the blank.
             if is_lone_capital(&result)
                 && span.end >= self.capital_run_clean_until
                 && let Some((at, lexer)) = self.error_later_in_run(span.end)
@@ -1448,6 +1462,52 @@ impl<'src> Iterator for TokenIter<'src> {
                 span.end = lexer.span().end;
                 self.lexer = lexer;
                 result = Err(());
+            }
+            // A lone capital glued to a non-blank whose run otherwise lexes
+            // (`U~SD`, `U?SD`, `V,`, `T#!`): the run is beancount's invalid
+            // token all the same (#2982). It was a token here, and the
+            // parser's glued one-letter rules reported it, one error, which
+            // matched on a clean line. After an earlier invalid token on the
+            // line, the line's construct checks are quieted
+            // (`quiet_after_invalid_tokens`), that error with them, so
+            // `  Assets:A  $ U~SD` lost the `'U~SD'` beancount reports; and a
+            // first glued capital reported through grammar errors (sometimes
+            // two) stood before the line's first invalid token, so a later
+            // one was miscounted. Lexed as beancount lexes it, the run is the
+            // line's invalid token wherever it stands; the `Err` arm runs it
+            // to the next blank. A capital before a blank, a `\r` (the
+            // stray-`\r` rule below decides it) or the end of the source is
+            // left to the rules that already handle it, and so is a
+            // transaction's flag (`flag_position`) and a run a flag leads
+            // (`capital_rule_applies`): `txn_header`'s glued-flag rule reports
+            // it and keeps the transaction (`2024-01-02 P;c`), and an indented
+            // date's flag keeps beancount's two errors there (#2966's
+            // `identify_directive` arm reads only a one-letter error as one).
+            //
+            // Cheap tests first, and a flag-led run is decided once: every
+            // capital in it stays a token, so the lexer goes on inside the run
+            // and `capital_rule_applies` (which scans back to the run's start)
+            // would run for each of them, quadratic on `P"x"T"x"T...`.
+            if is_lone_capital(&result)
+                && span.start >= self.flag_led_run_until
+                && source
+                    .as_bytes()
+                    .get(span.end)
+                    .is_some_and(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                && self.flag_position(span.start).is_none()
+            {
+                if self.capital_rule_applies(span.start) {
+                    result = Err(());
+                } else {
+                    let rest = &source.as_bytes()[span.end..];
+                    let run_len = rest
+                        .iter()
+                        .position(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                        .unwrap_or(rest.len());
+                    #[cfg(test)]
+                    test_counters::CAPITAL_RULE_SCANNED_BYTES.with(|c| c.set(c.get() + run_len));
+                    self.flag_led_run_until = span.end + run_len;
+                }
             }
             // A `\r` that is not part of a line ending is none of the three
             // either, so a lone capital glued to one is beancount's invalid
@@ -2158,7 +2218,8 @@ mod tests {
     fn test_tokenize_lossless_lone_capital_lookahead_is_linear() {
         const N: usize = 20_000;
         for (label, src, errors) in [
-            ("clean run", "{1 ".to_string() + &"V,".repeat(N) + "}\n", 0),
+            // A glued run is one invalid token, as in beancount (#2982).
+            ("glued run", "{1 ".to_string() + &"V,".repeat(N) + "}\n", 1),
             ("error at its end", "V,".repeat(N) + "$\n", 1),
         ] {
             test_counters::CAPITAL_RUN_SCANNED_BYTES.with(|c| c.set(0));
@@ -2174,6 +2235,42 @@ mod tests {
                 .filter(|(t, _)| matches!(t, Token::Error(_)))
                 .count();
             assert_eq!(found, errors, "{label}");
+        }
+    }
+
+    /// The glued-capital rule decides a run a transaction's flag leads once
+    /// (#2982): every capital in such a run stays a token, so the lexer goes
+    /// on inside it, and asking `capital_rule_applies` for each capital
+    /// scanned the run back to its start every time (quadratic).
+    #[test]
+    fn test_tokenize_lossless_flag_led_run_is_decided_once() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            (
+                "strings",
+                "2024-01-02 P".to_string() + &"\"x\"T".repeat(N) + "\n",
+            ),
+            (
+                "at signs",
+                "2024-01-02 P@".to_string() + &"T@".repeat(N) + "\n",
+            ),
+            (
+                "glued to the date",
+                "2024-01-02P@".to_string() + &"T@".repeat(N) + "\n",
+            ),
+            (
+                "indented",
+                "  2024-01-02 P@".to_string() + &"T@".repeat(N) + "\n",
+            ),
+        ] {
+            test_counters::CAPITAL_RULE_SCANNED_BYTES.with(|c| c.set(0));
+            let _ = tokenize_lossless(&src);
+            let scanned = test_counters::CAPITAL_RULE_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "{label}: scanned {scanned} bytes of a {}-byte input",
+                src.len()
+            );
         }
     }
 

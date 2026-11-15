@@ -123,6 +123,34 @@ fn test_parse_lines_under_an_unreadable_line_are_quiet() {
     ]);
 }
 
+/// A stray `\r` before a comment (`\r;c`) is a blank line to beancount, though
+/// this parser reports an error there (a pre-existing difference): it starts
+/// no window, is no line with tokens inside one, and is looked past, so the
+/// line after it keeps its errors, as main gives them. beancount reports one
+/// error fewer on each (the `\r;c` line's).
+#[test]
+fn test_parse_stray_cr_before_a_comment_starts_no_window() {
+    assert_counts(&[
+        ("\r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("\r;c\r\n02\r\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("\r;c\n-\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("\r;c\n  Assets:A 1 USD\n".to_string(), vec![(1, 1), (2, 1)]),
+        (
+            "\r;c\n\r;c\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1), (2, 1), (3, 1)],
+        ),
+        (
+            "#tag\n \r;c\n!x\n  #tag\n".to_string(),
+            vec![(1, 1), (2, 1), (4, 1)],
+        ),
+        // Unchanged neighbors.
+        ("\r\n02\n".to_string(), vec![(2, 1)]),
+        ("\r$\n  Assets:A 1 USD\n".to_string(), vec![(1, 1), (2, 1)]),
+        (" \r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("\t\r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
+    ]);
+}
+
 /// Shapes the window does not model keep main's count: a line holding a date
 /// or an undated keyword (bison may end its recovery there), a line right
 /// after another failed line, a line a BOM or a date starts (their own

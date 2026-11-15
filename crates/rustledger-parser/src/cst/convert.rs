@@ -10068,16 +10068,23 @@ fn quiet_after_failed_line_starts(
             #[cfg(test)]
             crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
                 .with(|c| c.set(c.get() + (end - prev_start)));
-            let prev = &stripped[prev_start..end - 1];
-            // A blank or skipped line, in beancount's reading (a stray `\r`
-            // before a comment included), is looked past, whatever this
-            // parser reports on it.
-            if blank_or_comment_line(prev) || crate::logos_lexer::beancount_ignores_line(prev) {
-                end = prev_start;
-                continue;
+            // A line holding a stray `\r` is read differently here and in
+            // beancount (#2980): taken for a failed line, so nothing after it
+            // starts a window.
+            if holds_a_stray_cr(&stripped[prev_start..end]) {
+                return true;
             }
             let i = errors.partition_point(|e| e.span.start < prev_start + off);
-            return errors.get(i).is_some_and(|e| e.span.start < end + off);
+            if errors.get(i).is_some_and(|e| e.span.start < end + off) {
+                return true;
+            }
+            let prev = &stripped[prev_start..end - 1];
+            if !(prev.trim_matches([' ', '\t', '\r']).is_empty()
+                || crate::logos_lexer::beancount_ignores_line(prev))
+            {
+                return false;
+            }
+            end = prev_start;
         }
         false
     };
@@ -10103,7 +10110,7 @@ fn quiet_after_failed_line_starts(
             && end <= (line_end + 1).min(stripped.len())
             && !dated_line_at(pos)
             && !crate::logos_lexer::beancount_ignores_line(&stripped[pos..line_end])
-            && !blank_or_comment_line(&stripped[pos..line_end])
+            && !holds_a_stray_cr(&stripped[pos..(line_end + 1).min(stripped.len())])
             && !after_a_failed_line(pos)
             && fails())
         .then_some((pos, Trigger::Unreadable))
@@ -10234,13 +10241,13 @@ fn quiet_after_failed_line_starts(
             // ends at any line a BOM starts (a BOM-led account too), which it
             // leaves as the parse gives it.
             if dated_line && bom_line_in(pos, line_end)
-                || (kind == Trigger::Unreadable && line.starts_with(crate::bom::BOM_CHAR))
+                || (kind == Trigger::Unreadable
+                    && (line.starts_with(crate::bom::BOM_CHAR) || holds_a_stray_cr(with_ending)))
             {
                 break;
             }
             if line.trim_matches([' ', '\t', '\r']).is_empty()
                 || crate::logos_lexer::beancount_ignores_line(line)
-                || (kind == Trigger::Unreadable && blank_or_comment_line(line))
             {
                 owed -= 1;
                 if owed == 0 {
@@ -10436,15 +10443,18 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
     })
 }
 
-/// Whether beancount reads `line` as a blank line: nothing but blanks and
-/// stray `\r`s (its lexer skips `[ \t\r]+`), then nothing or a `;` comment
-/// (`;.*`). This parser reads a stray `\r` before a comment as an error of its
-/// own (`\r;c`), which the recovery windows of
-/// [`quiet_after_failed_line_starts`] after an unreadable line must not take
-/// for a line with tokens (#2993).
-fn blank_or_comment_line(line: &str) -> bool {
-    let rest = line.trim_start_matches([' ', '\t', '\r']);
-    rest.is_empty() || rest.starts_with(';')
+/// Whether `text` (a line, with its line ending if it has one) holds a stray
+/// `\r`: one not right before a `\n`, anywhere on the line, or at the end of
+/// the input. beancount's lexer skips it as a blank (`[ \t\r]+`), and this
+/// parser reads it in ways that differ from that by context (#2980, `\r;c` is
+/// an error here, a blank line there), so the recovery windows after an
+/// unreadable line do not reach across such a line (#2993).
+fn holds_a_stray_cr(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'\r' && bytes.get(i + 1) != Some(&b'\n'))
 }
 
 /// Whether `line`, past its first character if `skip_first_char` (the start

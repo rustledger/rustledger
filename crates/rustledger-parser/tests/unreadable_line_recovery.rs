@@ -123,13 +123,13 @@ fn test_parse_lines_under_an_unreadable_line_are_quiet() {
     ]);
 }
 
-/// A stray `\r` before a comment (`\r;c`) is a blank line to beancount, though
-/// this parser reports an error there (a pre-existing difference): it starts
-/// no window, is no line with tokens inside one, and is looked past, so the
-/// line after it keeps its errors, as main gives them. beancount reports one
-/// error fewer on each (the `\r;c` line's).
+/// A line holding a stray `\r` (one not right before a `\n`) is read here in
+/// ways that differ from beancount's by context (`\r;c` is an error here, a
+/// blank line there, a pre-existing difference): it starts no window, ends one
+/// before it, and counts as a failed line when deciding whether the line after
+/// it starts one. So every line around it keeps its errors, as main gives them.
 #[test]
-fn test_parse_stray_cr_before_a_comment_starts_no_window() {
+fn test_parse_stray_cr_lines_keep_their_errors() {
     assert_counts(&[
         ("\r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
         ("\r;c\r\n02\r\n".to_string(), vec![(1, 1), (2, 1)]),
@@ -148,6 +148,40 @@ fn test_parse_stray_cr_before_a_comment_starts_no_window() {
         ("\r$\n  Assets:A 1 USD\n".to_string(), vec![(1, 1), (2, 1)]),
         (" \r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
         ("\t\r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
+        // A stray `\r` mid-line (beancount: one error fewer, or the same).
+        ("option \r;c\n#\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("option \r;c\n-\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("include \r;c\n-\n".to_string(), vec![(1, 1), (2, 1)]),
+        (
+            "option \"a\" \"b\"\r;c\n-\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        ("2024-01-02\r;c\n-01\n".to_string(), vec![(1, 1), (2, 1)]),
+        (
+            "pushtag \r;c\n{\nx\n".to_string(),
+            vec![(1, 1), (2, 1), (3, 1)],
+        ),
+        (
+            "poptag\t\r#c\nAssets:A #\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "\npoptag\t\r\t#t\n  *USD#t-02\n".to_string(),
+            vec![(2, 1), (3, 1)],
+        ),
+        (
+            "   \r;cinclude\t1.5\t-01\npushmeta  \r;c\n  }#\n  \r\r\n".to_string(),
+            vec![(1, 1), (2, 1), (3, 1)],
+        ),
+        (
+            "2024-01-02 open Assets:A\r;c\n-\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        // No stray `\r`: unchanged, or the window as usual (`\r\n` ends a line).
+        ("option \r\n#\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("option ;c\n#\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("option\n#\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("x\r\n-\n".to_string(), vec![(1, 1)]),
     ]);
 }
 

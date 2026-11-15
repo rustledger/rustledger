@@ -462,6 +462,78 @@ fn test_parse_dated_line_lone_capital_glued_to_a_quote() {
     )]);
 }
 
+/// A number beancount's lexer rejects (`1,50`, `1,0`) is an error its
+/// recovery does not quiet: a quiet line holding one keeps its error, and the
+/// invalid-second-date rule leaves a line holding one alone.
+#[test]
+fn test_parse_dated_line_misgrouped_number() {
+    assert_counts(&[
+        (
+            format!("{OPENS}2024-01-02 123 * \"n\"\n  Assets:A  1,50 EUR\n"),
+            vec![(4, 1), (5, 1)],
+        ),
+        ("2024-1-2 y\n1,0".to_string(), vec![(1, 1), (2, 1)]),
+        ("2024-1-3 2024-0-0 1,2024\n".to_string(), vec![(1, 2)]),
+        (
+            "2024-01-02 2024-13-45 ( 1,0002024 'x\n".to_string(),
+            vec![(1, 3)],
+        ),
+    ]);
+}
+
+/// A column-0 date glued to a non-flag character is a date bison shifts:
+/// where the window owes its last token, the line keeps its error.
+#[test]
+fn test_parse_dated_line_glued_date_at_the_last_owed_token() {
+    assert_counts(&[
+        ("2024-1-3 c\n\n2024/1/3:".to_string(), vec![(1, 1), (3, 1)]),
+        (
+            "2024-1-3 c\n\n2024-01-03,".to_string(),
+            vec![(1, 1), (3, 1)],
+        ),
+        (
+            "2024-01-02 Assets:A * \"n\"\n; note\n2024-01-03:x".to_string(),
+            vec![(1, 1), (3, 2)],
+        ),
+    ]);
+}
+
+/// The invalid-second-date rule leaves the line alone after an `open` with
+/// no account, whose error beancount reports on the dated line: two errors
+/// there, as beancount counts that line.
+#[test]
+fn test_parse_dated_line_invalid_second_date_after_an_open_without_account() {
+    let counts = per_line("2024-01-01 open\n2024-01-02 2024-13-45\n");
+    assert!(counts.contains(&(2, 2)), "{counts:?}");
+}
+
+/// The other punctuation beancount lexes as a token of its own
+/// (`@ { } ( ) + - /`) glued before a date: the line starts no window.
+#[test]
+fn test_parse_dated_line_date_glued_after_other_punctuation() {
+    let cases: Vec<(String, Vec<(usize, usize)>)> = ["@", "{", "}", "(", ")", "+", "-", "/"]
+        .iter()
+        .map(|p| {
+            (
+                format!("2024-01-01 open Assets:A\n\n2024-01-02 {p}2024-01-03 *\n#x\n"),
+                vec![(3, 1), (4, 1)],
+            )
+        })
+        .collect();
+    assert_counts(&cases);
+}
+
+/// A lone capital glued to punctuation on a later line (`  X( 1`) ends a
+/// dated line's window before that line, which keeps its error.
+#[test]
+fn test_parse_dated_line_later_glued_capital_ends_the_window() {
+    let counts = per_line("2024-01-02 123\n  X( 1\n  Assets:A 1 USD\n");
+    assert!(
+        counts.contains(&(1, 1)) && counts.contains(&(2, 1)),
+        "{counts:?}"
+    );
+}
+
 /// Directives that do open stay as they were: no errors.
 #[test]
 fn test_parse_dated_line_directives_unchanged() {

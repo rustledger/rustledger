@@ -9960,12 +9960,23 @@ fn quiet_after_failed_line_starts(
             // A comment glued to the date (`2024-01-02;c`, `2024-01-02%x`)
             // leaves it alone on its line too.
             let comment = |t: &str| t.starts_with([';', '%']);
-            if !(line.is_empty() || line.len() > after.len() || line == "\r" || comment(line)) {
+            // A date glued to anything but a flag (`2024/1/3:`, `2024-01-03,`)
+            // is a date bison shifts too, the next token its failure; one
+            // glued to a flag (`2024-01-03*`) is left as it was.
+            let glued = line.starts_with(|c: char| {
+                !c.is_whitespace() && !matches!(c, '*' | '!' | '&' | '#' | '?' | '%')
+            });
+            if !(line.is_empty()
+                || line.len() > after.len()
+                || line == "\r"
+                || comment(line)
+                || glued)
+            {
                 return None;
             }
             Some((
                 pos,
-                !after.trim_end_matches('\r').is_empty() && !comment(after),
+                !glued && !after.trim_end_matches('\r').is_empty() && !comment(after),
             ))
         })
         .collect();
@@ -10052,7 +10063,10 @@ fn quiet_after_failed_line_starts(
             // the end of the input) is an invalid token of its own there.
             let with_ending = &stripped[start..(line_end + 1).min(stripped.len())];
             let glued_capital = holds_a_glued_lone_capital(with_ending, line_end == stripped.len())
-                || holds_a_lone_capital_glued_to_a_non_blank(line);
+                || holds_a_lone_capital_glued_to_a_non_blank(line)
+                // Nor when a number on it is beancount's lexer error (`1,2024`),
+                // which the line's error stands for.
+                || holds_a_misgrouped_number(line);
             if second_date_invalid
                 && !after_an_error_line
                 && !glued_capital
@@ -10123,7 +10137,12 @@ fn quiet_after_failed_line_starts(
                 let stands_for_token = on_line(pos, line_end)
                     .find(|r| lexed(r))
                     .is_some_and(|r| readable_start_of_an_error_line(&stripped[content..r.start]))
-                    || holds_a_glued_lone_capital(with_ending, line_end == stripped.len());
+                    || holds_a_glued_lone_capital(with_ending, line_end == stripped.len())
+                    // A number beancount's lexer rejects (`1,50`) is an error
+                    // its recovery does not quiet; the line's error stands
+                    // for it. After a dated line only (#2956's windows as they
+                    // were).
+                    || (dated_line && holds_a_misgrouped_number(line));
                 quiet.push((pos, line_end, stands_for_token));
                 owed = 2;
                 // A declaration bison shifts on an indented line (a column-0
@@ -10224,6 +10243,43 @@ fn quiet_after_failed_line_starts(
                 && matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody)
                 && bom_left_to_diagnostic[i])
     });
+}
+
+/// Whether `line` holds a number beancount's lexer rejects: a run of digits
+/// and commas, ending in a digit, whose commas are not thousands separators
+/// (`1,50`, `1234,567`, `1,000,0`; beancount reports `ValueError: Invalid
+/// number format`). Its integer part must be one to three digits and then
+/// groups of three (`01,000`, `12,345,678` are numbers). The lexer here reads
+/// such a run as numbers and commas, which the grammar rejects. A run starts
+/// where a number token starts, so the digits of a date or an account do not
+/// count. Linear in the line.
+fn holds_a_misgrouped_number(line: &str) -> bool {
+    use crate::logos_lexer::{Token, TokenIter};
+    if !line.contains(',') {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    let mut scanned_to = 0usize;
+    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
+        if !matches!(token, Token::Number(_)) || span.start < scanned_to {
+            return false;
+        }
+        let mut end = span.start;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b',') {
+            end += 1;
+        }
+        while end > span.start && bytes[end - 1] == b',' {
+            end -= 1;
+        }
+        scanned_to = end;
+        let run = &line[span.start..end];
+        if !run.contains(',') {
+            return false;
+        }
+        let mut groups = run.split(',');
+        let first_ok = groups.next().is_some_and(|g| (1..=3).contains(&g.len()));
+        !(first_ok && groups.all(|g| g.len() == 3))
+    })
 }
 
 /// Whether `line` holds, after a blank, a capital glued to punctuation that no

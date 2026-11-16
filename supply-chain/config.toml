@@ -337,15 +337,19 @@ version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff]]
-version = "0.2.41"
+version = "0.2.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-core]]
-version = "0.1.4"
+version = "0.1.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-static]]
-version = "0.2.41"
+version = "0.2.46"
+criteria = "safe-to-deploy"
+
+[[exemptions.jiff-tzdb]]
+version = "0.1.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
@@ -450,6 +454,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.nix]]
 version = "0.31.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.nix]]
+version = "0.32.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.num-format]]
@@ -693,7 +701,7 @@ version = "3.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.smallvec]]
-version = "1.16.4"
+version = "1.16.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.spin]]
@@ -801,7 +809,7 @@ version = "0.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq]]
-version = "3.5.1"
+version = "3.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq-proto]]
@@ -901,7 +909,7 @@ version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip]]
-version = "9.5.0"
+version = "9.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]

@@ -3833,3 +3833,45 @@ fn test_take_parse_errors_leaves_the_other_load_errors() {
     assert_eq!(result.directives.len(), 1);
     assert!(result.take_parse_errors().is_empty());
 }
+
+/// #2998: two elided postings are one E3002, on the posting beancount 3.2.3
+/// names (the last fully elided one), with no booking failure beside it. With
+/// validation off nothing reports the E3002, so the booking failure stays.
+#[test]
+fn test_ambiguous_elision_is_one_error_and_booking_failure_only_without_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-01 open Assets:C\n\
+         2024-01-02 *\n  Assets:A 1 USD\n  Assets:B\n  Assets:C\n",
+    )
+    .unwrap();
+
+    let ledger = load(&path, &LoadOptions::default()).expect("should load");
+    let found: Vec<_> = ledger
+        .errors
+        .iter()
+        .map(|e| (e.code.as_str(), e.location.as_ref().map(|l| l.line)))
+        .collect();
+    assert_eq!(found, vec![("E3002", Some(7))], "{:?}", ledger.errors);
+
+    let ledger = load(
+        &path,
+        &LoadOptions {
+            validate: false,
+            ..Default::default()
+        },
+    )
+    .expect("should load");
+    assert_eq!(
+        ledger
+            .errors
+            .iter()
+            .filter(|e| e.is_booking_failure())
+            .count(),
+        1,
+        "{:?}",
+        ledger.errors
+    );
+}

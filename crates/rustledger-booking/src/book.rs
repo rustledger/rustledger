@@ -181,6 +181,47 @@ impl BookingError {
             .map(|p| p.span)
     }
 
+    /// Whether this failure is interpolation refusing the elided postings
+    /// that [`crate::ambiguous_elision`] finds ambiguous: the cause the
+    /// validator reports as E3002, on the posting beancount names (#2998).
+    ///
+    /// Beancount gives one error for it. A booking surface that also runs
+    /// validation leaves such a failure out rather than report the same
+    /// refusal twice (`rledger check` used to print an E3002 and a `BOOK`
+    /// "interpolation failed" for one transaction). A failure with another
+    /// cause is never a restatement: a `MultipleMissing` in a currency no
+    /// ambiguous group is in, or `CannotInferCurrency` for an account any
+    /// posting of which is not one of the elided unknowns. The failure names
+    /// an account, not a posting, so when another posting shares the account
+    /// (`Assets:C 5` beside an elided `Assets:C EUR`) it may be that one's,
+    /// and is kept.
+    #[must_use]
+    pub fn restates_ambiguous_elision(&self, txn: &Transaction) -> bool {
+        use crate::interpolate::InterpolationError as I;
+        let Self::Interpolation(e) = self else {
+            return false;
+        };
+        let Some(ambiguity) = crate::ambiguous_elision(txn) else {
+            return false;
+        };
+        match e {
+            I::MultipleMissing { currency, .. } => {
+                ambiguity.has_unassigned || ambiguity.crowded.iter().any(|(c, _)| c == currency)
+            }
+            I::CannotInferCurrency { account } => {
+                let mut to_account = txn
+                    .postings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| &p.value.account == account)
+                    .peekable();
+                to_account.peek().is_some()
+                    && to_account.all(|(i, _)| ambiguity.postings.contains(&i))
+            }
+            _ => false,
+        }
+    }
+
     /// The message a diagnostic for this failure carries: the failure,
     /// then the transaction's date and narration so the reader can find it.
     ///

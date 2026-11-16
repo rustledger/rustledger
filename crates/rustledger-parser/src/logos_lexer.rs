@@ -1429,6 +1429,10 @@ pub(crate) mod test_counters {
         /// for its markers, on this thread (#2989).
         pub(crate) static MID_LINE_MARKER_STEPS: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Source bytes `quiet_after_failed_line_starts` lexed or scanned
+        /// back over for its unreadable-line windows, on this thread (#2993).
+        pub(crate) static RECOVERY_SHIFT_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -2382,6 +2386,36 @@ mod tests {
             assert!(
                 steps <= 3 * src.len(),
                 "{label}: {steps} steps for a {}-byte input",
+                src.len()
+            );
+        }
+    }
+
+    /// The windows after a column-0 line beancount cannot read (#2993) lex each
+    /// line they walk once, and scan back over at most the three lines before
+    /// each such line, so the work stays linear in the input however many
+    /// unreadable lines, quiet lines or blank lines it holds.
+    #[test]
+    fn test_parse_unreadable_line_windows_scan_linear_bytes() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            ("`$` lines", "$\n".repeat(N)),
+            ("`!` lines", "!\n".repeat(N)),
+            ("`$` and a posting", "$\n  Assets:A 1 USD\n".repeat(N)),
+            (
+                "`$` then postings",
+                "$\n".to_string() + &"  Assets:A 1 USD\n".repeat(N),
+            ),
+            ("`pushmeta k:` lines", "pushmeta k: \"v\"\n".repeat(N)),
+            ("`$ x` and a blank", "$ x\n\n".repeat(N)),
+            ("one long `$` line", "$ ".repeat(N) + "\n"),
+        ] {
+            test_counters::RECOVERY_SHIFT_SCANNED_BYTES.with(|c| c.set(0));
+            let _ = crate::parse(&src);
+            let bytes = test_counters::RECOVERY_SHIFT_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                bytes <= 4 * src.len(),
+                "{label}: scanned {bytes} bytes of a {}-byte input",
                 src.len()
             );
         }

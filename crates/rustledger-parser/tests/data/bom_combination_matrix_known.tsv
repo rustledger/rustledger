@@ -1526,7 +1526,6 @@ kk: <BOM>Assets:A x<BOM>y \t<BOM>Assets:A\n<BOM>plugin "p"\n<BOM>    pk: 2  T#!\
   <BOM><BOM>Assets:A x<BOM>y\tx<BOM>y  A\r\n	3:1	lone-capital-glued-to-tokens
 2024-01-02 ! #t ^l \tAssets:A  <BOM>Assets:A  @ <BOM>Ü:A\n    pk: 2\tUSD\t!\t"a<BOM>b"\t2024-01-02\n  Assets:A  1 USD \t$x @ <BOM>  x<BOM>y \t{1 USD}\n2024-01-02 *\n  Assets:A  1 USD ^l  <BOM>* 1  <BOM>a\n  kk: "v"\n	3:1,4:1,5:3,7:3	indented-line-after-error
 <BOM>2024-01-02 custom "b" 1 \tkk:  <BOM>#t  <BOM>12$ kk: ,\r\n2024-01-02 query "q" "select 1"\r\n  Assets:A  1 USD <BOM>#t x<BOM>y  ;c\t<BOM>a\t<BOM>12$\r\n	3:3,5:2	inner-bom-under-line-error
-1\t@ @\t^l\n{1 USD}\t"s" "s"\tUSD\n	3:1,4:1	line-after-error-line
 * Heading \t<BOM>Ü:A\t2024-01-02 open\t<BOM>#t\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\t"s" , \t<BOM>Assets:A\t#!d\tA<BOM>b\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\n2024-01-02 event "e" "v" <BOM> ;c <BOM>Assets:A <BOM>"s"\t{1 USD}\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD (1 + 2) ^l \t<BOM>Ü:A <BOM> \t<BOM>*\n	4:3,5:1,6:1,7:3	indented-line-after-error
 2024-01-02 note Assets:A "n" ,\t@\t<BOM>12$ A<BOM>b <BOM>\n  kk: "v" \t<BOM>Ü:A \t~  ! \tx<BOM>y |\n  kk: "v"\t2024-01-02 1 \t! #!d\n2024-01-02 * "p" "n"  <BOM>Ü:A  #!d <BOM>#t\tkk:\t<BOM>#t\n    pk: 2 Assets:A <BOM>Assets:A 1 A\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n	3:4,4:2,5:2,6:4,7:1	indented-line-after-error
 <BOM>2024-01-02 price USD 1 EUR \tÜ:A \t<BOM>Ü:A * {1 USD}\r\n2024-01-02 query "q" "select 1"  "a<BOM>b"  <BOM>a  ;c\tA<BOM>b\r\n2024-01-02 * "p" "n"\r\n<BOM>  Assets:A  1 USD @@\tUSD\t<BOM>12$ \tUSD \tUSD\r\n	3:2,4:2,6:2	invalid-account-after-invalid-token
@@ -1567,7 +1566,6 @@ plugin "p"\r\n  #t ^l \t<BOM>\t| <BOM>Assets:A \t<BOM>\r\n<BOM>  ; c\r\n* Headin
 <BOM>2024-01-02 close Assets:C \t#+x <BOM>Assets:A  <BOM>"s" \tA<BOM>b ~\n<BOM>pushmeta kk: 1\n2024-01-02 note Assets:A "n" <BOM>12$ <BOM>a\t| \t<BOM>Assets:A  kk:\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \t<BOM>#t \topen <BOM>* \t%\n<BOM>    pk: 2 "a<BOM>b" foo kk:  2024-01-02\n	3:4,4:1,5:2,6:3,7:2	indented-line-after-error
 2024-01-02 commodity EUR \tA<BOM>b  <BOM>#t\t@@\t*\t|\n<BOM>    pk: 2 <BOM>  x<BOM>y ;c  x<BOM>y \tA<BOM>b\n  Assets:A  1 USD\n2024-01-02 custom "b" 1\t<BOM>\t<BOM>#t <BOM> |  ~\n    pk: 2  @@ <BOM>* <BOM>12$  % @\n2024-01-02 price USD 1 EUR\n<BOM>  ; c <BOM>#t  * <BOM>*  |\n<BOM>    pk: 2\t|  <BOM>Assets:A \t;c \t<BOM>#t  A\n	3:2,4:3,6:3,7:3,9:1,10:1	indented-line-after-error
 2024-01-02 open Assets:C USD\n<BOM>  Assets:A  1 USD\n  #t ^l <BOM>Ü:A <BOM>a <BOM>"s" *\n2024-01-02 query "q" "select 1" {1 USD}  <BOM>12$ "s"\t;c open\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD -2.5\t<BOM>* <BOM> {1 USD}\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n	4:1,5:2,6:2,7:3,8:1	indented-line-after-error
-option "title" "T"\tfoo T#!  $x\t;c\n  Assets:A  1 USD\n2024-01-02 note Assets:A "n"\n<BOM>option "title" "T"\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD  open \t<BOM> <BOM>Ü:A <BOM>"s"\n	3:3,4:1,6:1,7:3	indented-line-after-error
 popmeta kk:\t"a<BOM>b"  Ü:A\tA<BOM>b x<BOM>y  open\n  kk: "v"  kk: ^l <BOM>Assets:A  @\n  #t ^l\t#!d  <BOM>Ü:A  #+x \t!	3:3,4:1,5:3	indented-line-after-error
 poptag #t {1 USD}\tA ;c Ü:A\n  Assets:A  1 HOOL {2 USD} @ 3 USD  ;c \t<BOM>"s"\t^l\t<BOM>#t\n<BOM>plugin "p"	3:1,4:1,5:1	indented-line-after-error
 2024-01-02 note Assets:A "n"\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\topen \t-2.5 A #+x <BOM>a\n<BOM>  #t ^l \t<BOM>"s" <BOM>Ü:A\t<BOM>\tÜ:A\n2024-01-02 open Assets:C USD\npushmeta kk: 1 \tfoo  <BOM>a <BOM>Assets:A  x<BOM>y  Assets:A\n  Assets:A  1 USD\t~ "s" A<BOM>b  <BOM>Assets:A A<BOM>b\n<BOM>  kk: "v"\t<BOM>"s" x<BOM>y  <BOM>Assets:A %  x<BOM>y	4:3,5:3,7:3,8:3,9:4	indented-line-after-error
@@ -1924,7 +1922,7 @@ poptag #t\t#t , <BOM>*\tx<BOM>y  T#!\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n  k
 x<BOM>y  <BOM>a \t<BOM>Ü:A \t<BOM>"s" x<BOM>y\n<BOM>2024-01-02 query "q" "select 1" "a<BOM>b" <BOM>#t <BOM>"s" %\n	3:3,4:3	inner-bom-under-line-error
   <BOM>#+x 2024-01-02\t! \t2024-01-02\nA\t#!d ,\t<BOM>12$ <BOM>#t\n<BOM><BOM>Assets:A  <BOM>* x<BOM>y \t-2.5\n	3:1,4:4,5:3	line-after-error-line
   ^l\t<BOM>Assets:A  x<BOM>y  (1 + 2)	3:1	inner-bom-under-line-error
-popmeta kk:  #+x #+x \t|  ;c\n  Assets:A  1 USD x<BOM>y A x<BOM>y \t<BOM>#t\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\n\t$x ;c <BOM>Assets:A 1 <BOM>Assets:A\n	3:3,4:2,5:1,6:1	listed-exception
+popmeta kk:  #+x #+x \t|  ;c\n  Assets:A  1 USD x<BOM>y A x<BOM>y \t<BOM>#t\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\n\t$x ;c <BOM>Assets:A 1 <BOM>Assets:A\n	3:3,4:2,5:1,6:1	inner-bom-under-line-error
   T#!\t<BOM>a x<BOM>y  1 {1 USD}\n	3:2	mid-line-hash-bang
 2024-01-02 open Assets:C USD  | ;c\tA<BOM>b @@ *\r\n1\t<BOM>a  ^l #t  !\r\n<BOM>  kk: {1 USD}  USD\t<BOM>	3:1,4:2,5:2	line-after-error-line
 <BOM>1 <BOM>a \topen\tA<BOM>b\n2024-01-02 note Assets:A "n"\n2024-01-02 open Assets:C USD T#! "a<BOM>b"\t#t Ü:A\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n	3:3,5:1,6:1	indented-line-after-error

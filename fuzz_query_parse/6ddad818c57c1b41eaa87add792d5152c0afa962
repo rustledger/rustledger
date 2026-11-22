@@ -1,0 +1,4 @@
+SELECT
+	z 
+IN
+(		(	B),)	

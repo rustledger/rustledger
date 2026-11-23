@@ -337,19 +337,23 @@ version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff]]
-version = "0.2.46"
+version = "1.0.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-core]]
-version = "0.1.8"
+version = "1.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-static]]
-version = "0.2.46"
+version = "1.0.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-tzdb]]
-version = "0.1.10"
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.jiff-tzdb-platform]]
+version = "1.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
@@ -499,10 +503,6 @@ criteria = "safe-to-run"
 [[exemptions.plotters-svg]]
 version = "0.3.7"
 criteria = "safe-to-run"
-
-[[exemptions.portable-atomic-util]]
-version = "0.2.8"
-criteria = "safe-to-deploy"
 
 [[exemptions.pprof]]
 version = "0.15.0"

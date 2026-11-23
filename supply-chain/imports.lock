@@ -120,8 +120,8 @@ user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
 [[publisher.clap]]
-version = "4.6.7"
-when = "2026-09-14"
+version = "4.6.9"
+when = "2026-11-20"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -134,22 +134,22 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete]]
-version = "4.6.11"
-when = "2026-09-15"
+version = "4.6.12"
+when = "2026-11-16"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete_nushell]]
-version = "4.6.2"
-when = "2026-08-11"
+version = "4.6.3"
+when = "2026-11-16"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_derive]]
-version = "4.6.7"
-when = "2026-09-14"
+version = "4.6.9"
+when = "2026-11-20"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -789,8 +789,8 @@ user-login = "cfallin"
 user-name = "Chris Fallin"
 
 [[publisher.regex]]
-version = "1.13.1"
-when = "2026-07-15"
+version = "1.13.2"
+when = "2026-11-18"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -803,8 +803,8 @@ user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.regex-automata]]
-version = "0.4.18"
-when = "2026-08-04"
+version = "0.4.19"
+when = "2026-11-18"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -817,8 +817,8 @@ user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.regex-syntax]]
-version = "0.8.11"
-when = "2026-06-09"
+version = "0.8.12"
+when = "2026-11-18"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -914,8 +914,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.syn]]
-version = "3.0.5"
-when = "2026-09-04"
+version = "3.0.10"
+when = "2026-11-09"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -2126,6 +2126,12 @@ This crate is a single-file crate that does what it says on the tin. There are
 a few `unsafe` blocks related to utf-8 validation which are locally verifiable
 as correct and otherwise this crate is good to go.
 """
+
+[[audits.bytecode-alliance.audits.portable-atomic-util]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.2.8"
+notes = "Lots of unsafe code, as to be expected, but mostly a copy of the standard library's `arc.rs` and otherwise nothing awry here."
 
 [[audits.bytecode-alliance.audits.postcard]]
 who = "Alex Crichton <alex@alexcrichton.com>"

@@ -66,7 +66,7 @@ rust_decimal = { version = "1.42", features = ["serde"] }
 # wasm32-unknown-unknown is not possible with just the standard library".
 # No effect on native builds. Required by @rustledger/wasm consumers
 # (see #925).
-jiff = { version = "0.2", features = ["serde", "js"] }
+jiff = { version = "1.0", features = ["serde", "js"] }
 glob = "0.3"
 thiserror = "2"
 anyhow = "1"

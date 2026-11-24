@@ -96,6 +96,7 @@ skip = [
   { crate = "io-lifetimes" },     # wasmtime 47 (cap-std 4.x) drags a 2nd version
   { crate = "linux-raw-sys" },    # rustix skew
   { crate = "miniz_oxide" },      # backtrace/miette 0.8 vs flate2/ureq 0.9
+  { crate = "nix" },              # pprof 0.26, rustyline 0.31, zip 0.32 (zip 9.6 in #3007)
   { crate = "object" },           # backtrace vs gimli
   { crate = "rand_core" },        # paired with rand — 0.6 vs 0.9 vs 0.10 same skew
   { crate = "rustc-hash" },       # rowan depends directly on 1.x; workspace is 2.x

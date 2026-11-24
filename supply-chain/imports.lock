@@ -176,68 +176,68 @@ user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
 
 [[publisher.cranelift-assembler-x64]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-assembler-x64-meta]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-bforest]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-bitset]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-codegen]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-codegen-meta]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-codegen-shared]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-control]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-entity]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-frontend]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-isle]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-native]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.cranelift-srcgen]]
-version = "0.136.5"
-when = "2026-10-29"
+version = "0.136.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.crossbeam-channel]]
@@ -744,13 +744,13 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.pulley-interpreter]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.pulley-macros]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.quote]]
@@ -1033,8 +1033,8 @@ user-login = "Manishearth"
 user-name = "Manish Goregaokar"
 
 [[publisher.url]]
-version = "2.5.8"
-when = "2026-01-05"
+version = "2.5.9"
+when = "2026-11-20"
 user-id = 1139
 user-login = "Manishearth"
 user-name = "Manish Goregaokar"
@@ -1118,73 +1118,73 @@ when = "2026-10-02"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmtime]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-environ]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-component-macro]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-component-util]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-core]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-cranelift]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-fiber]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-jit-debug]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-jit-icache-coherence]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-unwinder]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-versioned-export-macros]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-internal-wit-bindgen]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-wasi]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wasmtime-wasi-io]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
@@ -1198,18 +1198,18 @@ when = "2026-10-30"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wiggle-generate]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wiggle-macro]]
-version = "49.0.5"
-when = "2026-10-29"
+version = "49.0.7"
+when = "2026-11-19"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.winapi-util]]
@@ -2127,6 +2127,12 @@ a few `unsafe` blocks related to utf-8 validation which are locally verifiable
 as correct and otherwise this crate is good to go.
 """
 
+[[audits.bytecode-alliance.audits.portable-atomic-util]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.2.8"
+notes = "Lots of unsafe code, as to be expected, but mostly a copy of the standard library's `arc.rs` and otherwise nothing awry here."
+
 [[audits.bytecode-alliance.audits.postcard]]
 who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
@@ -2845,24 +2851,6 @@ aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/mai
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.5 -> 0.2.0"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.form_urlencoded]]
-who = "Valentin Gosu <valentin.gosu@gmail.com>"
-criteria = "safe-to-deploy"
-version = "1.2.0"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.form_urlencoded]]
-who = "Valentin Gosu <valentin.gosu@gmail.com>"
-criteria = "safe-to-deploy"
-delta = "1.2.0 -> 1.2.1"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.form_urlencoded]]
-who = "edgul <ed.guloien@gmail.com>"
-criteria = "safe-to-deploy"
-delta = "1.2.1 -> 1.2.2"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.getrandom]]

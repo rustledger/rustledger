@@ -1,10 +1,13 @@
 # Security scanning workflow - Secret detection
 #
 # Note: Other security checks are handled by:
-# - ci.yml: cargo-deny (advisories, licenses, bans)
+# - quality.yml: cargo-deny (advisories, licenses, bans) on every push and PR
 # - supply-chain.yml: cargo-vet, dependency-review, SBOM generation
 #
-# This workflow focuses on secret scanning only.
+# This workflow runs secret scanning, plus a daily RustSec advisory check
+# (`deny-advisories`) so a new advisory against an UNCHANGED Cargo.lock goes
+# red on main the day it is published, not at the next PR that happens to
+# run quality.yml.
 name: Security
 on:
   push:
@@ -28,6 +31,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # quality.yml's `Cargo Deny` only runs when a push or PR triggers it, and
+  # Dependabot bumps that touch only workflows or npm lockfiles do not. A
+  # RustSec advisory published against a crate already in Cargo.lock
+  # therefore sat unnoticed on main (url RUSTSEC-2026-0592, wasmtime-wasi
+  # RUSTSEC-2026-0566) until an unrelated PR failed on it. Advisories only,
+  # since bans/licenses/sources cannot change without a Cargo.lock change.
+  deny-advisories:
+    name: Cargo Deny (advisories, daily)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: cargo-deny
+      - name: Check RustSec advisories against the committed Cargo.lock
+        run: cargo deny check advisories
   # Secret scanning with gitleaks
   # Skips for Dependabot PRs (no access to GITLEAKS_LICENSE secret)
   gitleaks:

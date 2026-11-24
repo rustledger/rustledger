@@ -23,7 +23,7 @@ use rustledger_validate::{ValidationError, ValidationOptions, ValidationSession}
 /// Convention across the workspace:
 /// - Tests / benches with fixtures: `2030-01-01` (mid-future anchor)
 /// - WASM (no wall clock available): `2999-12-31` (far-future anchor)
-/// - LSP / FFI / production: `jiff::Zoned::now().date()`
+/// - LSP / FFI / production: `jiff::ZonedDateTime::now().date()`
 pub fn test_today() -> NaiveDate {
     rustledger_core::naive_date(2030, 1, 1).unwrap()
 }

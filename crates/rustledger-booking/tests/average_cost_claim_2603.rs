@@ -237,7 +237,7 @@ fn the_verdict_does_not_depend_on_the_other_postings() {
         }
         let _ = mismatch(book(
             sixteen_hundred_pool(),
-            &sale(dec!(-1), per_unit(dec!(106.66), "USD"), cash.clone()),
+            &sale(dec!(-1), per_unit(dec!(106.66), "USD"), cash),
         ));
     }
 }

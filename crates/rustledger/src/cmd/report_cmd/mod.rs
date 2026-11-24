@@ -951,7 +951,7 @@ fn render<W: io::Write>(
             // default end is today + 1 day — otherwise today's own spending would
             // be silently excluded from its own budget.
             // Same clock source the returns report uses for its default horizon.
-            let today = jiff::Zoned::now().date();
+            let today = jiff::ZonedDateTime::now().date();
             let to_date = match resolved.to {
                 Some(d) => d,
                 None => today
@@ -1026,7 +1026,7 @@ fn resolve_window(
     } else {
         fava_time::END_OF_YEAR
     };
-    window.resolve(fye, jiff::Zoned::now().date())
+    window.resolve(fye, jiff::ZonedDateTime::now().date())
 }
 
 /// The single source of truth for "what does each account hold".

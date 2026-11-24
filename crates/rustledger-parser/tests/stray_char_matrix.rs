@@ -336,7 +336,10 @@ fn test_try_format_source_keeps_a_leading_comma_in_a_currency_list() {
         assert_eq!(try_format_source(&out).expect("formats"), out);
     }
     // Two are a syntax error in beancount, and here.
-    assert!(!parse("2024-01-01 open Assets:A ,,USD\n").errors.is_empty());
+    assert_ne!(
+        parse("2024-01-01 open Assets:A ,,USD\n").errors,
+        [] as [rustledger_parser::ParseError; 0]
+    );
 }
 
 /// A transaction flag written `txn` reads back as `*`: `txn` is the long
@@ -546,10 +549,9 @@ fn test_parse_rejects_a_currency_ending_in_punctuation() {
         };
         assert_eq!(c.currency.as_str(), want);
     }
-    assert!(
-        parse("2024-01-01 note Assets:A \"HOOL' and CAC_\"\n")
-            .errors
-            .is_empty()
+    assert_eq!(
+        parse("2024-01-01 note Assets:A \"HOOL' and CAC_\"\n").errors,
+        [] as [rustledger_parser::ParseError; 0]
     );
 }
 
@@ -1280,10 +1282,9 @@ fn test_parse_reads_percent_as_a_flag_outside_column_0() {
     };
     assert_eq!(t.flag, '%');
     // At column 0 it is still a comment line.
-    assert!(
-        parse_both("% note\n2024-01-01 open Assets:A\n")
-            .errors
-            .is_empty()
+    assert_eq!(
+        parse_both("% note\n2024-01-01 open Assets:A\n").errors,
+        [] as [rustledger_parser::ParseError; 0]
     );
 }
 
@@ -1302,9 +1303,8 @@ fn test_parse_reports_a_one_letter_transaction_flag_glued_to_what_follows() {
     let r = parse_both("2024-01-01 P\r\n  Assets:A  1 USD\r\n  Assets:B\r\n");
     assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
     assert!(r.errors[0].to_string().contains("one-letter flag"));
-    assert!(
-        parse_both("2024-01-01 P ;c\n  Assets:A  1 USD\n  Assets:B\n")
-            .errors
-            .is_empty()
+    assert_eq!(
+        parse_both("2024-01-01 P ;c\n  Assets:A  1 USD\n  Assets:B\n").errors,
+        [] as [rustledger_parser::ParseError; 0]
     );
 }

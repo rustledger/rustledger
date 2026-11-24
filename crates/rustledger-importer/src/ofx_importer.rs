@@ -1054,9 +1054,18 @@ mod tests {
 
     #[test]
     fn matching_accounts_do_not_warn() {
-        assert!(warnings_for(&cc_statement(), "Liabilities:CreditCard").is_empty());
-        assert!(warnings_for(&bank_statement("CHECKING"), "Assets:Bank:Checking").is_empty());
-        assert!(warnings_for(&bank_statement("SAVINGS"), "Assets:Bank:Savings").is_empty());
+        assert_eq!(
+            warnings_for(&cc_statement(), "Liabilities:CreditCard"),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            warnings_for(&bank_statement("CHECKING"), "Assets:Bank:Checking"),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            warnings_for(&bank_statement("SAVINGS"), "Assets:Bank:Savings"),
+            [] as [std::string::String; 0]
+        );
     }
 
     /// Localized account roots are not misconfiguration. An unrecognized root
@@ -1064,8 +1073,14 @@ mod tests {
     /// using `Passif` would be noise.
     #[test]
     fn unrecognized_account_root_does_not_warn() {
-        assert!(warnings_for(&cc_statement(), "Actifs:Banque").is_empty());
-        assert!(warnings_for(&bank_statement("CHECKING"), "Passif:Carte").is_empty());
+        assert_eq!(
+            warnings_for(&cc_statement(), "Actifs:Banque"),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            warnings_for(&bank_statement("CHECKING"), "Passif:Carte"),
+            [] as [std::string::String; 0]
+        );
     }
 
     /// A file carrying both message sets describes more than one account, and
@@ -1084,7 +1099,10 @@ mod tests {
         let bare = "OFXHEADER:100\n<OFX><CURDEF>USD\n\
                     <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115\
                     <TRNAMT>-50.00<FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST></OFX>";
-        assert!(warnings_for(bare, "Assets:Bank:Checking").is_empty());
+        assert_eq!(
+            warnings_for(bare, "Assets:Bank:Checking"),
+            [] as [std::string::String; 0]
+        );
     }
 
     /// The warning is advisory: a mismatch must not cost the user their import.
@@ -1222,7 +1240,7 @@ NEWFILEUID:NONE
             1,
             "LEDGERBAL yields one assertion"
         );
-        assert!(import_result.warnings.is_empty());
+        assert_eq!(import_result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1344,7 +1362,10 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert!(import_result.directives.is_empty());
+        assert_eq!(
+            import_result.directives,
+            [] as [rustledger_core::Directive; 0]
+        );
     }
 
     #[test]
@@ -1775,7 +1796,7 @@ NEWFILEUID:NONE
         let r = OfxImporter
             .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
             .expect("parse succeeds; the bad txn is skipped");
-        assert!(r.directives.is_empty());
+        assert_eq!(r.directives, [] as [rustledger_core::Directive; 0]);
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].contains("invalid amount"));
     }

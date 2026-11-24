@@ -2274,7 +2274,7 @@ fn test_pivot_by_with_order_by_on_hidden_column_works() {
          ORDER BY MIN(date) PIVOT BY account, currency",
         &directives,
     );
-    assert!(!result.columns.is_empty());
+    assert_ne!(result.columns, [] as [std::string::String; 0]);
     // The pivoted USD column should be present (the bug pre-fix dropped
     // pivot values when num_hidden > 0).
     assert!(
@@ -8456,7 +8456,10 @@ fn test_aggregate_context_account_depth() {
     );
 
     // Should work without UnknownFunction error
-    assert!(!result.rows.is_empty());
+    assert_ne!(
+        result.rows,
+        [] as [std::vec::Vec<rustledger_query::Value>; 0]
+    );
 }
 
 #[test]
@@ -10409,7 +10412,10 @@ fn test_order_by_function_not_in_select_simple() {
         &directives,
     );
 
-    assert!(!result.rows.is_empty());
+    assert_ne!(
+        result.rows,
+        [] as [std::vec::Vec<rustledger_query::Value>; 0]
+    );
     assert_eq!(result.columns.len(), 1, "hidden column should be stripped");
 
     // Verify rows are actually sorted by length

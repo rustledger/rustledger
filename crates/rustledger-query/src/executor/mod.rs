@@ -762,7 +762,7 @@ impl<'a> Executor<'a> {
             spanned_directives: None,
             price_db,
             target_currency: None,
-            query_date: jiff::Zoned::now().date(),
+            query_date: jiff::ZonedDateTime::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
             summary_accounts: SummaryAccounts::default(),
@@ -926,7 +926,7 @@ impl<'a> Executor<'a> {
             spanned_directives: Some(spanned_directives),
             price_db,
             target_currency: None,
-            query_date: jiff::Zoned::now().date(),
+            query_date: jiff::ZonedDateTime::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
             summary_accounts: SummaryAccounts::default(),
@@ -2083,7 +2083,7 @@ impl<'a> Executor<'a> {
             "TODAY" => {
                 // Takes no arguments; reject extras to match the lazy path.
                 Self::require_args_count(&name_upper, args, 0)?;
-                Ok(Value::Date(jiff::Zoned::now().date()))
+                Ok(Value::Date(jiff::ZonedDateTime::now().date()))
             }
             "YEAR" => {
                 Self::require_args_count(&name_upper, args, 1)?;

@@ -62,7 +62,7 @@ impl OandaSource {
     fn candle_trading_day(time_rfc3339: &str) -> Option<rustledger_core::NaiveDate> {
         let ts: jiff::Timestamp = time_rfc3339.parse().ok()?;
         let ny = jiff::tz::TimeZone::get("America/New_York").ok()?;
-        let zoned = ts.to_zoned(ny);
+        let zoned = ts.to_zoned_datetime(ny);
         if zoned.hour() >= 17 {
             zoned.date().checked_add(jiff::Span::new().days(1)).ok()
         } else {
@@ -118,7 +118,7 @@ impl PriceSource for OandaSource {
         // Fallback label read BEFORE the network fetch (round-5 deep
         // review of #1803: a post-fetch read can label with a day the
         // clock rolled to during I/O).
-        let fallback_date = jiff::Zoned::now().date();
+        let fallback_date = jiff::ZonedDateTime::now().date();
         let api_key = Self::get_api_key()?;
         let instrument = Self::format_instrument(&pair.ticker, &pair.currency);
         let url = self.build_url(&instrument);

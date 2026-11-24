@@ -14,7 +14,7 @@ use std::str::FromStr;
 /// - "YYYY-MM-DD" → explicit date
 pub fn parse_date(input: &str) -> Result<NaiveDate> {
     let trimmed = input.trim().to_lowercase();
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
 
     if trimmed.is_empty() || trimmed == "today" {
         return Ok(today);

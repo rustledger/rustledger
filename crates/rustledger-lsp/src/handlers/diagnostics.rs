@@ -479,7 +479,7 @@ pub(crate) fn run_ledger_validation(
     // Early validation (account lifecycle, structure) on the directives as
     // written. See `rustledger_validate::Phase` for the architecture
     // rationale.
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
     let session = ValidationSession::new(validation_options.clone());
     let (mut session, mut errors) = session.run_early_spanned(&booked_directives, today);
 

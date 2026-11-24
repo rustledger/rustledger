@@ -150,7 +150,7 @@ pub fn handle_execute_command(
 
 /// Insert today's date at cursor.
 fn handle_insert_date() -> Option<serde_json::Value> {
-    let today = jiff::Zoned::now().date().to_string();
+    let today = jiff::ZonedDateTime::now().date().to_string();
     Some(serde_json::json!({
         "text": today
     }))

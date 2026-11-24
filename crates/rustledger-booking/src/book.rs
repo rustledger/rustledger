@@ -5875,11 +5875,11 @@ mod tests {
     fn holding(lots: &[(Decimal, Decimal, NaiveDate)]) -> BookingEngine {
         let mut engine = BookingEngine::new();
         for &(units, cost, on) in lots {
-            let buy = Transaction::new(on, "buy")
+            let mut buy = Transaction::new(on, "buy")
                 .with_synthesized_posting(usd_lot(units, cost))
                 .with_synthesized_posting(Posting::auto("Assets:Cash"));
             engine
-                .book_interpolate_apply(&mut buy.clone())
+                .book_interpolate_apply(&mut buy)
                 .expect("fixture buy books");
         }
         engine

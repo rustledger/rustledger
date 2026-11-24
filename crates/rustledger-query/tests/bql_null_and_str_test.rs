@@ -228,7 +228,7 @@ fn test_str_of_meta_and_entry_is_the_cell_text() {
 #[test]
 fn test_getitem_null_container_wins_over_the_default() {
     let rows = run("SELECT getitem(currency_meta(payee), payee, 'd') WHERE date = 2024-01-02");
-    assert!(!rows.is_empty());
+    assert_ne!(rows, [] as [std::vec::Vec<rustledger_query::Value>; 0]);
     assert!(rows.iter().all(|r| r[0] == Value::Null), "{rows:?}");
     assert_eq!(
         column("SELECT getitem(NULL, NULL, 'd') LIMIT 1"),

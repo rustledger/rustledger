@@ -21,7 +21,10 @@ fn test_load_simple_file() {
     assert_eq!(result.options.operating_currency, vec!["USD".to_string()]);
 
     // Check directives were loaded
-    assert!(!result.directives.is_empty());
+    assert_ne!(
+        result.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 
     // Should have 3 open directives, 1 transaction, 1 balance
     let opens = result
@@ -323,14 +326,20 @@ fn test_loader_reuse() {
 
     let path1 = fixtures_path("simple.beancount");
     let result1 = loader.load(&path1).expect("should load first file");
-    assert!(!result1.directives.is_empty());
+    assert_ne!(
+        result1.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 
     // Note: Loader tracks loaded files, so loading again might return cached/empty
     // This tests the expected behavior
     let path2 = fixtures_path("accounts.beancount");
     let mut loader2 = Loader::new();
     let result2 = loader2.load(&path2).expect("should load second file");
-    assert!(!result2.directives.is_empty());
+    assert_ne!(
+        result2.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -555,7 +564,10 @@ fn test_process_pipeline_with_validation() {
     let ledger = load(&path, &options).expect("should load and process");
 
     // Should have processed directives
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 
     // Options should be preserved
     assert_eq!(ledger.options.title, Some("Test Ledger".to_string()));
@@ -572,7 +584,10 @@ fn test_process_pipeline_without_validation() {
     let ledger = load(&path, &options).expect("should load without validation");
 
     // Should still have directives
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -604,7 +619,10 @@ fn test_process_raw_mode() {
     let ledger = load(&path, &options).expect("should load in raw mode");
 
     // Raw mode should still have directives but skip plugins/validation
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -625,7 +643,10 @@ fn test_process_with_extra_plugins() {
     // The check_commodity plugin should have been run
     // It adds warnings for undeclared commodities
     // Just check that we processed without error
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -640,7 +661,10 @@ fn test_process_with_auto_accounts() {
 
     // auto_accounts plugin adds Open directives for used accounts
     // Just verify it processed successfully
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -702,7 +726,10 @@ fn test_process_from_load_result() {
     };
 
     let ledger = process(raw, &options).expect("should process");
-    assert!(!ledger.directives.is_empty());
+    assert_ne!(
+        ledger.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]

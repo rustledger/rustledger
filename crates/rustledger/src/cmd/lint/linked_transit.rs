@@ -623,7 +623,7 @@ mod tests {
         let mut output = Vec::new();
         let mut warnings = CollectedDiagnostics::default();
         let mut err = Vec::new();
-        run_with_writer(&args, &mut output, Some(&mut warnings), &mut err)?;
+        let _ = run_with_writer(&args, &mut output, Some(&mut warnings), &mut err)?;
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         Ok((serde_json::from_slice(&output)?, warnings.0))
     }
@@ -1035,7 +1035,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
-        run_with_writer(&args, &mut out, None, &mut err).unwrap();
+        let _ = run_with_writer(&args, &mut out, None, &mut err).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --link-prefix ^xfer-: links are matched without the leading ^; using xfer-\n\
@@ -1321,7 +1321,7 @@ mod tests {
             format: OutputFormat::Text,
         };
         let mut out = Vec::new();
-        run_with_writer(&args, &mut out, None, &mut Vec::new()).unwrap();
+        let _ = run_with_writer(&args, &mut out, None, &mut Vec::new()).unwrap();
         let file = path.display();
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -1363,7 +1363,7 @@ mod tests {
 
         let report = inspect(vec![path.clone()], &["Assets:Transit"]).unwrap();
         let mut closed = Vec::new();
-        super::super::closed_nonempty::run_with_writer(
+        let _ = super::super::closed_nonempty::run_with_writer(
             &super::super::closed_nonempty::Args {
                 files: vec![path],
                 format: OutputFormat::Json,

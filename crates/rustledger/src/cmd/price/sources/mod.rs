@@ -133,7 +133,7 @@ fn identity_label_date(
     source: &str,
     request: &crate::cmd::price::PriceRequest,
 ) -> anyhow::Result<rustledger_core::NaiveDate> {
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
     match request.date {
         Some(date) if date > today => anyhow::bail!(
             "the '{source}' source cannot label a price with the future date {date}; \
@@ -156,7 +156,7 @@ fn identity_label_date(
 /// the local-clock label while the stock path was fixed), so the
 /// parsing lives here and the sources pass in the raw field.
 pub(super) fn feed_date_or_today(raw: Option<&str>) -> rustledger_core::NaiveDate {
-    feed_date_or(raw, jiff::Zoned::now().date())
+    feed_date_or(raw, jiff::ZonedDateTime::now().date())
 }
 
 /// [`feed_date_or_today`] with an explicit fallback.
@@ -414,7 +414,7 @@ pub trait PriceSource: Send + Sync {
             return Ok(response);
         };
 
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
 
         // 3. A price for a day that hasn't happened cannot exist:
         // refuse FUTURE dates on every source, before any coverage
@@ -1007,7 +1007,7 @@ mod dispatch_tests {
         assert!(err.to_string().contains("latest quote"), "{err}");
         assert!(err.to_string().contains("mock-latest"), "{err}");
 
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let future = today.checked_add(jiff::Span::new().days(7)).unwrap();
         assert!(src.fetch_price(&request(Some(future))).is_err());
 
@@ -1111,7 +1111,7 @@ mod dispatch_tests {
         assert_eq!(response.price, Decimal::ONE);
         assert_eq!(response.date, past);
 
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let future = today.checked_add(jiff::Span::new().days(7)).unwrap();
         req.date = Some(future);
         let err = src.fetch_price(&req).expect_err("future identity refuses");
@@ -1142,7 +1142,7 @@ mod dispatch_tests {
                 panic!("future date must refuse before any fetch");
             }
         }
-        let future = jiff::Zoned::now()
+        let future = jiff::ZonedDateTime::now()
             .date()
             .checked_add(jiff::Span::new().days(7))
             .unwrap();
@@ -1172,7 +1172,7 @@ mod dispatch_tests {
                 Ok(PriceResponse {
                     price: Decimal::new(100, 2),
                     currency: pair.currency.clone(),
-                    date: jiff::Zoned::now()
+                    date: jiff::ZonedDateTime::now()
                         .date()
                         .checked_add(jiff::Span::new().days(1))
                         .unwrap(),
@@ -1180,7 +1180,7 @@ mod dispatch_tests {
                 })
             }
         }
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let tomorrow = today.checked_add(jiff::Span::new().days(1)).unwrap();
         let response = LabelsTomorrow
             .fetch_price(&request(Some(today)))
@@ -1270,7 +1270,7 @@ mod dispatch_tests {
                 Ok(PriceResponse {
                     price: Decimal::new(700, 2),
                     currency: pair.currency.clone(),
-                    date: jiff::Zoned::now().date(),
+                    date: jiff::ZonedDateTime::now().date(),
                     source: self.name().to_string(),
                 })
             }
@@ -1281,7 +1281,7 @@ mod dispatch_tests {
                 panic!("requested==today must route to fetch_latest, not the window");
             }
         }
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let response = CoveredLatest
             .fetch_price(&request(Some(today)))
             .expect("today serves the latest quote");
@@ -1293,7 +1293,7 @@ mod dispatch_tests {
     /// own fence (round-4 deep review).
     #[test]
     fn identity_label_refuses_future_dates() {
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let past = rustledger_core::naive_date(2020, 1, 1).unwrap();
         let future = today.checked_add(jiff::Span::new().days(7)).unwrap();
 
@@ -1376,7 +1376,7 @@ mod feed_date_tests {
     /// erroring — the date label degrades, the price still flows.
     #[test]
     fn falls_back_to_today_on_missing_or_malformed() {
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         assert_eq!(feed_date_or_today(None), today);
         assert_eq!(feed_date_or_today(Some("")), today);
         assert_eq!(feed_date_or_today(Some("2024")), today);

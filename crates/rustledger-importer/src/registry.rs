@@ -427,7 +427,7 @@ mod tests {
     fn test_registry_empty_list_importers() {
         let registry = ImporterRegistry::new();
         let list = registry.list_importers();
-        assert!(list.is_empty());
+        assert_eq!(list, [] as [(&str, &str); 0]);
     }
 
     // ===== WASM discovery tests =====
@@ -491,7 +491,7 @@ mod tests {
 
         let mut registry = ImporterRegistry::new();
         let report = registry.register_wasm_dir(tmp.path()).expect("scan works");
-        assert!(report.loaded.is_empty());
+        assert_eq!(report.loaded, [] as [std::string::String; 0]);
         assert!(report.failures.is_empty());
         assert!(registry.is_empty());
     }

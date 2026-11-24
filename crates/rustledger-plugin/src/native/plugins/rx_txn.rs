@@ -208,7 +208,10 @@ mod tests {
 
         if let DirectiveData::Transaction(txn) = &directives[0].data {
             // Should have no metadata added
-            assert!(txn.metadata.is_empty());
+            assert_eq!(
+                txn.metadata,
+                [] as [(std::string::String, rustledger_plugin_types::MetaValueData); 0]
+            );
         } else {
             panic!("Expected transaction");
         }
@@ -235,7 +238,10 @@ mod tests {
 
         if let DirectiveData::Transaction(txn) = &directives[0].data {
             // Should have no metadata added
-            assert!(txn.metadata.is_empty());
+            assert_eq!(
+                txn.metadata,
+                [] as [(std::string::String, rustledger_plugin_types::MetaValueData); 0]
+            );
         } else {
             panic!("Expected transaction");
         }

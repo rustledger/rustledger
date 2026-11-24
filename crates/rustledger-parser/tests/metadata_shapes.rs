@@ -51,7 +51,7 @@ fn test_parse_reports_an_indented_line_after_a_directive_without_metadata() {
             ("\n2024-01-01 open Assets:A\n  jj: 1\n", vec![]),
         ] {
             let src = format!("{header}\n{body}{closer}");
-            let mut expected = lines.clone();
+            let mut expected = lines;
             // `poptag` / `popmeta` of nothing pushed is its own error, on
             // line 1, as in beancount.
             if header.starts_with("pop") {

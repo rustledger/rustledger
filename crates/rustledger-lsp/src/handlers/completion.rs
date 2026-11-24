@@ -174,7 +174,7 @@ fn to_item(candidate: CompletionCandidate) -> CompletionItem {
 
 /// Complete at line start (date template).
 fn complete_line_start() -> Vec<CompletionItem> {
-    let today = jiff::Zoned::now().date().to_string();
+    let today = jiff::ZonedDateTime::now().date().to_string();
     rustledger_completion::line_start_candidates(&today)
         .into_iter()
         .map(to_item)

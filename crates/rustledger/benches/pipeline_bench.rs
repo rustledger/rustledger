@@ -17,7 +17,7 @@ use rustledger_validate::{ValidationOptions, ValidationSession};
 /// Bench helper: run both validation phases through a single session,
 /// mirroring what the LSP / FFI do on already-booked input.
 fn validate(directives: &[Directive]) -> Vec<rustledger_validate::ValidationError> {
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
     let session = ValidationSession::new(ValidationOptions::default());
     let (session, mut errors) = session.run_early(directives, today);
     let (session, late_errs) = session.run_late(directives, today);

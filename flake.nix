@@ -150,7 +150,7 @@
             pname = "rustledger-vscode-vsix";
             version = vscodeVersion;
             src = ./packages/vscode;
-            npmDepsHash = "sha256-LiXy4XR0uIbqZIed7jDkjh5yVHtgqERy18mOvbMPe/I=";
+            npmDepsHash = "sha256-692uhq79QlmSPK0E8F2jQw6DRw6dGYok21WX3XQVHj4=";
 
             # esbuild's npm postinstall downloads a prebuilt binary for the host
             # platform, and the build sandbox has no network. Skip install scripts

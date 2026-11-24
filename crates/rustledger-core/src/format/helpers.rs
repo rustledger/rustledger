@@ -51,7 +51,7 @@ pub fn escape_csv(s: &str) -> String {
 /// reader's terminal: `rustledger_plugin::untrusted` escapes them as
 /// `\u{..}` on human-readable output, [`escape_json`] as `\uXXXX` (#2538).
 #[must_use]
-pub fn is_display_unsafe(c: char) -> bool {
+pub const fn is_display_unsafe(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
 }

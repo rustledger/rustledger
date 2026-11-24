@@ -1058,8 +1058,11 @@ fn test_error_on_invalid_account() {
 #[test]
 fn test_parse_empty_input() {
     let result = parse("");
-    assert!(result.errors.is_empty());
-    assert!(result.directives.is_empty());
+    assert_eq!(result.errors, [] as [rustledger_parser::ParseError; 0]);
+    assert_eq!(
+        result.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
 }
 
 #[test]
@@ -1069,7 +1072,10 @@ fn test_parse_only_comments() {
 ; Another comment
 ";
     let result = parse_ok(source);
-    assert!(result.directives.is_empty());
+    assert_eq!(
+        result.directives,
+        [] as [rustledger_core::Spanned<rustledger_core::Directive>; 0]
+    );
     // Verify comments are captured
     assert_eq!(result.comments.len(), 2);
     assert!(result.comments[0].value.contains("This is a comment"));
@@ -1242,7 +1248,7 @@ option "title" "Test"
 2024-01-01 open Assets:Bank
 "#;
     let (directives, errors) = parse_directives(source);
-    assert!(errors.is_empty());
+    assert_eq!(errors, [] as [rustledger_parser::ParseError; 0]);
     assert_eq!(directives.len(), 1);
 }
 

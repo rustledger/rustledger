@@ -67,7 +67,10 @@ fn the_wildcard_is_the_tolerance_of_a_currency_with_none() {
     // Integers only: no tolerance is inferred, so `*` is the tolerance.
     let off_by_one = "2026-01-02 * \"t\"\n  Assets:A  10 USD\n  Assets:B  -9 USD\n";
     assert_eq!(imbalances(STAR, off_by_one).len(), 1);
-    assert!(imbalances("option \"inferred_tolerance_default\" \"*:2\"", off_by_one).is_empty());
+    assert_eq!(
+        imbalances("option \"inferred_tolerance_default\" \"*:2\"", off_by_one),
+        [] as [std::string::String; 0]
+    );
     // A currency mentioned only as a price and cost currency gets it too
     // (the floor skipped any currency that was not a units currency).
     let price_only = |cost: &str| {
@@ -75,7 +78,10 @@ fn the_wildcard_is_the_tolerance_of_a_currency_with_none() {
             "2026-01-02 * \"t\"\n  Assets:Eur  -5 EUR @ 2.00 USD\n  Assets:Stock  1 GGG {{{cost} USD}}\n"
         )
     };
-    assert!(imbalances(STAR, &price_only("10.04")).is_empty());
+    assert_eq!(
+        imbalances(STAR, &price_only("10.04")),
+        [] as [std::string::String; 0]
+    );
     assert_eq!(imbalances(STAR, &price_only("10.06")).len(), 1);
 }
 
@@ -85,7 +91,10 @@ fn a_named_default_beats_the_wildcard() {
                    option \"inferred_tolerance_default\" \"USD:0.02\"";
     let off = |n: &str| format!("2026-01-02 * \"t\"\n  Assets:A  10.00 USD\n  Assets:B  {n} USD\n");
     assert_eq!(imbalances(options, &off("-9.97")).len(), 1);
-    assert!(imbalances(options, &off("-9.99")).is_empty());
+    assert_eq!(
+        imbalances(options, &off("-9.99")),
+        [] as [std::string::String; 0]
+    );
     // Smaller than the wildcard, on integers: the named default still wins.
     let options = "option \"inferred_tolerance_default\" \"*:0.05\"\n\
                    option \"inferred_tolerance_default\" \"USD:0.001\"";

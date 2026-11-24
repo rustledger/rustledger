@@ -66,7 +66,7 @@ impl NativePlugin for ForecastPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         // Get current year end as default until date
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let default_until = rustledger_core::naive_date(i32::from(today.year()), 12, 31).unwrap();
 
         let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());

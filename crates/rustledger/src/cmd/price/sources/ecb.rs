@@ -154,7 +154,7 @@ impl EcbSource {
         // is today-labeled, matching feed_date_or's LATEST rule (deep
         // review of #1804 restored this after the series refactor
         // dropped it).
-        let series = self.fetch_series(currency, None, Some(jiff::Zoned::now().date()))?;
+        let series = self.fetch_series(currency, None, Some(jiff::ZonedDateTime::now().date()))?;
         let (date, rate) = series
             .into_iter()
             .max_by_key(|(date, _)| *date)

@@ -85,7 +85,7 @@ fn junk_after_the_narration_is_rejected() {
         "wrong diagnostic: {}",
         errs[0]
     );
-    assert!(header_errors(src).is_empty());
+    assert_eq!(header_errors(src), [] as [std::string::String; 0]);
 }
 
 /// #2008 cases 6 and 7 — `ParserEntryTypes.TransactionThreeStrings` and

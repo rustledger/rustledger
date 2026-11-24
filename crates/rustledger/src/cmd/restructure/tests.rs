@@ -1706,7 +1706,7 @@ fn the_outcome_records_plan_check_and_writes() {
     assert!(text.contains("Dry run: nothing was written."), "{text}");
 
     let mut outcome = Outcome::default();
-    split::run_with_outcome(
+    let _ = split::run_with_outcome(
         &split_args(&file, Period::Year),
         &mut Vec::new(),
         &mut Vec::new(),
@@ -1730,7 +1730,7 @@ fn the_outcome_records_plan_check_and_writes() {
 
     // Merging back records the inlined files as removed.
     let mut outcome = Outcome::default();
-    merge::run_with_outcome(
+    let _ = merge::run_with_outcome(
         &merge_args(&file),
         &mut Vec::new(),
         &mut Vec::new(),
@@ -1790,7 +1790,7 @@ fn a_file_merge_cannot_remove_is_a_notice() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tmp();
     let file = write(dir.path(), "ledger.beancount", LEDGER);
-    run_split(&split_args(&file, Period::Year));
+    let _ = run_split(&split_args(&file, Period::Year));
     let years = dir.path().join("ledger");
     fs::set_permissions(&years, fs::Permissions::from_mode(0o555)).unwrap();
     // Running as root, the directory's mode would not stop the removal.
@@ -1809,7 +1809,7 @@ fn a_file_merge_cannot_remove_is_a_notice() {
         )
     });
     fs::set_permissions(&years, fs::Permissions::from_mode(0o755)).unwrap();
-    result.unwrap();
+    let _ = result.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].code, code::FILES_NOT_REMOVED);
     assert!(

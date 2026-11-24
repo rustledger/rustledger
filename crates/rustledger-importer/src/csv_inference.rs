@@ -475,11 +475,7 @@ fn detect_header(rows: &[Vec<String>]) -> bool {
         .get(1)
         .is_some_and(|row| row.iter().any(|cell| looks_like_number(cell)));
 
-    if !first_has_numbers && second_has_numbers {
-        return true;
-    }
-
-    false
+    !first_has_numbers && second_has_numbers
 }
 
 /// Common date formats to try, ordered by prevalence.

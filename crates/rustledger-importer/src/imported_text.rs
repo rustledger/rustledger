@@ -182,6 +182,9 @@ mod tests {
             naive_date(2024, 1, 2).unwrap(),
             "plain ünïcode",
         ));
-        assert!(neutralize_directive(&mut clean).is_empty());
+        assert_eq!(
+            neutralize_directive(&mut clean),
+            [] as [std::string::String; 0]
+        );
     }
 }

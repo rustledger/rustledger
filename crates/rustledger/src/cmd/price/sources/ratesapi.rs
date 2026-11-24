@@ -228,7 +228,7 @@ impl PriceSource for RatesApiSource {
             &pair.currency.to_uppercase(),
             None,
         );
-        let (price, date) = self.fetch_rate(&url, pair, jiff::Zoned::now().date())?;
+        let (price, date) = self.fetch_rate(&url, pair, jiff::ZonedDateTime::now().date())?;
 
         Ok(PriceResponse {
             price,

@@ -415,19 +415,28 @@ mod tests {
         assert!(got[0].reason.contains("Expenses:Fodo"), "{:?}", got[0]);
 
         // A ledger with no `open` directives at all is not using them.
-        assert!(unopened_account_errors(&[], &b, d(2024, 3, 1), false).is_empty());
+        assert_eq!(
+            unopened_account_errors(&[], &b, d(2024, 3, 1), false),
+            [] as [BudgetError; 0]
+        );
 
         // Windowed: a budget declared at or after the exclusive end is not this
         // report's business.
         let later = Budgets::new(vec![budget(d(2099, 1, 1), "Expenses:Fodo", "USD")]);
-        assert!(unopened_account_errors(&dirs, &later, d(2024, 3, 1), false).is_empty());
+        assert_eq!(
+            unopened_account_errors(&dirs, &later, d(2024, 3, 1), false),
+            [] as [BudgetError; 0]
+        );
 
         // Under `--children` a parent budgeted as an aggregate is normal — its
         // children answer it — but in the default mode it really does report
         // nothing, so the exemption must NOT apply there.
         let parent = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
         let child_only = vec![open(d(2024, 1, 1), "Expenses:Food:Restaurant")];
-        assert!(unopened_account_errors(&child_only, &parent, d(2024, 3, 1), true).is_empty());
+        assert_eq!(
+            unopened_account_errors(&child_only, &parent, d(2024, 3, 1), true),
+            [] as [BudgetError; 0]
+        );
         assert_eq!(
             unopened_account_errors(&child_only, &parent, d(2024, 3, 1), false).len(),
             1,
@@ -455,11 +464,17 @@ mod tests {
         assert!(got[0].reason.contains("can ever be booked"), "{:?}", got[0]);
 
         // A close at or after the window's exclusive end strands nothing.
-        assert!(closed_account_errors(&dirs, &b, d(2024, 2, 1), false).is_empty());
+        assert_eq!(
+            closed_account_errors(&dirs, &b, d(2024, 2, 1), false),
+            [] as [BudgetError; 0]
+        );
 
         // An account that never closes is unremarkable.
         let never = vec![open(d(2024, 1, 1), "Expenses:Food")];
-        assert!(closed_account_errors(&never, &b, d(2024, 4, 1), false).is_empty());
+        assert_eq!(
+            closed_account_errors(&never, &b, d(2024, 4, 1), false),
+            [] as [BudgetError; 0]
+        );
     }
 
     /// ALL of a budget's covering accounts must be closed, not any: warning while
@@ -509,16 +524,25 @@ mod tests {
 
         // The currency it does post is silent.
         let ok = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
-        assert!(mismatched_currency_errors(&posted, &ok, false, d(2024, 3, 1)).is_empty());
+        assert_eq!(
+            mismatched_currency_errors(&posted, &ok, false, d(2024, 3, 1)),
+            [] as [BudgetError; 0]
+        );
 
         // An account that posted NOTHING in the window is unspent, not a
         // mismatch — warning there would name an empty list of currencies.
         let other = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Travel", "EUR")]);
-        assert!(mismatched_currency_errors(&posted, &other, false, d(2024, 3, 1)).is_empty());
+        assert_eq!(
+            mismatched_currency_errors(&posted, &other, false, d(2024, 3, 1)),
+            [] as [BudgetError; 0]
+        );
 
         // Windowed by the budget's own date, like the other two.
         let later = Budgets::new(vec![budget(d(2099, 1, 1), "Expenses:Food", "EUR")]);
-        assert!(mismatched_currency_errors(&posted, &later, false, d(2024, 3, 1)).is_empty());
+        assert_eq!(
+            mismatched_currency_errors(&posted, &later, false, d(2024, 3, 1)),
+            [] as [BudgetError; 0]
+        );
     }
 
     /// The opened-account range must never EXCLUDE a covering account.
@@ -579,7 +603,10 @@ mod tests {
         let on_bound = Budgets::new(vec![budget(to, "Expenses:Nosuch", "USD")]);
         let inside = Budgets::new(vec![budget(d(2024, 2, 28), "Expenses:Nosuch", "USD")]);
         let opened = vec![open(d(2024, 1, 1), "Expenses:Food")];
-        assert!(unopened_account_errors(&opened, &on_bound, to, false).is_empty());
+        assert_eq!(
+            unopened_account_errors(&opened, &on_bound, to, false),
+            [] as [BudgetError; 0]
+        );
         assert_eq!(
             unopened_account_errors(&opened, &inside, to, false).len(),
             1
@@ -591,7 +618,10 @@ mod tests {
             std::iter::once((&food, std::iter::once(&usd).collect())).collect();
         let eur_on = Budgets::new(vec![budget(to, "Expenses:Food", "EUR")]);
         let eur_in = Budgets::new(vec![budget(d(2024, 2, 28), "Expenses:Food", "EUR")]);
-        assert!(mismatched_currency_errors(&posted, &eur_on, false, to).is_empty());
+        assert_eq!(
+            mismatched_currency_errors(&posted, &eur_on, false, to),
+            [] as [BudgetError; 0]
+        );
         assert_eq!(
             mismatched_currency_errors(&posted, &eur_in, false, to).len(),
             1
@@ -607,10 +637,16 @@ mod tests {
             open(d(2024, 1, 1), "Expenses:Food"),
             close(d(2024, 2, 28), "Expenses:Food"),
         ];
-        assert!(closed_account_errors(&close_on, &b, to, false).is_empty());
+        assert_eq!(
+            closed_account_errors(&close_on, &b, to, false),
+            [] as [BudgetError; 0]
+        );
         assert_eq!(closed_account_errors(&close_in, &b, to, false).len(), 1);
         let budget_on = Budgets::new(vec![budget(to, "Expenses:Food", "USD")]);
-        assert!(closed_account_errors(&close_in, &budget_on, to, false).is_empty());
+        assert_eq!(
+            closed_account_errors(&close_in, &budget_on, to, false),
+            [] as [BudgetError; 0]
+        );
     }
 
     /// `collect` is the one entry point, and it really does gather from every
@@ -674,13 +710,13 @@ mod tests {
             let c = cmp(vec![r], vec![]);
             assert_eq!(unrepresentable_errors(&c, &types, d(2024, 1, 1)).len(), 1);
         }
-        assert!(
+        assert_eq!(
             unrepresentable_errors(
                 &cmp(vec![row(Some(1), Some(2))], vec![]),
                 &types,
                 d(2024, 1, 1)
-            )
-            .is_empty()
+            ),
+            [] as [BudgetError; 0]
         );
 
         // A TOTAL can overflow even when every row it sums is representable, and

@@ -569,7 +569,10 @@ fn in_force_before_is_exclusive_at_the_boundary() {
     // outside this test, so it was removed rather than published — the bound it
     // encoded is the same one `keys_in_force_before` answers, and that one is
     // load-bearing.
-    assert!(b.keys_in_force_before(d(2024, 6, 15)).is_empty());
+    assert_eq!(
+        b.keys_in_force_before(d(2024, 6, 15)),
+        [] as [(rustledger_core::Account, rustledger_core::Currency); 0]
+    );
     assert_eq!(
         b.keys_in_force_before(d(2024, 6, 16)),
         vec![(Account::new("Expenses:Food"), Currency::new("USD"))]
@@ -1074,7 +1077,7 @@ fn all_rejected_says_whether_the_warnings_survived_the_filter() {
         Some("Income"),
     );
     assert_eq!(hidden.empty, Some(Empty::AllRejected { shown: false }));
-    assert!(hidden.errors.is_empty());
+    assert_eq!(hidden.errors, [] as [BudgetError; 0]);
 }
 
 /// The accrued budget carries Python's ideal-exponent scale, because it is

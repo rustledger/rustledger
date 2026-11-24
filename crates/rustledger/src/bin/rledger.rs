@@ -717,13 +717,13 @@ mod tests {
     #[test]
     fn test_parse_alias_expansion_empty() {
         let parts = parse_alias_expansion("");
-        assert!(parts.is_empty());
+        assert_eq!(parts, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn test_parse_alias_expansion_whitespace_only() {
         let parts = parse_alias_expansion("   \t   ");
-        assert!(parts.is_empty());
+        assert_eq!(parts, [] as [std::string::String; 0]);
     }
 
     #[test]

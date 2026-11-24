@@ -263,7 +263,7 @@ fn balances_where_equals_from_and_sum_position() {
             ledger,
             &format!("SELECT account, sum(position) WHERE {filter} GROUP BY account"),
         );
-        let mut sorted = balances.clone();
+        let mut sorted = balances;
         sorted.sort();
         let mut sum_sorted = sum;
         sum_sorted.sort();

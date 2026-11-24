@@ -20,7 +20,7 @@
 # Developers without nix: add what you need once, onto THIS pinned
 # toolchain (a bare `rustup component add` targets whatever toolchain is
 # default, which may differ) —
-#   rustup component add --toolchain 1.98.1 clippy rustfmt rust-src llvm-tools-preview
-#   rustup target add --toolchain 1.98.1 wasm32-unknown-unknown
+#   rustup component add --toolchain 1.100.0 clippy rustfmt rust-src llvm-tools-preview
+#   rustup target add --toolchain 1.100.0 wasm32-unknown-unknown
 [toolchain]
-channel = "1.98.1"
+channel = "1.100.0"

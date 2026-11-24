@@ -1329,8 +1329,8 @@ mod tests {
 
     #[test]
     fn test_built_in_plugins_exist() {
-        assert!(!CHECK_COMMODITY_PLUGIN.is_empty());
-        assert!(!LEAFONLY_PLUGIN.is_empty());
+        assert_ne!(CHECK_COMMODITY_PLUGIN, "");
+        assert_ne!(LEAFONLY_PLUGIN, "");
     }
 
     /// Regression test: `engine_config` must produce a `Config` that satisfies

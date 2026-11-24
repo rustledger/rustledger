@@ -174,6 +174,9 @@ fn test_parse_hash_that_is_not_a_comment_is_unchanged() {
         tokens.iter().any(|(t, _)| matches!(t, Token::String(_))),
         "{tokens:?}"
     );
-    assert!(parse(tag_line).comments.is_empty());
+    assert_eq!(
+        parse(tag_line).comments,
+        [] as [rustledger_core::Spanned<std::string::String>; 0]
+    );
     assert_lossless("#tag \"x\n2024-01-02 open Assets:B\n");
 }

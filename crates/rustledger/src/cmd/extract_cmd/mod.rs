@@ -2429,7 +2429,7 @@ fn run_with_ledgers<W: Write>(
         let date_str = args
             .balance_date
             .clone()
-            .unwrap_or_else(|| jiff::Zoned::now().date().to_string());
+            .unwrap_or_else(|| jiff::ZonedDateTime::now().date().to_string());
         let date = date_str
             .parse::<rustledger_core::NaiveDate>()
             .with_context(|| format!("Invalid balance date: {date_str}"))?;

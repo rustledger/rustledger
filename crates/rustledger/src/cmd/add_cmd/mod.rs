@@ -249,7 +249,7 @@ pub fn run_quick_with_writer<W: std::io::Write>(
     let date = if let Some(ref d) = args.date {
         parse_date(d)?
     } else {
-        jiff::Zoned::now().date()
+        jiff::ZonedDateTime::now().date()
     };
     run_quick_mode_with_writer(args, file, date, out)
 }
@@ -722,7 +722,7 @@ pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
     let date = if let Some(ref d) = args.date {
         parse_date(d)?
     } else {
-        jiff::Zoned::now().date()
+        jiff::ZonedDateTime::now().date()
     };
 
     // Check if file exists, offer to create if not
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_today() {
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         assert_eq!(parse_date("today").unwrap(), today);
         assert_eq!(parse_date("").unwrap(), today);
         assert_eq!(parse_date("TODAY").unwrap(), today);
@@ -789,14 +789,14 @@ mod tests {
 
     #[test]
     fn test_parse_date_yesterday() {
-        let yesterday = jiff::Zoned::now().date().yesterday().ok().unwrap();
+        let yesterday = jiff::ZonedDateTime::now().date().yesterday().ok().unwrap();
         assert_eq!(parse_date("yesterday").unwrap(), yesterday);
         assert_eq!(parse_date("YESTERDAY").unwrap(), yesterday);
     }
 
     #[test]
     fn test_parse_date_relative() {
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let tomorrow = today.tomorrow().ok().unwrap();
         let yesterday = today.yesterday().ok().unwrap();
 

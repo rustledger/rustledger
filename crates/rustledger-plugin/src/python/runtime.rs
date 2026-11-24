@@ -980,19 +980,59 @@ fn discover_module_source(
 /// replace module-based plugin references with explicit file paths.
 ///
 /// Returns `Some(path)` if the module was found, `None` otherwise.
+///
+/// # Security
+///
+/// `module_name` comes from a `plugin` line in the ledger, so it is
+/// untrusted, and this runs host Python OUTSIDE the plugin sandbox. The
+/// lookup must therefore never execute module code:
+///
+/// - `-I` (isolated mode) keeps the current directory, `PYTHON*` env vars
+///   and the user site-packages off `sys.path`. Without it, `python3 -c`
+///   puts the current directory first, so a cloned repo could supply the
+///   package being looked up.
+/// - `importlib.machinery.PathFinder.find_spec` locates each dotted
+///   component on disk without importing anything. The earlier
+///   `importlib.util.find_spec("pkg.mod")` imported `pkg` (running
+///   `pkg/__init__.py`) to find `mod`, so `plugin "pkg.mod"` plus a
+///   `pkg/__init__.py` beside the ledger ran arbitrary code on
+///   `rledger check`.
+#[must_use]
 pub fn suggest_module_path(module_name: &str) -> Option<String> {
-    use std::process::Command;
+    suggest_module_path_from(module_name, None)
+}
 
-    let output = Command::new("python3")
-        .args([
-            "-c",
-            r"import sys, importlib.util
-spec = importlib.util.find_spec(sys.argv[1])
-print(spec.origin if spec and spec.origin and spec.origin.endswith('.py') else '')",
-            module_name,
-        ])
-        .output()
-        .ok()?;
+/// Locates each component of a dotted module name on disk without
+/// importing it. Run under `python3 -I`; see [`suggest_module_path`].
+const LOCATE_MODULE_PY: &str = r"import sys
+from importlib.machinery import PathFinder
+parts = sys.argv[1].split('.')
+spec, search = None, None
+if all(parts):
+    for i in range(len(parts)):
+        spec = PathFinder.find_spec('.'.join(parts[:i + 1]), search)
+        if spec is None:
+            break
+        search = spec.submodule_search_locations
+        if search is None:
+            if i < len(parts) - 1:
+                spec = None
+                break
+        else:
+            search = list(search)
+o = spec.origin if spec else None
+print(o if o and o.endswith('.py') else '')";
+
+/// [`suggest_module_path`] with an explicit working directory for the
+/// `python3` child, so a test can plant a hostile package where Python
+/// starts without changing the test process's own cwd.
+fn suggest_module_path_from(module_name: &str, cwd: Option<&std::path::Path>) -> Option<String> {
+    let mut cmd = std::process::Command::new("python3");
+    cmd.args(["-I", "-c", LOCATE_MODULE_PY, module_name]);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let output = cmd.output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -1619,6 +1659,53 @@ mod tests {
         // Test with a module that likely doesn't exist
         let result = suggest_module_path("nonexistent_module_xyz123");
         assert!(result.is_none());
+    }
+
+    /// A `plugin "pkg.mod"` line must not run `pkg/__init__.py` from the
+    /// directory `rledger` was started in: the module-path hint runs host
+    /// Python outside the sandbox, so it may locate modules but never
+    /// import them.
+    #[test]
+    fn test_suggest_module_path_does_not_import_package_from_cwd() {
+        if !is_python_available() {
+            eprintln!("Skipping: python3 not available for suggest_module_path");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("PWNED");
+        let pkg = dir.path().join("hintpkg_xyz");
+        std::fs::create_dir(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("__init__.py"),
+            format!("open({:?}, 'w').write('x')\n", marker.to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("mod.py"), "").unwrap();
+
+        let hint = suggest_module_path_from("hintpkg_xyz.mod", Some(dir.path()));
+
+        assert!(
+            !marker.exists(),
+            "suggest_module_path executed a package's __init__.py"
+        );
+        // Isolated mode keeps the cwd off sys.path, so the planted package
+        // is not even suggested.
+        assert_eq!(hint, None);
+    }
+
+    /// The non-importing lookup still resolves a dotted stdlib module to
+    /// its file, so the hint keeps working for real installed packages.
+    #[test]
+    fn test_suggest_module_path_finds_dotted_stdlib_module() {
+        if !is_python_available() {
+            eprintln!("Skipping: python3 not available for suggest_module_path");
+            return;
+        }
+        let path = suggest_module_path("json.decoder").expect("json.decoder should resolve");
+        assert!(
+            path.ends_with("decoder.py"),
+            "unexpected path for json.decoder: {path}"
+        );
     }
 
     #[test]

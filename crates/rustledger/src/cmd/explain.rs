@@ -10,7 +10,7 @@
 //!   with the enum;
 //! - the parser's `P` codes (`P{kind_code:04}`), the loader's `E0xxx` file
 //!   and include codes, the option codes `ErrorCode` does not carry, the
-//!   plugin codes and `BOOK`/`PLUGIN`/`LOAD`: the text lives in [`OTHER`]
+//!   plugin codes and `BOOK`/`PLUGIN`/`LOAD`: the text lives in `OTHER`
 //!   below, because the crates that raise them carry no such text.
 //!
 //! `tests/explain_drift_test.rs` enumerates every code from its canonical

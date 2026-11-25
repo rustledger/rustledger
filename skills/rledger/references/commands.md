@@ -119,11 +119,12 @@ rledger format --in-place main.beancount accounts.beancount
 ## report
 
 ```bash
+rledger report [OPTIONS] <REPORT> FILE [REPORT OPTIONS]
 rledger report [OPTIONS] FILE <REPORT> [REPORT OPTIONS]
 ```
 
-The file must come before the report name. Common options, accepted before or
-after the report name: `-f, --format <text|csv|json>`, `--no-pager`,
+The file goes after the report name or before it. Common options, accepted
+before or after the report name: `-f, --format <text|csv|json>`, `--no-pager`,
 `--no-cache`, `-v`.
 
 | Report | What it shows | Its options |
@@ -209,8 +210,9 @@ must be one argument (quote it). Put FILE before `--quick`, because `--quick`
 consumes everything after it.
 
 - `-n, --dry-run` prints the transaction and appends nothing.
-- `-y, --yes` appends without asking. Without `-y` it asks, and when stdin is
-  not a terminal the answer defaults to yes, so the transaction is appended.
+- `-y, --yes` appends without asking. Without `-y` it asks; when stdin is not a
+  terminal only an explicit `y` appends, and no answer (end of input, an empty
+  line) is an error that writes nothing.
 - `-d, --date` defaults to today (also `yesterday`, `+1`, `-1`).
 - Without `--quick`, `add` is interactive. Do not use that from an agent.
 

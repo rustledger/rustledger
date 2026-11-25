@@ -35,6 +35,9 @@ pub struct Args {
 #[derive(Parser, Debug)]
 pub struct PriceArgs {
     /// Beancount file to read commodities from (optional).
+    ///
+    /// `-f` is `--file` here, where the other commands use it for
+    /// `--format`: `price` has no `--format` (`-b` selects Beancount output).
     #[arg(short, long)]
     pub file: Option<PathBuf>,
 
@@ -168,6 +171,27 @@ fn dedup_key(symbol: &str, currency: &str, date: NaiveDate) -> (String, String, 
     (symbol.to_uppercase(), currency.to_uppercase(), date)
 }
 
+/// A hint for a `--file` that cannot be loaded and is named like an output
+/// format: `rledger price -f json`, written by someone who expects `-f` to
+/// be `--format` as in every other command. Empty otherwise.
+///
+/// `-f` stays `--file` on `price` (it has no `--format` to collide with,
+/// and the docs have long taught `price -f ledger.beancount`), so the
+/// mistake can only ever fail loudly here; this says why.
+fn format_value_hint(file: &std::path::Path) -> &'static str {
+    let named_like_a_format = file.to_str().is_some_and(|name| {
+        ["text", "json", "csv", "beancount"]
+            .iter()
+            .any(|f| name.eq_ignore_ascii_case(f))
+    });
+    if named_like_a_format && !file.exists() {
+        " (for `rledger price`, -f is --file, the ledger to read; there is no \
+         --format, and -b/--beancount prints price directives)"
+    } else {
+        ""
+    }
+}
+
 /// Run the price command, writing fetched prices / plans / source listings
 /// to `out`.
 ///
@@ -273,8 +297,13 @@ pub fn run_with_writer<W: Write>(
             validate: false,
             ..LoadOptions::default()
         };
-        let ledger = rustledger_loader::load(file, &opts)
-            .with_context(|| format!("failed to load {} for symbol discovery", file.display()))?;
+        let ledger = rustledger_loader::load(file, &opts).with_context(|| {
+            format!(
+                "failed to load {} for symbol discovery{}",
+                file.display(),
+                format_value_hint(file)
+            )
+        })?;
         let discovered = discover_symbols_with_warnings(
             &ledger.directives,
             &ledger.options,

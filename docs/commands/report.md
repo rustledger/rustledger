@@ -9,10 +9,11 @@ Generate standard financial reports from your ledger.
 ## Usage
 
 ```bash
+rledger report [OPTIONS] [COMMAND] [FILE]
 rledger report [OPTIONS] [FILE] [COMMAND]
 ```
 
-A report subcommand (e.g. `balances`, `journal`) is required — running `rledger report FILE` with no subcommand errors. `FILE` precedes the subcommand.
+A report subcommand (e.g. `balances`, `journal`) is required — running `rledger report FILE` with no subcommand errors. `FILE` may come after the subcommand (`rledger report balances ledger.beancount`) or before it (`rledger report ledger.beancount balances`).
 
 ## Subcommands
 

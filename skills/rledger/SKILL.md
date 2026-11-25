@@ -114,20 +114,19 @@ rledger format --check --diff ledger.beancount
 
 ## Reports: `rledger report`
 
-The file comes **before** the report name:
+The file goes before or after the report name:
 
 ```bash
-rledger report ledger.beancount balances
-rledger report ledger.beancount balsheet
-rledger report ledger.beancount income --year 2024
-rledger report ledger.beancount register -a Assets:Bank --from 2024-01-01 --to 2024-02-01
+rledger report balances ledger.beancount
+rledger report balsheet ledger.beancount
+rledger report income ledger.beancount --year 2024
+rledger report register ledger.beancount -a Assets:Bank --from 2024-01-01 --to 2024-02-01
 rledger report -f json ledger.beancount holdings
 ```
 
-`rledger report balances ledger.beancount` is a usage error. Reports:
-`balances`, `balsheet`, `income`, `journal`, `register`, `holdings`,
-`networth`, `accounts`, `commodities`, `stats`, `prices`, `returns`,
-`capgains`, `budget`. `--to` is exclusive.
+Reports: `balances`, `balsheet`, `income`, `journal`, `register`, `holdings`,
+`networth`, `accounts`, `commodities`, `stats`, `prices`, `returns`, `capgains`,
+`budget`. `--to` is exclusive.
 
 ## Other commands
 
@@ -143,8 +142,9 @@ rledger report -f json ledger.beancount holdings
 | `rledger split` / `rledger merge` | restructure files; `-n` previews and verifies |
 | `rledger explain [CODE]` | explain a validation error code |
 
-`rledger add` without `-n` appends: when stdin is not a terminal its
-confirmation prompt defaults to yes. Without `--quick` it is interactive.
+`rledger add` asks before appending. When stdin is not a terminal, only an
+explicit `y` on stdin appends, and no answer is an error, so pass `-y` to
+append or `-n` to preview. Without `--quick` it is interactive.
 
 Every command takes `--help`. Full flag lists and examples:
 [references/commands.md](references/commands.md).

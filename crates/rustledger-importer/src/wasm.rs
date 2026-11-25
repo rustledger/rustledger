@@ -1370,14 +1370,14 @@ mod tests {
         let result = importer
             .extract(tmp.path(), &config)
             .expect("extract round-trip");
-        assert!(result.directives.is_empty());
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
 
         let enriched = importer
             .extract_enriched(tmp.path(), &config)
             .expect("extract_enriched round-trip");
         assert!(enriched.entries.is_empty());
-        assert!(enriched.warnings.is_empty());
+        assert_eq!(enriched.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]

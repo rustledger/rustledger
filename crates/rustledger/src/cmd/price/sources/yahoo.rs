@@ -21,11 +21,11 @@ impl ExchangeClock {
         if let Some(tz) = &self.tz {
             return jiff::Timestamp::from_second(secs)
                 .ok()
-                .map(|t| t.to_zoned(tz.clone()).date());
+                .map(|t| t.to_zoned_datetime(tz.clone()).date());
         }
         jiff::Timestamp::from_second(secs.checked_add(self.gmtoffset)?)
             .ok()
-            .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
+            .map(|t| t.to_zoned_datetime(jiff::tz::TimeZone::UTC).date())
     }
 }
 
@@ -69,7 +69,7 @@ impl YahooFinanceSource {
                     .end
                     .checked_add(jiff::Span::new().days(2))
                     .context("date overflow")?
-                    .to_zoned(jiff::tz::TimeZone::UTC)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                     .context("date out of range")?
                     .timestamp()
                     .as_second();
@@ -77,7 +77,7 @@ impl YahooFinanceSource {
                     .start
                     .checked_sub(jiff::Span::new().days(1))
                     .context("date underflow")?
-                    .to_zoned(jiff::tz::TimeZone::UTC)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                     .context("date out of range")?
                     .timestamp()
                     .as_second();

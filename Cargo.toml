@@ -43,7 +43,7 @@ default-members = [
 [workspace.package]
 version = "0.24.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 license = "GPL-3.0-only"
 repository = "https://github.com/rustledger/rustledger"
 homepage = "https://rustledger.github.io"
@@ -66,7 +66,7 @@ rust_decimal = { version = "1.42", features = ["serde"] }
 # wasm32-unknown-unknown is not possible with just the standard library".
 # No effect on native builds. Required by @rustledger/wasm consumers
 # (see #925).
-jiff = { version = "0.2", features = ["serde", "js"] }
+jiff = { version = "1.0", features = ["serde", "js"] }
 glob = "0.3"
 thiserror = "2"
 anyhow = "1"
@@ -131,14 +131,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 # `default-features = false` drops ONLY wasmtime's `cache` feature (the list
-# below is wasmtime 49's default set minus `cache`). rustledger never enables
+# below is wasmtime 51's default set minus `cache`). rustledger never enables
 # wasmtime's on-disk compilation cache (no `Config::cache` / `CacheConfig`
 # use; the Python runtime keeps its own precompiled-module cache via
 # `Engine::detect_precompiled_file`), and `cache` is the sole path that pulls
 # zstd 0.13 / zstd-safe 7 (RUSTSEC-2026-0391/0398/0403/0410, which need
 # zstd 0.14 to fix). Revisit when bumping wasmtime: re-sync this list with
 # the new version's `[features] default`, still omitting `cache`.
-wasmtime = { version = "49.0.0", default-features = false, features = [
+wasmtime = { version = "51.0.0", default-features = false, features = [
   "anyhow",
   "async",
   "backtrace",
@@ -165,7 +165,7 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
   "compile-time-builtins",
   "wit-parser",
 ] }
-wasmtime-wasi = "49.0.0"
+wasmtime-wasi = "51.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
 wit-bindgen = "0.63"
@@ -225,9 +225,6 @@ rkyv = "0.8"
 # Async
 tokio = { version = "1", features = ["full"] }
 
-# WASM getrandom support (needed for wasm32-unknown-unknown target)
-getrandom = { version = "0.2", features = ["js"] }
-
 # LSP
 lsp-server = "0.10"
 lsp-types = "0.97"
@@ -285,6 +282,11 @@ missing_panics_doc = "allow"
 similar_names = "allow"
 return_self_not_must_use = "allow"
 too_many_lines = "allow"
+# Rust 1.100 added `assert_is_empty` (via pedantic/nursery): it rewrites
+# `assert!(x.is_empty())` as `assert_eq!(x, [] as [T; 0])`. The test suite has
+# ~800 of these; the rewrite needs a per-site element type and reads worse,
+# for a slightly better failure message.
+assert_is_empty = "allow"
 option_if_let_else = "allow"
 # Numeric cast warnings - we use standard patterns
 cast_possible_truncation = "allow"

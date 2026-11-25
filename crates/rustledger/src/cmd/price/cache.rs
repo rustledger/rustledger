@@ -281,7 +281,7 @@ fn now_secs() -> u64 {
 /// (settled) or on the day itself (intraday) — see [`PriceCache::get`].
 fn civil_day_of(unix_secs: u64) -> Option<NaiveDate> {
     let ts = jiff::Timestamp::from_second(i64::try_from(unix_secs).ok()?).ok()?;
-    Some(ts.to_zoned(jiff::tz::TimeZone::system()).date())
+    Some(ts.to_zoned_datetime(jiff::tz::TimeZone::system()).date())
 }
 
 #[cfg(test)]
@@ -547,7 +547,7 @@ mod tests {
     /// price of record).
     #[test]
     fn today_dated_key_honors_ttl() {
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
             path: dir.path().join("price-cache.json"),

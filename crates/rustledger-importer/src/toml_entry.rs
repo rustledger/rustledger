@@ -833,7 +833,10 @@ name = "unicode"
             ]
         );
         let bare: ImporterEntry = toml::from_str("name = \"b\"").unwrap();
-        assert!(bare.named_columns().unwrap().is_empty());
+        assert_eq!(
+            bare.named_columns().unwrap(),
+            [] as [(&str, std::string::String); 0]
+        );
     }
 
     /// An `ofx` entry is not rejected there: account/currency still apply.

@@ -57,7 +57,6 @@ serde.workspace = true
 rkyv.workspace = true
 sha2.workspace = true
 jiff.workspace = true
-getrandom.workspace = true
 
 # Better panic messages in WASM
 console_error_panic_hook = "0.1"
@@ -109,15 +108,6 @@ schemars = { workspace = true, optional = true }
 rustledger-plugin-types = { path = "../rustledger-plugin-types" }
 rustledger-ffi-wasi = { path = "../rustledger-ffi-wasi" }
 serde_json.workspace = true
-
-# `getrandom` 0.3 (pulled in transitively via `imbl` → `rand_xoshiro`
-# since #1195) requires both the `wasm_js` Cargo feature AND a
-# RUSTFLAGS cfg (`--cfg getrandom_backend="wasm_js"`, set in
-# `.cargo/config.toml` at the workspace root) before it will compile
-# on `wasm32-unknown-unknown`. A direct dep here forces Cargo to union
-# the feature into the transitive getrandom 0.3 instance.
-[target.wasm32-unknown-unknown.dependencies]
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [package.metadata.wasm-pack.profile.release]
 # Optimize for speed (aligned with profile.wasm-release opt-level = 3)

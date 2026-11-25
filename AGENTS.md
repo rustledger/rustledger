@@ -554,7 +554,7 @@ Two supporting rules from the same review:
 
 ## Toolchain Bumps
 
-CI pins an explicit stable version instead of floating (`toolchain: 1.98.1`
+CI pins an explicit stable version instead of floating (`toolchain: 1.100.0`
 at every site that previously said `stable`; the MSRV job and the
 nightly-based jobs keep their own separate pins), after a floating-`stable`
 release broke every open PR overnight (#1745: new lints plus a

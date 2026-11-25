@@ -411,7 +411,7 @@ pub(super) fn report_returns<W: Write>(
         Some(s) => s
             .parse()
             .with_context(|| format!("invalid --end date {s:?} (expected YYYY-MM-DD)"))?,
-        None => jiff::Zoned::now().date(),
+        None => jiff::ZonedDateTime::now().date(),
     };
 
     let whole_scope = Scope::new(investments.to_vec(), income.to_vec());

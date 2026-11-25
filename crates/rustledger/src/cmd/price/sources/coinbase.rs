@@ -128,7 +128,7 @@ impl PriceSource for CoinbaseSource {
         // network I/O (round-4 deep review of #1803: the post-fetch
         // read could poison the settled cache with a D+1-labeled
         // entry under a D key).
-        let date = jiff::Zoned::now().date();
+        let date = jiff::ZonedDateTime::now().date();
         let url = self.build_url(&pair.ticker, &pair.currency, None);
         let (price, currency) = self.fetch_spot(&url, pair)?;
 

@@ -1583,7 +1583,10 @@ fn deeper_indented_percent_line_is_not_a_comment() {
         .filter(|e| e.kind() == PERCENT_COMMENT)
         .count();
     assert_eq!(pct_comments, 0, "an indented `%` is not a comment");
-    assert!(!rustledger_parser::parse(source).errors.is_empty());
+    assert_ne!(
+        rustledger_parser::parse(source).errors,
+        [] as [rustledger_parser::ParseError; 0]
+    );
 }
 
 #[test]
@@ -3428,7 +3431,10 @@ fn empty_source() {
     let tree = parse_structured("");
     assert_round_trip("", &tree);
     assert_eq!(tree.kind(), SyntaxKind::SOURCE_FILE);
-    assert!(directives(&tree).is_empty());
+    assert_eq!(
+        directives(&tree),
+        [] as [rowan::SyntaxNode<rustledger_parser::BeancountLanguage>; 0]
+    );
 }
 
 #[test]
@@ -3438,7 +3444,10 @@ fn only_trivia_no_directives() {
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);
 
-    assert!(directives(&tree).is_empty());
+    assert_eq!(
+        directives(&tree),
+        [] as [rowan::SyntaxNode<rustledger_parser::BeancountLanguage>; 0]
+    );
     // All under SOURCE_FILE.
     assert_eq!(
         elements_of(&tree),

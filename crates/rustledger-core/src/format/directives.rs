@@ -232,34 +232,67 @@ macro_rules! string_wrapper {
 
 string_wrapper!(
     /// Format a balance directive to a string (self-aligned).
-    format_balance, format_balance_lines, Balance);
+    format_balance,
+    format_balance_lines,
+    Balance
+);
 string_wrapper!(
     /// Format a price directive to a string (self-aligned).
-    format_price, format_price_lines, Price);
+    format_price,
+    format_price_lines,
+    Price
+);
 string_wrapper!(
     /// Format an open directive to a string.
-    format_open, format_open_lines, Open);
+    format_open,
+    format_open_lines,
+    Open
+);
 string_wrapper!(
     /// Format a close directive to a string.
-    format_close, format_close_lines, Close);
+    format_close,
+    format_close_lines,
+    Close
+);
 string_wrapper!(
     /// Format a commodity directive to a string.
-    format_commodity, format_commodity_lines, Commodity);
+    format_commodity,
+    format_commodity_lines,
+    Commodity
+);
 string_wrapper!(
     /// Format a pad directive to a string.
-    format_pad, format_pad_lines, Pad);
+    format_pad,
+    format_pad_lines,
+    Pad
+);
 string_wrapper!(
     /// Format an event directive to a string.
-    format_event, format_event_lines, Event);
+    format_event,
+    format_event_lines,
+    Event
+);
 string_wrapper!(
     /// Format a query directive to a string.
-    format_query, format_query_lines, Query);
+    format_query,
+    format_query_lines,
+    Query
+);
 string_wrapper!(
     /// Format a note directive to a string.
-    format_note, format_note_lines, Note);
+    format_note,
+    format_note_lines,
+    Note
+);
 string_wrapper!(
     /// Format a document directive to a string.
-    format_document, format_document_lines, Document);
+    format_document,
+    format_document_lines,
+    Document
+);
 string_wrapper!(
     /// Format a custom directive to a string.
-    format_custom, format_custom_lines, Custom);
+    format_custom,
+    format_custom_lines,
+    Custom
+);

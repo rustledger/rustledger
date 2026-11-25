@@ -368,15 +368,15 @@ mod tests {
     fn test_import_result_new() {
         let directives = vec![];
         let result = ImportResult::new(directives);
-        assert!(result.directives.is_empty());
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn test_import_result_empty() {
         let result = ImportResult::empty();
-        assert!(result.directives.is_empty());
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         let result = csv_importer::CsvImporter
             .extract_string(csv_content, &config)
             .unwrap();
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
     }
 
     #[test]
@@ -500,14 +500,14 @@ mod tests {
         let entries = vec![(directive, enrichment)];
         let result = EnrichedImportResult::new(entries);
         assert_eq!(result.entries.len(), 1);
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn test_enriched_import_result_empty() {
         let result = EnrichedImportResult::empty();
         assert!(result.entries.is_empty());
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -551,7 +551,7 @@ mod tests {
         // Use the From<EnrichedImportResult> for ImportResult trait
         let plain: ImportResult = enriched.into();
         assert_eq!(plain.directives.len(), 1);
-        assert!(plain.warnings.is_empty());
+        assert_eq!(plain.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]

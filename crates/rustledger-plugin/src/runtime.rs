@@ -996,7 +996,10 @@ mod tests {
         let manager = WatchingPluginManager::new();
         assert!(manager.is_empty());
         assert_eq!(manager.len(), 0);
-        assert!(manager.plugin_info().is_empty());
+        assert_eq!(
+            manager.plugin_info(),
+            [] as [(&std::path::Path, std::time::SystemTime); 0]
+        );
     }
 
     #[test]

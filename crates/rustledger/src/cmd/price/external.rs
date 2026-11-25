@@ -333,7 +333,9 @@ impl ExternalCommandSource {
                     // assumed to have honored RLEDGER_DATE (see fetch_price
                     // top comment). Emit a "date" field to override.
                     date: date.unwrap_or_else(|| {
-                        request.date.unwrap_or_else(|| jiff::Zoned::now().date())
+                        request
+                            .date
+                            .unwrap_or_else(|| jiff::ZonedDateTime::now().date())
                     }),
                     source: self.source_name.clone(),
                 });
@@ -359,7 +361,9 @@ impl ExternalCommandSource {
                 // the command is assumed to have honored RLEDGER_DATE
                 // (see fetch_price top comment). Use the beancount form
                 // (`<date> price <ticker> <amount> <ccy>`) to override.
-                date: request.date.unwrap_or_else(|| jiff::Zoned::now().date()),
+                date: request
+                    .date
+                    .unwrap_or_else(|| jiff::ZonedDateTime::now().date()),
                 source: self.source_name.clone(),
             });
         }

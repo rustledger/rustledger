@@ -53,7 +53,7 @@ pub(super) fn report_holdings<W: Write>(
 
                     let entry = account_holdings
                         .entry(amount.currency.to_string())
-                        .or_insert((Decimal::ZERO, Decimal::ZERO, cost_currency.clone()));
+                        .or_insert((Decimal::ZERO, Decimal::ZERO, cost_currency));
 
                     entry.0 += amount.number;
                     entry.1 += cost_amount;

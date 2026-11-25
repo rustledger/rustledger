@@ -146,7 +146,7 @@ pub fn get_completions_cached(
     let context = detect_context(source, line, character);
     let candidates = match &context {
         CompletionContext::LineStart => {
-            let today = jiff::Zoned::now().date().to_string();
+            let today = jiff::ZonedDateTime::now().date().to_string();
             rustledger_completion::line_start_candidates(&today)
         }
         CompletionContext::AfterDate => rustledger_completion::after_date_candidates(),

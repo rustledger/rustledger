@@ -281,6 +281,9 @@ fn a_journal_account_pattern_stays_a_pattern() {
     // Deliberately unlike bean-query, where `JOURNAL "account"` becomes
     // `account ~ account` and lists every posting: the argument is an account
     // pattern, and no account contains `account`.
-    assert!(run("JOURNAL \"account\"").rows.is_empty());
+    assert_eq!(
+        run("JOURNAL \"account\"").rows,
+        [] as [std::vec::Vec<rustledger_query::Value>; 0]
+    );
     assert_eq!(run("JOURNAL \"Cash\"").rows.len(), 2);
 }

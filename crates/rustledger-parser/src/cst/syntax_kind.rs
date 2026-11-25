@@ -402,6 +402,10 @@ impl From<SyntaxKind> for rowan::SyntaxKind {
 
 /// Tag enum for `rowan::Language`. Zero variants — only used as a
 /// type-level marker.
+// Uninhabited on purpose: rowan only ever names this type, never builds a
+// value, and an empty enum is the conventional marker for that. Clippy 1.100's
+// `empty_enums` prefers `!`, which is still unstable as a named type.
+#[allow(clippy::empty_enums)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BeancountLanguage {}
 

@@ -2962,7 +2962,14 @@ fn test_implicit_prices_emits_nothing_for_plain_transfer() {
         ),
     ]);
     let output = process_and_materialize(&plugin, input.clone());
-    assert!(implicit_prices_emitted(&input, &output).is_empty());
+    assert_eq!(
+        implicit_prices_emitted(&input, &output),
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::string::String
+        ); 0]
+    );
 }
 
 /// Test-isolation regression: explicit input `price` directives MUST
@@ -4512,7 +4519,7 @@ proptest::proptest! {
                         account: "Assets:Bank".to_string(),
                         units: Some(AmountData {
                             number: "1".to_string(),
-                            currency: currency.clone(),
+                            currency,
                         }),
                         cost: if has_cost {
                             Some(CostData {
@@ -5051,13 +5058,13 @@ fn sg_messages(postings: Vec<PostingData>) -> Vec<String> {
 /// Proceeds matching the price, the gain posted to Income → nothing.
 #[test]
 fn test_sell_gains_silent_when_proceeds_match_price() {
-    assert!(
+    assert_eq!(
         sg_messages(vec![
             sg_lot("-10", "100", Some("150")),
             sg_posting("Assets:Cash", "1500.00", "USD"),
             sg_posting("Income:Gains", "-500.00", "USD"),
-        ])
-        .is_empty()
+        ]),
+        [] as [std::string::String; 0]
     );
 }
 
@@ -5087,28 +5094,28 @@ fn test_sell_gains_reports_proceeds_that_do_not_match_the_price() {
 /// Fees are Expenses, so they count toward the proceeds.
 #[test]
 fn test_sell_gains_counts_expenses_toward_proceeds() {
-    assert!(
+    assert_eq!(
         sg_messages(vec![
             sg_lot("-10", "100", Some("150")),
             sg_posting("Assets:Cash", "1490.00", "USD"),
             sg_posting("Expenses:Fees", "10.00", "USD"),
             sg_posting("Income:Gains", "-500.00", "USD"),
-        ])
-        .is_empty()
+        ]),
+        [] as [std::string::String; 0]
     );
 }
 
 /// A lot at cost without a price → the transaction is not checked at all.
 #[test]
 fn test_sell_gains_skips_a_transaction_with_an_unpriced_lot() {
-    assert!(
+    assert_eq!(
         sg_messages(vec![
             sg_lot("-10", "100", Some("150")),
             sg_lot("-1", "100", None),
             sg_posting("Assets:Cash", "1.00", "USD"),
             sg_posting("Income:Gains", "-1.00", "USD"),
-        ])
-        .is_empty()
+        ]),
+        [] as [std::string::String; 0]
     );
 }
 
@@ -5130,12 +5137,12 @@ fn test_sell_gains_reports_proceeds_in_another_currency() {
 /// A buy has no price to check against here (its lot has no price).
 #[test]
 fn test_sell_gains_silent_for_unpriced_buy() {
-    assert!(
+    assert_eq!(
         sg_messages(vec![
             sg_lot("10", "100", None),
             sg_posting("Assets:Cash", "-1000", "USD"),
-        ])
-        .is_empty()
+        ]),
+        [] as [std::string::String; 0]
     );
 }
 
@@ -5225,7 +5232,7 @@ fn test_sell_gains_leaves_an_interpolated_posting_out_of_the_tolerance() {
             sg_posting("Income:Gains", "-10", "USD"),
         ]
     };
-    assert!(sg_messages(postings(false)).is_empty());
+    assert_eq!(sg_messages(postings(false)), [] as [std::string::String; 0]);
     assert_eq!(
         sg_messages(postings(true)),
         ["Invalid price vs. proceeds/gains: (39.99 USD) vs. (40.0 USD); difference: (-0.01 USD)"]

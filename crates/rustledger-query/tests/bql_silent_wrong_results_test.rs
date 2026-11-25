@@ -452,7 +452,10 @@ fn test_journal_at_str_shows_the_position_and_balance_as_text() {
         ]
     );
     let empty = run(MOVEMENTS, "JOURNAL 'Nothing:Matches' AT str").expect("runs");
-    assert!(empty.rows.is_empty());
+    assert_eq!(
+        empty.rows,
+        [] as [std::vec::Vec<rustledger_query::Value>; 0]
+    );
 }
 
 /// The functions that do map a position to an amount, position or inventory

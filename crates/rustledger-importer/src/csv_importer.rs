@@ -784,7 +784,7 @@ mod tests {
 
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 3);
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1004,12 +1004,9 @@ mod tests {
 
         // Unique ids, and blank cells, warn about nothing.
         let csv = "Kind,Date,Description,Amount\na,2024-01-15,Coffee,-4.50\n,2024-01-16,Tea,-2.00\n,2024-01-17,Cake,-3\n";
-        assert!(
-            CsvImporter
-                .extract_string(csv, &config)
-                .unwrap()
-                .warnings
-                .is_empty()
+        assert_eq!(
+            CsvImporter.extract_string(csv, &config).unwrap().warnings,
+            [] as [std::string::String; 0]
         );
     }
 
@@ -1081,7 +1078,7 @@ mod tests {
         // Both blank: no warning (skipped as zero by default).
         let csv_blank = "Date,Description,Debit,Credit\n2024-01-15,Empty,,\n";
         let result = CsvImporter.extract_string(csv_blank, &config).unwrap();
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
         assert!(result.warnings.is_empty(), "blank cells must not warn");
     }
 
@@ -1212,7 +1209,7 @@ More info
         let csv_content = "Date,Description,Amount\n";
 
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
     }
 
     #[test]
@@ -1388,7 +1385,7 @@ More info
 
         // A misconfigured currency column must NOT silently fall back to the
         // default currency; the row is rejected with a warning instead.
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
         assert!(
             result
                 .warnings
@@ -1555,7 +1552,7 @@ not-a-date,Coffee,-5.00
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Empty date row should be silently skipped
         assert_eq!(result.directives.len(), 1);
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1686,7 +1683,7 @@ not-a-date,Coffee,-5.00
 
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Row should fail with a warning
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
         assert_eq!(result.warnings.len(), 1);
         // The error propagates the "missing date column" context
         assert!(result.warnings[0].contains("missing date column"));
@@ -1716,7 +1713,7 @@ not-a-date,Coffee,-5.00
 
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Row should fail with a warning
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("out of bounds"));
     }
@@ -1762,7 +1759,7 @@ not-a-date,Coffee,-5.00
 
         let result = importer.extract_string(csv_content, &config).unwrap();
         // Should have warning about no amount column
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("No amount column"));
     }
@@ -1835,7 +1832,7 @@ not-a-date,Coffee,-5.00
 
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Zero amount should be skipped
-        assert!(result.directives.is_empty());
+        assert_eq!(result.directives, [] as [rustledger_core::Directive; 0]);
     }
 
     #[test]

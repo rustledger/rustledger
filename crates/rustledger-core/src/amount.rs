@@ -750,7 +750,7 @@ mod tests {
             let displayed = amt.to_string();
             assert_eq!(
                 Amount::from_str(&displayed),
-                Ok(amt.clone()),
+                Ok(amt),
                 "round-trip lost data: Display produced {displayed:?}"
             );
         }

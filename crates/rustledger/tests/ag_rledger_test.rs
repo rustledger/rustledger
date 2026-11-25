@@ -1866,7 +1866,7 @@ fn tree(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
             } else if meta.is_file() {
                 out.push((p.clone(), std::fs::read(&p).unwrap()));
             } else {
-                out.push((p.clone(), Vec::new()));
+                out.push((p, Vec::new()));
             }
         }
     }

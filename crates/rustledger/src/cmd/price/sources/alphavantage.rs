@@ -69,7 +69,7 @@ impl AlphaVantageSource {
     /// windows ending further back need `full` (the whole listing
     /// history — a heavier payload, fetched only when required).
     fn build_daily_url(symbol: &str, api_key: &str, window: DateWindow) -> String {
-        let compact_horizon = jiff::Zoned::now()
+        let compact_horizon = jiff::ZonedDateTime::now()
             .date()
             .checked_sub(jiff::Span::new().days(90))
             .ok();
@@ -388,10 +388,10 @@ impl AlphaVantageSource {
         jiff::tz::TimeZone::get("America/New_York").map_or_else(
             |_| {
                 jiff::Timestamp::now()
-                    .to_zoned(jiff::tz::TimeZone::UTC)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                     .date()
             },
-            |tz| jiff::Timestamp::now().to_zoned(tz).date(),
+            |tz| jiff::Timestamp::now().to_zoned_datetime(tz).date(),
         )
     }
 

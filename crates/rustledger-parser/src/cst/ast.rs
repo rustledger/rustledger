@@ -150,20 +150,24 @@ macro_rules! ast_token {
 
 ast_token!(
     /// `DATE` token (e.g., `2024-01-15`).
-    Date, DATE
+    Date,
+    DATE
 );
 ast_token!(
     /// `ACCOUNT` token (e.g., `Assets:Cash`).
-    Account, ACCOUNT
+    Account,
+    ACCOUNT
 );
 ast_token!(
     /// `CURRENCY` token (e.g., `USD`).
-    CurrencyName, CURRENCY
+    CurrencyName,
+    CURRENCY
 );
 ast_token!(
     /// `STRING` literal (e.g., `"Coffee"`). `text()` includes the
     /// surrounding quotes; use `text_unquoted()` for the content.
-    StringLit, STRING
+    StringLit,
+    STRING
 );
 
 impl StringLit {
@@ -195,12 +199,14 @@ impl StringLit {
 
 ast_token!(
     /// `NUMBER` token (e.g., `100.00`).
-    Number, NUMBER
+    Number,
+    NUMBER
 );
 ast_token!(
     /// `META_KEY` token (e.g., `note:`). Note the trailing colon
     /// is part of the token; use `text_without_colon()` to strip it.
-    MetaKey, META_KEY
+    MetaKey,
+    META_KEY
 );
 
 impl MetaKey {
@@ -214,19 +220,23 @@ impl MetaKey {
 
 ast_token!(
     /// `TAG` token (e.g., `#trip`).
-    Tag, TAG
+    Tag,
+    TAG
 );
 ast_token!(
     /// `LINK` token (e.g., `^expense-123`).
-    Link, LINK
+    Link,
+    LINK
 );
 ast_token!(
     /// `BOOL_TRUE` token literal.
-    BoolTrue, BOOL_TRUE
+    BoolTrue,
+    BOOL_TRUE
 );
 ast_token!(
     /// `BOOL_FALSE` token literal.
-    BoolFalse, BOOL_FALSE
+    BoolFalse,
+    BOOL_FALSE
 );
 
 // ---- Heterogeneous flag/sign token wrappers --------------------
@@ -455,7 +465,8 @@ impl Sign {
 ast_node!(
     /// Root of a parsed Beancount file. `SourceFile::parse(src)` is
     /// the typed-AST entry point — it wraps `parse_structured`.
-    SourceFile, SOURCE_FILE
+    SourceFile,
+    SOURCE_FILE
 );
 
 impl SourceFile {
@@ -601,7 +612,8 @@ ast_node!(
     /// Wrapper for unrecognized / malformed top-level content
     /// (PR 2.4 `ERROR_NODE`). Typed-AST consumers can use this to
     /// surface error regions to users (e.g., LSP diagnostics).
-    ErrorNode, ERROR_NODE
+    ErrorNode,
+    ERROR_NODE
 );
 
 impl ErrorNode {
@@ -958,7 +970,8 @@ impl Transaction {
 
 ast_node!(
     /// `WS [(FLAG | STAR | PENDING_KW | HASH | single-char CURRENCY) WS] ACCOUNT [AMOUNT] [COST_SPEC] [PRICE_ANNOTATION]`.
-    Posting, POSTING
+    Posting,
+    POSTING
 );
 
 impl Posting {
@@ -1012,7 +1025,8 @@ ast_node!(
     /// Units amount: `[sign] (NUMBER | PAREN_EXPR) ([WS] op
     /// [WS] [sign] (NUMBER | PAREN_EXPR))* [WS CURRENCY]`, or a
     /// bare `CURRENCY`. Phase 2.4 extension supports arithmetic.
-    Amount, AMOUNT
+    Amount,
+    AMOUNT
 );
 
 impl Amount {
@@ -1107,7 +1121,8 @@ ast_node!(
     /// Bracketed cost annotation: `{...}` (per-unit), `{#...}`
     /// (per-unit + total), or `{{...}}` (total-only). Contents
     /// stay flat (phase 2.2c); accessors scan the children.
-    CostSpec, COST_SPEC
+    CostSpec,
+    COST_SPEC
 );
 
 impl CostSpec {
@@ -1167,7 +1182,8 @@ impl CostSpec {
 ast_node!(
     /// Price annotation: `AT [WS AMOUNT]` (per-unit) or
     /// `AT_AT [WS AMOUNT]` (total).
-    PriceAnnotation, PRICE_ANNOTATION
+    PriceAnnotation,
+    PRICE_ANNOTATION
 );
 
 impl PriceAnnotation {
@@ -1187,7 +1203,8 @@ ast_node!(
     /// Metadata sub-line: `WS META_KEY ... (NEWLINE | EOF)`.
     /// Key is the `META_KEY` token; value is the remaining flat
     /// content tokens. Use `key()` and `value_*()` accessors.
-    MetaEntry, META_ENTRY
+    MetaEntry,
+    META_ENTRY
 );
 
 impl MetaEntry {

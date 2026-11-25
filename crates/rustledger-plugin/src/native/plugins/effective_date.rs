@@ -212,7 +212,7 @@ impl NativePlugin for EffectiveDatePlugin {
 
             if let DirectiveData::Transaction(ref mut txn) = directive.data {
                 if !txn.links.contains(&link) {
-                    txn.links.push(link.clone());
+                    txn.links.push(link);
                 }
                 let mut modified_postings = Vec::with_capacity(txn.postings.len());
                 for (posting, plan) in txn.postings.iter().zip(plans) {

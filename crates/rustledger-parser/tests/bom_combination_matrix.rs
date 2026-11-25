@@ -3397,7 +3397,10 @@ fn test_stale_exceptions_needs_the_listing_to_explain_the_line() {
         .expect("at least one listed exception");
     let excepted = excepted_of(tail);
     assert!(excepted.contains(&(tail.to_string(), l)));
-    assert!(stale_exceptions([(tail, l)], &excepted).is_empty());
+    assert_eq!(
+        stale_exceptions([(tail, l)], &excepted),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// The rewrite checks compare the rewritten line's count, none when the
@@ -3584,7 +3587,10 @@ fn test_list_diff_lists_gone_then_new() {
     );
     assert_eq!(list_diff(&set(&["a"]), &set(&[])), vec!["- a"]);
     assert_eq!(list_diff(&set(&[]), &set(&["c"])), vec!["+ c"]);
-    assert!(list_diff(&set(&["a"]), &set(&["a"])).is_empty());
+    assert_eq!(
+        list_diff(&set(&["a"]), &set(&["a"])),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// `parse_known_rows` reads a three-field row with no reason and a
@@ -3619,15 +3625,24 @@ fn test_relabeled_rows_needs_the_same_counts_and_another_label() {
     let (tail, (counts, causes, _)) = known_rows().into_iter().next().expect("a known row");
     let computed = |c: &str, k: &str| vec![(tail.to_string(), c.to_string(), k.to_string())];
     assert_eq!(relabeled_rows(&computed(counts, "other"), &[]).len(), 1);
-    assert!(relabeled_rows(&computed(counts, causes), &[]).is_empty());
-    assert!(relabeled_rows(&computed("9:9", "other"), &[]).is_empty());
+    assert_eq!(
+        relabeled_rows(&computed(counts, causes), &[]),
+        [] as [std::string::String; 0]
+    );
+    assert_eq!(
+        relabeled_rows(&computed("9:9", "other"), &[]),
+        [] as [std::string::String; 0]
+    );
     let (t, x) = data_lines(TEXTS)
         .next()
         .and_then(|l| l.split_once('\t'))
         .expect("a texts row");
     let texts = |x: &str| vec![(t.to_string(), x.to_string())];
     assert_eq!(relabeled_rows(&[], &texts("3:x")).len(), 1);
-    assert!(relabeled_rows(&[], &texts(x)).is_empty());
+    assert_eq!(
+        relabeled_rows(&[], &texts(x)),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// `reason_holds` needs a reason written for exactly the counts asked.

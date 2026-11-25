@@ -330,7 +330,7 @@ fn test_execute_attribute_chain_at_the_depth_limit() {
     assert_too_deep(&chain(LIMIT + 1));
     match try_run(&chain(LIMIT)) {
         Ok(result) => assert_eq!(result.rows.len(), 1, "{:?}", result.rows),
-        Err(e) => assert!(!e.to_string().is_empty()),
+        Err(e) => assert_ne!(e.to_string(), ""),
     }
 }
 

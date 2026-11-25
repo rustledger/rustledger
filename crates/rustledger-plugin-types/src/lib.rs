@@ -2035,8 +2035,8 @@ mod tests {
         let original = ImporterOutput::empty();
         let bytes = rmp_serde::to_vec(&original).unwrap();
         let decoded: ImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
-        assert!(decoded.directives.is_empty());
-        assert!(decoded.warnings.is_empty());
+        assert_eq!(decoded.directives, [] as [DirectiveWrapper; 0]);
+        assert_eq!(decoded.warnings, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -2243,7 +2243,10 @@ mod account_root_tests {
         // Nor do the tolerance options (#2653): an empty multiplier would
         // not parse, where beancount's default is 0.5.
         assert_eq!(opts.tolerance_multiplier, "0.5");
-        assert!(opts.inferred_tolerance_default.is_empty());
+        assert_eq!(
+            opts.inferred_tolerance_default,
+            [] as [(std::string::String, std::string::String); 0]
+        );
         assert!(!opts.infer_tolerance_from_cost);
         assert_eq!(
             super::PluginOptions::default().tolerance_multiplier,

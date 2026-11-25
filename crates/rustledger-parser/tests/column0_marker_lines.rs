@@ -221,7 +221,7 @@ fn test_format_keeps_whitespace_marker_lines_ignored() {
         );
         assert_eq!(
             summary(&spliced),
-            (opens.clone(), vec![]),
+            (opens, vec![]),
             "range format of {src:?} gave {spliced:?}"
         );
     }

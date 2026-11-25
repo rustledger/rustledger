@@ -355,7 +355,7 @@ mod tests {
             format: OutputFormat::Text,
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        run_with_writer(&args, &mut out, None, &mut err).unwrap();
+        let _ = run_with_writer(&args, &mut out, None, &mut err).unwrap();
         let err = String::from_utf8(err).unwrap();
         assert!(
             err.starts_with(&format!(

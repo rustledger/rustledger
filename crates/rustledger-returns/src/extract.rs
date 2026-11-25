@@ -1527,7 +1527,7 @@ mod tests {
         )];
         let flows =
             extract_flows(&dirs, &scope, "USD", &MockPrices::default(), d(2020, 6, 1)).unwrap();
-        assert!(flows.is_empty());
+        assert_eq!(flows, [] as [CashFlow; 0]);
     }
 
     #[test]
@@ -1549,7 +1549,7 @@ mod tests {
             d(2020, 2, 1),
         )
         .unwrap();
-        assert!(flows.is_empty());
+        assert_eq!(flows, [] as [CashFlow; 0]);
     }
 
     #[test]

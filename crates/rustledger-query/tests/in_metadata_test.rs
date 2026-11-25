@@ -135,7 +135,10 @@ fn key_in_entry_meta() {
         strings("SELECT DISTINCT narration WHERE 'concept' NOT IN entry.meta"),
         ["Fruit"]
     );
-    assert!(strings("SELECT narration WHERE 'note' IN entry.meta").is_empty());
+    assert_eq!(
+        strings("SELECT narration WHERE 'note' IN entry.meta"),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// The system tables' `meta` columns.
@@ -184,10 +187,19 @@ fn key_in_meta_as_from_filter() {
 /// operand is NULL, which `WHERE` drops.
 #[test]
 fn non_string_and_null_keys() {
-    assert!(strings("SELECT narration WHERE 5 IN meta").is_empty());
+    assert_eq!(
+        strings("SELECT narration WHERE 5 IN meta"),
+        [] as [std::string::String; 0]
+    );
     assert_eq!(strings("SELECT narration WHERE 5 NOT IN meta").len(), 4);
-    assert!(strings("SELECT narration WHERE NULL IN meta").is_empty());
-    assert!(strings("SELECT narration WHERE NULL NOT IN meta").is_empty());
+    assert_eq!(
+        strings("SELECT narration WHERE NULL IN meta"),
+        [] as [std::string::String; 0]
+    );
+    assert_eq!(
+        strings("SELECT narration WHERE NULL NOT IN meta"),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// A key written with no value (`empty:`) is present, with a NULL value, so

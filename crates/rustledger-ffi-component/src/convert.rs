@@ -349,7 +349,7 @@ fn semantic_validation_errors(
     loaded: &ffi::helpers::LoadResult,
     filename: Option<&str>,
 ) -> (Vec<ffi::Error>, Vec<rustledger_validate::BalanceActual>) {
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
     // The options `rledger check` validates with, from the ledger's own
     // (`LoadResult::validation_options`): a default set ignored
     // `tolerance_multiplier`, so a balance a pad left within the ledger's

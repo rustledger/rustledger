@@ -740,9 +740,8 @@ pub fn run_with_writer<W: Write>(
             .as_ref()
             .map(|loc| (loc.file.display().to_string(), loc.line, loc.column));
         if json_mode && shown {
-            let (site_file, site_line, site_column) = site
-                .clone()
-                .unwrap_or_else(|| (main_file_str.clone(), 1, 1));
+            let (site_file, site_line, site_column) =
+                site.unwrap_or_else(|| (main_file_str.clone(), 1, 1));
             diagnostics.push(JsonDiagnostic {
                 file: site_file,
                 line: site_line,
@@ -1362,7 +1361,7 @@ mod tests {
             argv.extend_from_slice(extra);
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &mut out, &mut std::io::sink()).unwrap();
+            let _ = run_with_writer(&args, &mut out, &mut std::io::sink()).unwrap();
             let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
             v["warning_count"].as_u64().unwrap()
         };

@@ -37,7 +37,7 @@ use std::fmt::Write;
 /// Defined once, in [`rustledger_core::format::is_display_unsafe`], which
 /// JSON output escapes by too.
 #[must_use]
-pub fn is_unsafe(c: char) -> bool {
+pub const fn is_unsafe(c: char) -> bool {
     rustledger_core::format::is_display_unsafe(c)
 }
 

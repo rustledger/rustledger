@@ -258,7 +258,10 @@ fn journal_from_a_posting_column_keeps_the_matching_postings() {
             .collect::<Vec<_>>(),
         ["3000.00 USD", "1800.00 USD", "1674.25 USD"]
     );
-    assert!(rows(LEDGER, "JOURNAL 'Rent' FROM account ~ 'Bank'").is_empty());
+    assert_eq!(
+        rows(LEDGER, "JOURNAL 'Rent' FROM account ~ 'Bank'"),
+        [] as [std::vec::Vec<std::string::String>; 0]
+    );
     assert_eq!(
         rows(LEDGER, "JOURNAL FROM number > 0")
             .iter()
@@ -328,5 +331,8 @@ fn a_transaction_without_postings_does_not_panic() {
         printed.iter().any(|r| r[0].contains("empty one")),
         "{printed:?}"
     );
-    assert!(rows(source, "SELECT account FROM narration ~ 'empty'").is_empty());
+    assert_eq!(
+        rows(source, "SELECT account FROM narration ~ 'empty'"),
+        [] as [std::vec::Vec<std::string::String>; 0]
+    );
 }

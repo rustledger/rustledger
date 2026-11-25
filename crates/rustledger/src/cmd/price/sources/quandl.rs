@@ -264,7 +264,7 @@ impl PriceSource for QuandlSource {
             &api_key,
             pair,
             &column,
-            Some(jiff::Zoned::now().date()),
+            Some(jiff::ZonedDateTime::now().date()),
         )?;
         let point = points.into_iter().max_by_key(|p| p.date).with_context(
             || "No usable rows in the Quandl response (empty dataset or unparsable prices)",

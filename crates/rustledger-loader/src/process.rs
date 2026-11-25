@@ -773,7 +773,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // race where Early and Late could disagree on what day it is, and
     // gives `FutureDate` warnings a single coherent reference point.
     #[cfg(feature = "validation")]
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
 
     let synthed = crate::Directives::<crate::Raw>::from_parser(raw.directives)
         .sort()

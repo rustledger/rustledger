@@ -446,7 +446,7 @@ pub fn run_with_writer<W: Write>(
             // round-tripping through the source for the common case where the
             // user re-runs `rledger price -f` and wants idempotent output.
             if !args.clobber {
-                let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+                let fetch_date = date.unwrap_or_else(|| jiff::ZonedDateTime::now().date());
                 if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
                         let _ = writeln!(
@@ -740,7 +740,7 @@ fn dump_fetch_plan(
     date: Option<NaiveDate>,
 ) -> Result<()> {
     let date_str = date.map_or_else(|| "today".to_string(), |d| d.to_string());
-    let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+    let fetch_date = date.unwrap_or_else(|| jiff::ZonedDateTime::now().date());
 
     for symbol in symbols {
         // Expand to one row per quote currency, matching the network
@@ -1184,7 +1184,7 @@ fn run_with_external_command<W: Write>(
             // --clobber: skip when an existing price for this (symbol, currency, date)
             // is already in the file. Same rule as the network fetch path.
             if !args.clobber {
-                let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+                let fetch_date = date.unwrap_or_else(|| jiff::ZonedDateTime::now().date());
                 if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
                         let _ = writeln!(

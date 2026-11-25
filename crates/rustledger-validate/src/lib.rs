@@ -2217,7 +2217,7 @@ mod tests {
 
     /// `validate_with_today` is the LSP-friendly entry point that
     /// accepts the "today" date as a parameter instead of calling
-    /// `jiff::Zoned::now()` internally. Verify it threads the parameter
+    /// `jiff::ZonedDateTime::now()` internally. Verify it threads the parameter
     /// through correctly: with `today` set BEFORE the directive's date,
     /// the directive is in the future relative to `today`; with `today`
     /// set AFTER, the directive is in the past.

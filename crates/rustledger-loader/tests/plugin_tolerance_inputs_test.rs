@@ -101,7 +101,10 @@ fn plugin_options_carry_the_tolerance_options() {
     assert!(options.infer_tolerance_from_cost);
 
     let defaults = load_source("").options.plugin_options();
-    assert!(defaults.inferred_tolerance_default.is_empty());
+    assert_eq!(
+        defaults.inferred_tolerance_default,
+        [] as [(std::string::String, std::string::String); 0]
+    );
     assert_eq!(defaults.tolerance_multiplier, "0.5");
     assert!(!defaults.infer_tolerance_from_cost);
 }

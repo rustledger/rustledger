@@ -149,7 +149,7 @@ impl PriceSource for CoinCapSource {
         // of #1803 — the post-fetch read could poison the settled cache
         // with a D+1-labeled entry under a D key; round-5 review: the
         // round-4 edit had moved only this comment, not the read).
-        let date = jiff::Zoned::now().date();
+        let date = jiff::ZonedDateTime::now().date();
         let url = Self::build_url(&self.resolve_id(&pair.ticker)?);
 
         let json = http_get_json(

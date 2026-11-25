@@ -99,7 +99,10 @@ fn tilde_is_a_case_insensitive_search() {
         column("SELECT DISTINCT account WHERE account ~ 'bank' ORDER BY account"),
         ["Assets:Bank", "Assets:Bank-Card"]
     );
-    assert!(column("SELECT DISTINCT account WHERE account ~ '^bank'").is_empty());
+    assert_eq!(
+        column("SELECT DISTINCT account WHERE account ~ '^bank'"),
+        [] as [std::string::String; 0]
+    );
     assert_eq!(
         column("SELECT DISTINCT account WHERE account !~ 'bank' ORDER BY account"),
         ["Expenses:Coffee:Shop", "Expenses:Food"]
@@ -110,7 +113,10 @@ fn tilde_is_a_case_insensitive_search() {
         ["Assets:Bank-Card"]
     );
     // An inline flag group turns the case back on, as in Python.
-    assert!(column("SELECT DISTINCT narration WHERE narration ~ '(?-i:LUNCH)'").is_empty());
+    assert_eq!(
+        column("SELECT DISTINCT narration WHERE narration ~ '(?-i:LUNCH)'"),
+        [] as [std::string::String; 0]
+    );
     assert_eq!(
         column("SELECT DISTINCT narration WHERE narration ~ '(?-i:Lunch)'"),
         ["Lunch at [the] place"]
@@ -122,7 +128,10 @@ fn tilde_is_a_case_insensitive_search() {
 fn tilde_reads_python_syntax() {
     // A set of `[`, `:`, `a`, `l`, `p`, `h`, followed by `]`, to Python; a
     // POSIX class to `regex`, which matched every account.
-    assert!(column("SELECT DISTINCT account WHERE account ~ '[[:alpha:]]'").is_empty());
+    assert_eq!(
+        column("SELECT DISTINCT account WHERE account ~ '[[:alpha:]]'"),
+        [] as [std::string::String; 0]
+    );
     // `(?P<name>...)` and Python's escapes.
     assert_eq!(
         column("SELECT DISTINCT account WHERE account ~ ':(?P<x>[a-z])' ORDER BY account").len(),
@@ -227,8 +236,14 @@ fn has_account_and_journal_ignore_case() {
         ["Expenses:Coffee:Shop", "Assets:Bank-Card"]
     );
     // Python syntax, not `regex`'s: no account has a `]` after a letter.
-    assert!(column("SELECT account FROM has_account('[[:alpha:]]')").is_empty());
-    assert!(rows(LEDGER, "JOURNAL '[[:alpha:]]'").is_empty());
+    assert_eq!(
+        column("SELECT account FROM has_account('[[:alpha:]]')"),
+        [] as [std::string::String; 0]
+    );
+    assert_eq!(
+        rows(LEDGER, "JOURNAL '[[:alpha:]]'"),
+        [] as [std::vec::Vec<std::string::String>; 0]
+    );
     assert_eq!(
         rows(LEDGER, "JOURNAL 'bank-CARD'")
             .into_iter()

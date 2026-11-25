@@ -497,7 +497,9 @@ mod tests {
             }
             let source = format!("2024-01-01 open Assets:A\n{marker}\n@@@ junk\n");
             assert_eq!(clean_line(&marker.to_string()), marker.to_string());
-            assert_eq!(parse(&source).errors.len(), 3, "{source:?}");
+            // bean-check 3.2.3: the marker line and the invalid token; the
+            // `@@@` before it is discarded by its error recovery (#2993).
+            assert_eq!(parse(&source).errors.len(), 2, "{source:?}");
         }
     }
 

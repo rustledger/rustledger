@@ -9812,6 +9812,17 @@ fn quiet_after_invalid_tokens(
     });
 }
 
+/// The line a quiet window of [`quiet_after_failed_line_starts`] starts after.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// A line a mid-file BOM starts (#2956).
+    Bom,
+    /// A column-0 dated line that opens no directive (#2979).
+    Dated,
+    /// Any other column-0 line that opens no directive (#2993).
+    Unreadable,
+}
+
 /// Keep the lines after a line a BOM starts (#2956), or a column-0 dated line
 /// that opens no directive (#2979), as quiet as beancount keeps them: only the
 /// lexer's own errors there, until its grammar has read three tokens again.
@@ -9866,9 +9877,25 @@ fn quiet_after_invalid_tokens(
 /// builds dates in its lexer) and the state of a `pushtag` / `pushmeta` at
 /// the end of the file.
 ///
-/// The same recovery follows any line whose first token beancount cannot
-/// read (`$x` and the postings under it), which is not modeled here (#2872);
-/// these are the line a BOM starts and the dated line.
+/// The same recovery follows any other column-0 line whose statement fails
+/// (#2993): a line whose first token beancount cannot read (`$x` and the
+/// postings under it, `2<BOM>?02`), a marker alone on its line (`!`, `*`),
+/// and an undated declaration holding one of its lexer's invalid tokens
+/// (`pushmeta k: "v"`). Its window follows a dated line's rules, and quiets a
+/// line only where beancount's recovery surely discards it to its end:
+/// beancount's one error rule is `declarations: declarations error`, so in
+/// its recovery bison shifts only an end of line, a date or an undated
+/// declaration's keyword, and a line holding a date or such a keyword (the
+/// unreadable line itself past its first token included) may end the
+/// recovery inside it, which is not modeled: it keeps its errors, and on the
+/// unreadable line starts no window. Nor does such a line right after
+/// another line with an error (past blank or skipped lines), where beancount
+/// may still be recovering from that one; nor one whose node runs past its
+/// line. (A string left unclosed to the end of the input is cut at its
+/// line and does start a window: beancount's string runs to the end of
+/// the file, so nothing after it is reported there either.) An indented
+/// line after a failed dated header, or after a failed undated declaration
+/// with a blank line between, is #2993's part B, not modeled.
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree once and
 /// lexes each line after a failed line at most once.
@@ -9888,6 +9915,9 @@ fn quiet_after_failed_line_starts(
     // content token starts, with the item's kind (in source order).
     let mut invalid: Vec<std::ops::Range<usize>> = Vec::new();
     let mut items: Vec<(usize, K)> = Vec::new();
+    // Each top-level `ERROR_NODE`'s or undated declaration's first content
+    // token, its end, and whether it is an `ERROR_NODE`.
+    let mut error_nodes: Vec<(usize, usize, bool)> = Vec::new();
     let mut at = 0usize;
     for child in root.green().children() {
         let len = usize::from(child.text_len());
@@ -9897,7 +9927,21 @@ fn quiet_after_failed_line_starts(
                 if let rowan::NodeOrToken::Token(t) = el
                     && !is_trivia_kind(crate::BeancountLanguage::kind_from_raw(t.kind()))
                 {
-                    items.push((pos, crate::BeancountLanguage::kind_from_raw(node.kind())));
+                    let kind = crate::BeancountLanguage::kind_from_raw(node.kind());
+                    items.push((pos, kind));
+                    if matches!(
+                        kind,
+                        K::ERROR_NODE
+                            | K::PUSHTAG_DIRECTIVE
+                            | K::POPTAG_DIRECTIVE
+                            | K::PUSHMETA_DIRECTIVE
+                            | K::POPMETA_DIRECTIVE
+                            | K::OPTION_DIRECTIVE
+                            | K::INCLUDE_DIRECTIVE
+                            | K::PLUGIN_DIRECTIVE
+                    ) {
+                        error_nodes.push((pos, at + len, kind == K::ERROR_NODE));
+                    }
                     break;
                 }
                 pos += usize::from(el.text_len());
@@ -9924,9 +9968,22 @@ fn quiet_after_failed_line_starts(
     invalid.sort_unstable_by_key(|r| r.start);
     // Whether one of them is beancount's invalid token: not BOMs it reads
     // into an account (`is_bom_account_token`), which its grammar, not its
-    // lexer, rejects. Asked only of the tokens on a quiet line.
-    let lexed =
-        |r: &std::ops::Range<usize>| !is_bom_account_token(stripped, r.start, &stripped[r.clone()]);
+    // lexer, rejects. Asked only of the tokens on a quiet line, and answered
+    // once per token: a long BOM run costs its length to ask about.
+    let lexed_memo: Vec<std::cell::Cell<Option<bool>>> =
+        vec![std::cell::Cell::new(None); invalid.len()];
+    let lexed = |r: &std::ops::Range<usize>| {
+        let i = invalid.partition_point(|x| x.start < r.start);
+        let memo = lexed_memo.get(i).filter(|_| invalid[i] == *r);
+        if let Some(known) = memo.and_then(std::cell::Cell::get) {
+            return known;
+        }
+        let answer = !is_bom_account_token(stripped, r.start, &stripped[r.clone()]);
+        if let Some(cell) = memo {
+            cell.set(Some(answer));
+        }
+        answer
+    };
     // The invalid tokens that start on `line_start..=line_end`.
     let on_line = |line_start: usize, line_end: usize| {
         let from = invalid.partition_point(|r| r.start < line_start);
@@ -9983,18 +10040,6 @@ fn quiet_after_failed_line_starts(
     // A date with nothing after it but blanks or a comment starts no window:
     // beancount fails there at the line's end, which it reports on the next
     // line, and that is not modeled here.
-    let mut triggers: Vec<(usize, bool)> = invalid
-        .iter()
-        .filter(|r| is_line_start_bom_token(stripped, r.start, &stripped[(*r).clone()]))
-        .map(|r| (r.start, false))
-        .chain(
-            dated_lines
-                .iter()
-                .filter(|&&(_, token_after)| token_after)
-                .map(|&(pos, _)| (pos, true)),
-        )
-        .collect();
-    triggers.sort_unstable_by_key(|&(start, _)| start);
     // Whether a column-0 line at `pos` starts with a date and opens no
     // directive, a token after the date or not: bison shifts that date.
     let dated_line_at = |pos: usize| {
@@ -10002,14 +10047,103 @@ fn quiet_after_failed_line_starts(
             .binary_search_by_key(&pos, |&(start, _)| start)
             .is_ok()
     };
+    // Every other column-0 line that opens no directive (#2993): a line whose
+    // first token beancount cannot read (`$`, `2<BOM>?02`), or a marker its
+    // grammar rejects there (`!`, `*`, `:`, `#` alone on the line), and an
+    // undated declaration holding an invalid token beancount's lexer rejects
+    // (`pushmeta k: "v"`). Its statement fails on that line and bison's
+    // recovery takes over as after a dated one, so its window follows a dated
+    // line's rules below. Not a line a BOM starts or a dated line, which have
+    // windows of their own, nor one whose node runs past its line (a string
+    // closed on a later line), whose lines this walk does not model. A string
+    // unclosed to the end of the input is cut at its line, so its line does
+    // start a window, as beancount reports nothing past such a string.
+    // Whether the line starting at `pos` follows, past at most two blank or
+    // skipped lines, a line with an error: beancount may still be in its
+    // recovery from that line, which this pass does not model, so such a line
+    // starts no window of its own.
+    let after_a_failed_line = |pos: usize| {
+        let mut end = pos;
+        for _ in 0..3 {
+            if end == 0 {
+                return false;
+            }
+            let prev_start = stripped[..end - 1].rfind('\n').map_or(0, |i| i + 1);
+            #[cfg(test)]
+            crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
+                .with(|c| c.set(c.get() + (end - prev_start)));
+            // A line holding a stray `\r` is read differently here and in
+            // beancount (#2980): taken for a failed line, so nothing after it
+            // starts a window.
+            if holds_a_stray_cr(&stripped[prev_start..end]) {
+                return true;
+            }
+            let i = errors.partition_point(|e| e.span.start < prev_start + off);
+            if errors.get(i).is_some_and(|e| e.span.start < end + off) {
+                return true;
+            }
+            let prev = &stripped[prev_start..end - 1];
+            if !(prev.trim_matches([' ', '\t', '\r']).is_empty()
+                || crate::logos_lexer::beancount_ignores_line(prev))
+            {
+                return false;
+            }
+            end = prev_start;
+        }
+        false
+    };
+    let unreadable_lines = error_nodes.iter().filter_map(|&(pos, end, error_node)| {
+        // Checked before `line_end` is found, so a node that does not start
+        // its line costs no scan to the line's end.
+        if !(pos == 0 || stripped.as_bytes()[pos - 1] == b'\n') {
+            return None;
+        }
+        let line_end = stripped[pos..]
+            .find('\n')
+            .map_or(stripped.len(), |i| pos + i);
+        let fails = || {
+            error_node || {
+                let from = invalid.partition_point(|r| r.start < pos);
+                invalid[from..]
+                    .iter()
+                    .take_while(|r| r.start < line_end)
+                    .any(&lexed)
+            }
+        };
+        // A line holding a BOM starts no such window: it is left to the
+        // BOM's own handling (#2956), and asking about a long BOM run costs
+        // its length each time.
+        (!stripped[pos..line_end].contains(crate::bom::BOM_CHAR)
+            && end <= (line_end + 1).min(stripped.len())
+            && !dated_line_at(pos)
+            && !crate::logos_lexer::beancount_ignores_line(&stripped[pos..line_end])
+            && !holds_a_stray_cr(&stripped[pos..(line_end + 1).min(stripped.len())])
+            && !after_a_failed_line(pos)
+            && fails())
+        .then_some((pos, Trigger::Unreadable))
+    });
+    let mut triggers: Vec<(usize, Trigger)> = invalid
+        .iter()
+        .filter(|r| is_line_start_bom_token(stripped, r.start, &stripped[(*r).clone()]))
+        .map(|r| (r.start, Trigger::Bom))
+        .chain(
+            dated_lines
+                .iter()
+                .filter(|&&(_, token_after)| token_after)
+                .map(|&(pos, _)| (pos, Trigger::Dated)),
+        )
+        .chain(unreadable_lines)
+        .collect();
+    triggers.sort_unstable_by_key(|&(start, _)| start);
     // Whether a line a BOM starts begins in `from..=to`: such a line has its
-    // own window (#2956), which a dated line's window hands over to there.
+    // own window (#2956), which a dated or unreadable line's window hands
+    // over to there.
     let bom_line_in = |from: usize, to: usize| {
         let i = triggers.partition_point(|&(start, _)| start < from);
         triggers[i..]
             .iter()
             .take_while(|&&(start, _)| start <= to)
-            .any(|&(_, dated)| !dated)
+            .any(|&(_, kind)| kind == Trigger::Bom)
     };
     // Where bison's recovery shifts a declaration on `line` and ends: after a
     // dated line, any declaration ([`first_resync_point`]); after a BOM line,
@@ -10027,10 +10161,13 @@ fn quiet_after_failed_line_starts(
     // right after their date (below).
     let mut invalid_second_dates: Vec<usize> = Vec::new();
     let mut walked_to = 0usize;
-    for &(start, dated_line) in &triggers {
+    for &(start, kind) in &triggers {
         if start < walked_to {
             continue;
         }
+        // A dated or unreadable line's window follows the dated rules; a BOM
+        // line's follows #2956's.
+        let dated_line = kind != Trigger::Bom;
         // An invalid date right after a dated line's date is where beancount's
         // grammar fails, and that date's own error is the line's one error
         // (`2024-01-02 2024-02-30`): beancount builds dates in its lexer. Not
@@ -10041,7 +10178,7 @@ fn quiet_after_failed_line_starts(
         // flag-only posting `  !`, an `open` with no account). Only outside a
         // BOM line's window, which this pass leaves as #2956 has it: such a
         // line inside one is walked there.
-        if dated_line {
+        if kind == Trigger::Dated {
             let line_end = stripped[start..]
                 .find('\n')
                 .map_or(stripped.len(), |i| start + i);
@@ -10092,6 +10229,7 @@ fn quiet_after_failed_line_starts(
         let trigger_line = &stripped[start..=start + nl];
         if ends_recovery(trigger_line, dated_line)
             || (dated_line && holds_a_lone_capital_glued_to_a_non_blank(trigger_line))
+            || (kind == Trigger::Unreadable && holds_a_recovery_shift(trigger_line, true))
         {
             continue;
         }
@@ -10106,8 +10244,13 @@ fn quiet_after_failed_line_starts(
             // ending's, not as a stray one at the end of the input.
             let with_ending = &stripped[pos..(line_end + 1).min(stripped.len())];
             // A line a BOM starts inside a dated line's window starts its own
-            // window there, under #2956's rules.
-            if dated_line && bom_line_in(pos, line_end) {
+            // window there, under #2956's rules. An unreadable line's window
+            // ends at any line a BOM starts (a BOM-led account too), which it
+            // leaves as the parse gives it.
+            if dated_line && bom_line_in(pos, line_end)
+                || (kind == Trigger::Unreadable
+                    && (line.starts_with(crate::bom::BOM_CHAR) || holds_a_stray_cr(with_ending)))
+            {
                 break;
             }
             if line.trim_matches([' ', '\t', '\r']).is_empty()
@@ -10134,6 +10277,14 @@ fn quiet_after_failed_line_starts(
                             || (!indented && ends_recovery(with_ending, true))
                             || holds_a_lone_capital_glued_to_a_non_blank(line)))
                 {
+                    break;
+                }
+                // After an unreadable line, quiet only a line beancount's
+                // recovery surely discards to its end: one with no date or
+                // undated keyword, which bison would shift there (even glued:
+                // `\t1poptag #t`, `key:2024/01/03 P`). Such a line keeps its
+                // errors.
+                if kind == Trigger::Unreadable && holds_a_recovery_shift(line, false) {
                     break;
                 }
                 let content = pos + (line.len() - line.trim_start_matches([' ', '\t']).len());
@@ -10297,6 +10448,74 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
         });
         !((1..=3).contains(&first) && any && rest_ok)
     })
+}
+
+/// Whether `text` (a line, with its line ending if it has one) holds a stray
+/// `\r`: one not right before a `\n`, anywhere on the line, or at the end of
+/// the input. beancount's lexer skips it as a blank (`[ \t\r]+`), and this
+/// parser reads it in ways that differ from that by context (#2980, `\r;c` is
+/// an error here, a blank line there), so the recovery windows after an
+/// unreadable line do not reach across such a line (#2993).
+fn holds_a_stray_cr(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'\r' && bytes.get(i + 1) != Some(&b'\n'))
+}
+
+/// Whether `line`, past its first character if `skip_first_char` (the start
+/// of the token the line's statement failed at; a date glued right after it,
+/// `@2024-1-2`, is one bison shifts), may hold a token
+/// beancount's grammar shifts while it recovers from an error (#2993): its
+/// only error rule is `declarations: declarations error`, so it discards
+/// every token but one a `declarations` can take next, an end of line, a date
+/// or an undated declaration's keyword (`option`, `poptag`, ..., glued or
+/// not: `1poptag`). Shifting a date or a keyword may end the recovery inside
+/// the line, which is not modeled. Decided from the bytes, without lexing:
+/// any run of four or more digits followed by `-` or `/`, digits, `-` or `/`
+/// and a digit (beancount's date shape), or any of the keywords as a
+/// substring. That finds every such token, and some text that is none (inside
+/// a string or an invalid run), where the line then keeps its errors, which is
+/// the side this pass errs on. Linear in the line.
+fn holds_a_recovery_shift(line: &str, skip_first_char: bool) -> bool {
+    const KEYWORDS: [&str; 7] = [
+        "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
+    ];
+    #[cfg(test)]
+    crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
+        .with(|c| c.set(c.get() + line.len()));
+    let rest = if skip_first_char {
+        line.char_indices().nth(1).map_or("", |(i, _)| &line[i..])
+    } else {
+        line
+    };
+    if KEYWORDS.iter().any(|kw| rest.contains(kw)) {
+        return true;
+    }
+    let bytes = rest.as_bytes();
+    let digits_at = |i: usize| bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+    let mut i = 0;
+    while i < bytes.len() {
+        let run = digits_at(i);
+        if run == 0 {
+            i += 1;
+            continue;
+        }
+        let mut j = i + run;
+        if run >= 4 && matches!(bytes.get(j), Some(b'-' | b'/')) {
+            let month = digits_at(j + 1);
+            j += 1 + month;
+            if month > 0
+                && matches!(bytes.get(j), Some(b'-' | b'/'))
+                && bytes.get(j + 1).is_some_and(u8::is_ascii_digit)
+            {
+                return true;
+            }
+        }
+        i += run;
+    }
+    false
 }
 
 /// Whether `line` holds, after a blank, a capital glued to punctuation that no

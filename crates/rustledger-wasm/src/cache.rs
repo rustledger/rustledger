@@ -635,7 +635,14 @@ use crate::types::{Error, LedgerOptions};
 /// has that error, before and after, which the loader's cache is never saved
 /// for; parsed directives do not move. Both payloads here archive findings,
 /// and an older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 125;
+/// v126: loader v75, unchanged; parse errors move (#2997). An indented line
+/// of tags and links in a transaction, then an invalid token (`  #tag h`), is
+/// that token's one error, as in beancount, where the line error was one
+/// more. Every such source has a parse error, before and after, which the
+/// loader's cache is never saved for; parsed directives do not move. Both
+/// payloads here archive parse errors, and an older blob would keep serving
+/// the old ones.
+pub const CACHE_VERSION: u32 = 126;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

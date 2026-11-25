@@ -230,12 +230,23 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // start is what places the error on its line; the failure point is
     // `usize::MAX` when the header grammar finds no defect.
     let mut grammar_failures: Vec<(usize, usize, usize)> = Vec::new();
+    // The span of each transaction node, in order, BOM frame: a body line
+    // there may start with tags and links (`drop_errors_inside_a_line_error`).
+    let mut transactions: Vec<(usize, usize)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
         // alongside its CST node so the post-pass span fixup
         // can index them in parallel.
         let cst_node = directive.syntax().clone();
+        if matches!(directive, ast::Directive::Transaction(_)) {
+            let range = cst_node.text_range();
+            let off = bom_offset as usize;
+            transactions.push((
+                usize::from(range.start()) + off,
+                usize::from(range.end()) + off,
+            ));
+        }
         // `is_directive_producing` tracks whether THIS arm is
         // expected to emit a `Spanned<Directive>` (the 12
         // directive types). The catch-all below uses it to
@@ -494,7 +505,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     errors.sort_by_key(|e| e.span.start);
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
     quiet_after_failed_line_starts(&mut errors, source_file.syntax(), stripped, bom_offset);
-    drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset, &grammar_failures);
+    drop_errors_inside_a_line_error(
+        &mut errors,
+        stripped,
+        bom_offset,
+        &grammar_failures,
+        &transactions,
+    );
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
 
@@ -9090,6 +9107,7 @@ fn drop_errors_inside_a_line_error(
     stripped: &str,
     bom_offset: u32,
     grammar_failures: &[(usize, usize, usize)],
+    transactions: &[(usize, usize)],
 ) {
     use crate::logos_lexer::Token;
     let is_generic = |e: &crate::ParseError| match &e.kind {
@@ -9124,9 +9142,20 @@ fn drop_errors_inside_a_line_error(
         let start = k.checked_sub(1).map_or(bom, |k| newlines[k] + 1);
         (start, newlines.get(k).copied().unwrap_or(usize::MAX))
     };
+    // Whether `at` is inside a transaction node: its body lines may also
+    // start with tags and links.
+    let in_transaction = |at: usize| {
+        let k = transactions.partition_point(|&(s, _)| s <= at);
+        k.checked_sub(1).is_some_and(|k| at < transactions[k].1)
+    };
     // Whether `prefix`, the text of an indented line before its first
-    // unreadable token, is a readable start of one.
-    let readable_start = |prefix: &str| {
+    // unreadable token, is a readable start of one. In a transaction's body
+    // (`tags_links_read`), a run of tags and links is one too: beancount's grammar
+    // reads such a line there (its `posting_or_kv_list INDENT tags_links
+    // EOL`), so `  #tag h` fails first at the `h`, one `Invalid token`
+    // (#2997). Under any other directive the line is a syntax error at the
+    // tag, and both errors are kept.
+    let readable_start = |prefix: &str, tags_links_read: &dyn Fn() -> bool| {
         #[cfg(test)]
         test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + prefix.len()));
         let tokens: Vec<Token<'_>> = crate::logos_lexer::tokenize(prefix)
@@ -9161,8 +9190,15 @@ fn drop_errors_inside_a_line_error(
             }
             _ => false,
         };
+        let tags_links = |rest: &[Token<'_>]| {
+            !rest.is_empty()
+                && rest
+                    .iter()
+                    .all(|t| matches!(t, Token::Tag(_) | Token::Link(_)))
+        };
         match tokens.as_slice() {
             [] => true,
+            rest if tags_links(rest) => tags_links_read(),
             [first] if is_flag(first) => true,
             [first, rest @ ..] if is_flag(first) => posting_start(rest),
             rest => posting_start(rest),
@@ -9194,15 +9230,40 @@ fn drop_errors_inside_a_line_error(
                 // (`TokenIter::stray_cr_trivia_end`, #2966), so the prefix is
                 // blanks, which beancount reads as nothing (`\r$` after a
                 // transaction is one `Invalid token` there).
+                //
+                // A transaction's body line may start with tags and links
+                // (`  #tag h`, #2997), except when a lone capital glued to
+                // what follows it (`Z\r`, `Z` at the end of the input) comes
+                // later on the line: beancount reports that as one more
+                // invalid token, which no error here stands for yet, so the
+                // line keeps both its errors there, as before #2997.
                 let fails_here = || {
-                    let (line_start, _) = line_of(span.start);
+                    let (line_start, line_end) = line_of(span.start);
                     let prefix = stripped
                         .get(line_start - bom..span.start - bom)
                         .unwrap_or_default();
+                    let tags_links_read = || {
+                        let at_eof = line_end == usize::MAX;
+                        let rest = stripped
+                            .get(span.start - bom..)
+                            .map(|rest| {
+                                if at_eof {
+                                    rest
+                                } else {
+                                    &rest[..=line_end - span.start]
+                                }
+                            })
+                            .unwrap_or_default();
+                        #[cfg(test)]
+                        test_counters::ERROR_LINE_SCANNED_BYTES
+                            .with(|c| c.set(c.get() + rest.len()));
+                        in_transaction(span.start) && !holds_a_glued_lone_capital(rest, at_eof)
+                    };
                     grammar_failures
                         .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
                         .is_ok_and(|j| grammar_failures[j].2 == span.start)
-                        || (prefix.starts_with([' ', '\t', '\r']) && readable_start(prefix))
+                        || (prefix.starts_with([' ', '\t', '\r'])
+                            && readable_start(prefix, &tags_links_read))
                 };
                 // A mid-line BOM-led invalid token where the line's grammar
                 // first fails (`price USD 1 <BOM>EUR`, `  <BOM>a`):

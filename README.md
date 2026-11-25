@@ -94,7 +94,7 @@ ______________________________________________________________________
 
 ## AI & agents
 
-Two complementary ways to drive rustledger from AI tools:
+Three complementary ways to drive rustledger from AI tools:
 
 - **MCP server** — `npx @rustledger/mcp-server` exposes rustledger to AI assistants (Claude, Cursor, …) over the [Model Context Protocol](https://modelcontextprotocol.io). Best for **interactive** assistants that call tools mid-conversation.
 
@@ -106,6 +106,14 @@ Two complementary ways to drive rustledger from AI tools:
   ```
 
   Same subcommands as `rledger` (`check`, `query`, `format`, `report`, `extract`, …) — only the I/O is JSON.
+
+- **Agent skill** — [`skills/rledger/`](skills/rledger/SKILL.md) is an official [agent skill](https://agentskills.io) that teaches a coding agent to use `rledger`: validating with `check` and its JSON output, BQL queries, formatting, reports, importing, error codes and their fixes, and the Beancount mistakes agents make. It is plain Markdown (a `SKILL.md` plus `references/`) for any harness that loads skills, and a test checks every command and flag it names against the CLI. Install it by copying the directory into your harness's skills directory, for example `~/.claude/skills/` for Claude Code:
+
+  ```bash
+  mkdir -p ~/.claude/skills
+  curl -L https://github.com/rustledger/rustledger/archive/refs/heads/main.tar.gz \
+    | tar -xz --strip-components=2 -C ~/.claude/skills rustledger-main/skills/rledger
+  ```
 
 ## Quick Start
 

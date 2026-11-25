@@ -189,6 +189,13 @@ pub struct ProcessedLedger {
     /// sets them aside as the validating loader does. Empty when the source
     /// did not load.
     pub booking_refused: Vec<usize>,
+    /// The stream the validating loader's Early phase runs on: sorted, synth
+    /// plugins applied, not yet booked
+    /// ([`rustledger_loader::Ledger::pre_booking_directives`]).
+    /// [`run_validation`] runs Early over it, so a finding on an elided
+    /// posting that booking fills in is reported as `rledger check` reports
+    /// it (#3001). Empty when the source did not load.
+    pub pre_booking: Vec<rustledger_core::Spanned<Directive>>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
@@ -367,6 +374,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 booking_refused: Vec::new(),
+                pre_booking: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 query_option_errors: option_errors.clone(),
@@ -406,8 +414,11 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // Skip validation here — callers that need it will call run_validation()
     // (the validation pass itself is split into Early — before booking — and
     // Late — after regular plugins; both are invoked when `validate: true`).
+    // The stream Early runs on is kept, so `run_validation` gives each phase
+    // the stream the validating loader gives it (#3001).
     let load_options = LoadOptions {
         validate: false,
+        retain_pre_booking_directives: true,
         ..Default::default()
     };
 
@@ -429,6 +440,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             );
             let restated_e3002_lines = restated_e3002_lines(&ledger);
             let booking_refused = ledger.booking_refused;
+            let pre_booking = ledger.pre_booking_directives;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
@@ -456,6 +468,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directive_spans,
                 source_map,
                 booking_refused,
+                pre_booking,
                 options,
                 errors,
                 option_errors,
@@ -475,6 +488,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 booking_refused: Vec::new(),
+                pre_booking: Vec::new(),
                 options,
                 errors,
                 query_option_errors: option_errors.clone(),
@@ -523,10 +537,12 @@ pub fn reported_ledger_errors(
 /// loader's: none do. A transaction booking refused is set aside
 /// ([`rustledger_loader::Ledger::booking_refused`]): Early sees it as written
 /// and Late does not, and the session reports the account errors Early held
-/// for it, as `process` does. This used to return nothing on any
-/// severity-error in `load.errors`, so a STRICT ledger with an ambiguous
-/// reduction reported its booking error and not the `Balance failed` that
-/// follows it, which `check` and bean-check both report (#2937). A parse
+/// for it, as `process` does. Early runs over the stream as written
+/// ([`ProcessedLedger::pre_booking`]), as `process` runs it (#3001). This
+/// used to return nothing on any severity-error in `load.errors`, so a
+/// STRICT ledger with an ambiguous reduction reported its booking error and
+/// not the `Balance failed` that follows it, which `check` and bean-check
+/// both report (#2937). A parse
 /// error does not stop it either: the entries that parsed are validated, as
 /// `check` and bean-check validate them (#2949). A source that failed to load
 /// at all has no directives here, so nothing is validated for it.
@@ -546,8 +562,8 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
         date_to_line.entry(date).or_insert(line);
     }
 
-    // WASM target sees already-booked directives, so run both phases
-    // back-to-back. Use a hardcoded far-future "today" to disable
+    // Validate the loaded ledger as the validating loader does, Early then
+    // Late (see below). Use a hardcoded far-future "today" to disable
     // future-date warnings — WASM has no reliable wall clock and the
     // legacy `validate()` shortcut also didn't fire these warnings
     // unless `warn_future_dates` was explicitly enabled (it isn't here).
@@ -579,7 +595,11 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
         "load_and_book keeps one span per directive"
     );
     let spanned = spanned_directives(&load.directives, &load.directive_spans);
-    let (mut session, mut errors) = session.run_early_spanned(&spanned, today);
+    // Early over the stream as written, Late over the booked one, the two
+    // streams the validating loader gives them: Early over the booked stream
+    // saw elided amounts already filled in, so an E3002 on a transaction
+    // booking still books was never reported here (#3001).
+    let (mut session, mut errors) = session.run_early_spanned(&load.pre_booking, today);
     let mut booked = Vec::with_capacity(spanned.len());
     for (index, directive) in spanned.into_iter().enumerate() {
         if refused(&index) {

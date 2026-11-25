@@ -1533,6 +1533,48 @@ pub mod option_warning_severity_tests {
         assert_eq!(findings, vec![code("E3002", 7)], "{findings:?}");
     }
 
+    /// #3001: an E3002 on a transaction booking still books is reported on
+    /// the line `rledger check` (and bean-check) reports it, as a validation
+    /// finding: validation's Early phase sees the postings as written, not
+    /// the booked ones with the elided amounts filled in. Beside them, a
+    /// transaction booking refuses still has exactly one E3002, in the
+    /// soundness list in place of its `BOOK` (#2998).
+    #[test]
+    fn e3002_on_a_transaction_that_books_is_a_finding() {
+        let books = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n\
+2024-01-01 open Assets:C\n2024-01-01 open Assets:D\n\n\
+2024-01-02 * \"x\"\n  Assets:B  10 USD\n  Assets:C  HOOL {2 USD}\n  Assets:C\n\n\
+2024-01-03 * \"y\"\n  Assets:A  1 USD\n  Assets:B  2 EUR\n  Assets:C\n  Assets:D\n\n\
+2024-01-04 * \"z\"\n  Assets:A  1 USD\n  Assets:B  USD\n  Assets:C\n";
+        let refused = "\n2024-01-05 * \"refused\"\n  Assets:A  1 USD\n  Assets:B\n  Assets:C\n";
+        let list = |errors: &[Error]| -> Vec<(Option<String>, Option<u32>)> {
+            let mut v: Vec<_> = errors.iter().map(|e| (e.code.clone(), e.line)).collect();
+            v.sort();
+            v
+        };
+        let code = |c: &str, l: u32| (Some(c.to_string()), Some(l));
+        let booked_findings = vec![code("E3002", 8), code("E3002", 15), code("E3002", 19)];
+
+        let parsed = ParsedLedger::new(books);
+        assert_eq!(list(&parsed.parse_errors), vec![], "nothing is refused");
+        assert_eq!(list(&parsed.validation_errors), booked_findings);
+        assert!(!parsed.query_refused, "every transaction books");
+
+        let src = format!("{books}{refused}");
+        let parsed = ParsedLedger::new(&src);
+        assert_eq!(list(&parsed.parse_errors), vec![code("E3002", 25)]);
+        assert_eq!(list(&parsed.validation_errors), booked_findings);
+        assert!(parsed.query_refused, "a query still refuses");
+
+        // The `validateSource` view: the four, each once.
+        let load = crate::helpers::load_and_book(&src);
+        let mut single = load.reported_errors_beside_validation();
+        single.extend(crate::helpers::run_validation(&load));
+        let mut want = booked_findings;
+        want.push(code("E3002", 25));
+        assert_eq!(list(&single), want);
+    }
+
     /// And an option ERROR must not disable them either: it does not make the
     /// directive stream unsound, which is the only thing those gates mean.
     /// `api::query` already behaves this way, so `ParsedLedger::query` doing

@@ -87,6 +87,17 @@ pub struct LoadOptions {
     /// A consumer that never draws a snippet (`rledger query` prints
     /// `code: message`) should set this false.
     pub retain_source_text: bool,
+    /// Keep a copy of the directive stream Early validation runs on (sorted,
+    /// synth plugins applied, not yet booked) in
+    /// [`Ledger::pre_booking_directives`] (default: false).
+    ///
+    /// For a surface that loads without validation and validates the load
+    /// itself (WASM `validateSource` and `ParsedLedger`, the FFI component's
+    /// source surfaces): its Early phase must see the postings as written,
+    /// as the validating loader's does, or a finding Early makes on an elided
+    /// posting that booking then fills (an `E3002` on a transaction that
+    /// still books) is lost (#3001). Costs one clone of the stream.
+    pub retain_pre_booking_directives: bool,
 }
 
 impl Default for LoadOptions {
@@ -103,6 +114,7 @@ impl Default for LoadOptions {
             plugin_max_memory_mb: None,
             native_plugins_only: false,
             retain_source_text: true,
+            retain_pre_booking_directives: false,
         }
     }
 }
@@ -126,6 +138,7 @@ impl LoadOptions {
             plugin_max_memory_mb: None,
             native_plugins_only: false,
             retain_source_text: true,
+            retain_pre_booking_directives: false,
         }
     }
 }
@@ -269,6 +282,16 @@ pub struct Ledger {
     /// reads this to set the same transactions aside, rather than skipping
     /// validation on a booking error, which `rledger check` does not (#2937).
     pub booking_refused: Vec<usize>,
+    /// The directive stream Early validation runs on: sorted, synth plugins
+    /// applied, not yet booked, so each posting is as written. Empty unless
+    /// [`LoadOptions::retain_pre_booking_directives`] is set.
+    ///
+    /// A surface that validates the load itself runs the Early phase over
+    /// this and the Late phase over [`Self::directives`] less
+    /// [`Self::booking_refused`], the two streams the validating loader
+    /// gives them; Early over the booked stream sees elided amounts already
+    /// filled in and misses the `E3002` `rledger check` reports (#3001).
+    pub pre_booking_directives: Vec<Spanned<Directive>>,
 }
 
 impl Ledger {
@@ -828,6 +851,14 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(not(feature = "validation"))]
     let directives = synthed.early_validate(&raw.source_map, &mut errors);
 
+    // The stream Early validated, for a caller that validates the load itself
+    // (#3001): booking below consumes it.
+    let pre_booking_directives = if options.retain_pre_booking_directives {
+        directives.as_slice().to_vec()
+    } else {
+        Vec::new()
+    };
+
     // Capture realized capital gains produced by the canonical booking pass, but
     // only when the caller asked for them (the capgains report) — no consumer pays
     // to retain them otherwise.
@@ -908,6 +939,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         capital_gains,
         balance_discrepancies,
         booking_refused,
+        pre_booking_directives,
     })
 }
 

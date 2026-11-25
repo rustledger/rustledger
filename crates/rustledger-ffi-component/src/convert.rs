@@ -363,7 +363,11 @@ fn semantic_validation_errors(
         validation_options = validation_options.with_document_base(dir);
     }
     let session = rustledger_validate::ValidationSession::new(validation_options);
-    let (mut session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
+    // Early over the stream as written, Late (below) over the booked one, the
+    // two streams the validating loader gives them: Early over the booked
+    // stream saw elided amounts already filled in, so an E3002 on a
+    // transaction booking still books was never reported here (#3001).
+    let (mut session, mut verrs) = session.run_early_spanned(&loaded.pre_booking_directives, today);
     // A transaction booking refused is set aside as the validating loader
     // sets it aside (`Ledger::booking_refused`): Early saw it as written, Late
     // does not, and the session reports the account errors Early held for it.

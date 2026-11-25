@@ -666,7 +666,14 @@ use crate::types::{Error, LedgerOptions};
 /// has a parse error, before and after, which the loader's cache is never
 /// saved for. Both payloads here archive parse errors and directives, and an
 /// older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 130;
+/// v131: loader v76, unchanged; the `ParsedLedger` payload's findings move
+/// (#3001). Its validation's Early phase runs over the stream as written,
+/// not the booked one, so an `E3002` on a transaction booking still books
+/// (an elided posting beside a cost-bearing one, or beside a second
+/// currency) is reported, as `rledger check` reports it; it was missing.
+/// Parsed directives do not move, and the `Ledger` payload, validated by the
+/// loader, already had it. An older blob would keep serving the old findings.
+pub const CACHE_VERSION: u32 = 131;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

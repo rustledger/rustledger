@@ -27,6 +27,8 @@ option "title" "My Finances"
 
 ## Comments
 
+<!-- docs-test: check-clean -->
+
 ```beancount
 ; Semicolon comment (anywhere on line)
 * Org-mode header (treated as comment at start of line)
@@ -39,6 +41,8 @@ All directives start with a date in `YYYY-MM-DD` format.
 ### Open
 
 Declare an account before using it.
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 2020-01-01 open Assets:Bank:Checking  USD
@@ -65,6 +69,8 @@ The account must have zero balance when closed.
 ### Commodity
 
 Declare a currency or commodity.
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 2020-01-01 commodity USD
@@ -133,16 +139,27 @@ Validation fails if the computed balance doesn't match.
 
 Automatically insert a balancing transaction.
 
+<!-- docs-test: check-clean -->
+
 ```beancount
-2024-01-01 pad Assets:Bank:Checking  Equity:Opening-Balances
+2023-12-31 open Assets:Bank:Checking
+2023-12-31 open Equity:Opening-Balances
+
+2023-12-31 pad Assets:Bank:Checking  Equity:Opening-Balances
 2024-01-01 balance Assets:Bank:Checking  1000.00 USD
 ```
 
-The pad directive creates a transaction to make the balance assertion true.
+The pad directive creates a transaction, dated the day of the pad, that makes
+the next balance assertion for the account true. A balance asserts the balance
+at the start of its day, before that day's entries, so the pad must be dated
+before the balance: a pad and a balance on the same day leave the pad unused
+(`E2003`) and the balance failing (`E2001`).
 
 ### Price
 
 Record a market price for a commodity.
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 2024-01-15 price AAPL  185.50 USD
@@ -152,6 +169,8 @@ Record a market price for a commodity.
 ### Event
 
 Record a non-financial event.
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 2024-01-15 event "location" "New York"
@@ -307,6 +326,8 @@ group for the [`report returns --by-group`](../commands/report.md#per-group-brea
 breakdown. Give the accounts you want reported together the same group name; tag a
 group's income account too for a dividend-inclusive return.
 
+<!-- docs-test: check-clean -->
+
 ```beancount
 2022-01-01 open Assets:Brokerage:AAPL
   returns-group: "Stocks"
@@ -343,6 +364,8 @@ The defaults are English, but can be customized to any language via options:
 | `Expenses` | Money going out (positive in ledger) |
 
 Account names support full Unicode — Cyrillic, CJK, Arabic, etc.:
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 option "name_equity" "Капитал"
@@ -383,6 +406,8 @@ include "prices/2024.beancount"
 
 Configure beancount behavior:
 
+<!-- docs-test: check-clean -->
+
 ```beancount
 option "title" "Personal Finances"
 option "operating_currency" "USD"
@@ -395,6 +420,8 @@ See [Options Reference](options.md) for all options.
 
 Enable plugins for validation or transformation:
 
+<!-- docs-test: check-clean -->
+
 ```beancount
 plugin "beancount.plugins.auto_accounts"
 plugin "beancount.plugins.implicit_prices"
@@ -403,6 +430,8 @@ plugin "beancount.plugins.implicit_prices"
 See [Plugins Reference](plugins.md) for available plugins.
 
 ## Complete Example
+
+<!-- docs-test: check-clean -->
 
 ```beancount
 ; main.beancount - Personal Finance Ledger
@@ -422,7 +451,7 @@ plugin "beancount.plugins.auto_accounts"
 2020-01-01 open Equity:Opening-Balances
 
 ; === Opening Balance ===
-2024-01-01 pad Assets:Bank:Checking Equity:Opening-Balances
+2023-12-31 pad Assets:Bank:Checking Equity:Opening-Balances
 2024-01-01 balance Assets:Bank:Checking  5000.00 USD
 
 ; === Transactions ===
@@ -443,7 +472,7 @@ plugin "beancount.plugins.auto_accounts"
   Assets:Bank:Checking  -4500.00 USD
 
 ; === Month End ===
-2024-01-31 balance Assets:Bank:Checking  -1130.50 USD
+2024-01-31 balance Assets:Bank:Checking  3914.50 USD
 ```
 
 ## See Also

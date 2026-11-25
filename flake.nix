@@ -352,6 +352,9 @@
               # YAML
               yamlfmt.enable = true;
             };
+            # mdformat has no frontmatter support and would flatten an agent
+            # skill's YAML header into a heading (#3009).
+            settings.formatter.mdformat.excludes = [ "skills/*/SKILL.md" ];
           };
 
           # Packages

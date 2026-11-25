@@ -140,6 +140,8 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Added
 
+- **An official agent skill for `rledger`, in `skills/rledger/`**: a `SKILL.md` in the Agent Skills format, with `references/` for commands and flags, BQL, error codes and their fixes, and Beancount syntax, that a coding agent loads from its skills directory to validate, query, format, report on and import into a ledger. Every example was run against the CLI. `skill_drift_test` keeps it accurate: every `rledger` command and flag the skill names must exist in the CLI, every top-level command must be mentioned, and its sample ledger must pass `check` and be formatted. The README says how to install it. `mdformat` (`treefmt`) skips `skills/*/SKILL.md`, since it would flatten the YAML frontmatter (issue #3009).
+
 - **`rustledger_loader::{known_options, option_value_kind, is_read_only_option}`**: the loader's list of option names, the kind of value each takes, and whether it may be set. `rledger doctor list-options` prints from them, so it cannot drift from what `Options::set` accepts (issue #2925).
 
 - **`rledger doctor list-options` lists every option the loader knows, with its real type**: it was a hand-written copy that omitted `allow_pipe_separator`, `display_precision`, `filename`, `plugin`, `tolerance_multiplier` and `use_precise_interpolation`, and called `insert_pythonpath` a string. It now lists all of them, with types such as `bool`, `CURRENCY:NUMBER` and `account leaf`, and marks `filename` and `plugin` `(read-only)` (issue #2925).

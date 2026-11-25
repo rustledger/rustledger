@@ -29,7 +29,9 @@ includes = ["*.toml"]
 [formatter.markdown]
 command = "mdformat"
 includes = ["*.md"]
-excludes = ["CHANGELOG.md"]
+# SKILL.md: mdformat has no frontmatter support and would flatten an agent
+# skill's YAML header into a heading (#3009).
+excludes = ["CHANGELOG.md", "skills/*/SKILL.md"]
 
 [formatter.shell]
 command = "shfmt"

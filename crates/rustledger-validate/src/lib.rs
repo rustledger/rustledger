@@ -3862,6 +3862,97 @@ mod tests {
         );
     }
 
+    /// #2998 drift guard. The LSP, WASM and FFI leave out a booking failure
+    /// that [`rustledger_booking::BookingError::restates_ambiguous_elision`]
+    /// beside their own validation, without looking for the E3002 (the
+    /// loader looks). That is sound only while the validator reports exactly
+    /// one E3002 whenever `ambiguous_elision` holds, and places it where
+    /// `AmbiguousElision::located_posting` says. Pinned here on every shape
+    /// the restatement rule covers, so a change to either side trips it.
+    #[test]
+    fn e3002_agrees_with_ambiguous_elision_wherever_booking_defers_to_it() {
+        use rustledger_booking::BookingError;
+        use rustledger_core::IncompleteAmount;
+        let accounts = ["Assets:A", "Assets:B", "Assets:C", "Assets:D"];
+        let opens = accounts.map(|a| at(0, Directive::Open(Open::new(date(2024, 1, 1), a))));
+        let usd = |a: &str, n| Posting::new(a, Amount::new(n, "USD"));
+        let eur = |a: &str, n| Posting::new(a, Amount::new(n, "EUR"));
+        let ccy = |a: &str, c: &str| {
+            Posting::with_incomplete(a, IncompleteAmount::CurrencyOnly(c.into()))
+        };
+        let shapes: Vec<Vec<Posting>> = vec![
+            // Two fully elided postings.
+            vec![Posting::auto("Assets:A"), Posting::auto("Assets:B")],
+            vec![
+                usd("Assets:A", dec!(1)),
+                Posting::auto("Assets:B"),
+                Posting::auto("Assets:C"),
+            ],
+            // One currency group with two unknowns.
+            vec![
+                usd("Assets:A", dec!(1)),
+                ccy("Assets:B", "USD"),
+                ccy("Assets:C", "USD"),
+            ],
+            // A fully elided posting beside another unknown.
+            vec![
+                usd("Assets:A", dec!(1)),
+                ccy("Assets:B", "USD"),
+                Posting::auto("Assets:C"),
+            ],
+            // Two currencies, one crowded.
+            vec![
+                usd("Assets:A", dec!(1)),
+                eur("Assets:B", dec!(1)),
+                ccy("Assets:C", "EUR"),
+                ccy("Assets:D", "EUR"),
+            ],
+            // Not ambiguous: one elided posting, and none.
+            vec![usd("Assets:A", dec!(1)), Posting::auto("Assets:B")],
+            vec![usd("Assets:A", dec!(1)), usd("Assets:B", dec!(-1))],
+        ];
+        let mut ambiguous = 0;
+        for postings in shapes {
+            let mut txn = Transaction::new(date(2024, 1, 15), "x");
+            for (i, p) in postings.into_iter().enumerate() {
+                txn = txn.with_posting(posting_at(110 + 20 * i, p));
+            }
+            let ambiguity = rustledger_booking::ambiguous_elision(&txn);
+            let restated = rustledger_booking::interpolate(&txn)
+                .err()
+                .is_some_and(|e| BookingError::Interpolation(e).restates_ambiguous_elision(&txn));
+            let early: Vec<_> = opens
+                .iter()
+                .cloned()
+                .chain([at(100, Directive::Transaction(txn.clone()))])
+                .collect();
+            let errors = across(&early, &opens);
+            let e3002: Vec<_> = errors
+                .iter()
+                .filter(|e| e.code == ErrorCode::MultipleInterpolation)
+                .collect();
+            assert_eq!(
+                e3002.len(),
+                usize::from(ambiguity.is_some()),
+                "{txn:?}: {errors:?}"
+            );
+            assert!(
+                !restated || ambiguity.is_some(),
+                "restated without E3002: {txn:?}"
+            );
+            if let Some(ambiguity) = ambiguity {
+                ambiguous += 1;
+                let expected = ambiguity
+                    .located_posting(&txn)
+                    .map_or(rustledger_parser::Span::new(100, 150), |p| {
+                        rustledger_parser::Span::new(p.span.start, p.span.end)
+                    });
+                assert_eq!(e3002[0].span, Some(expected), "{txn:?}");
+            }
+        }
+        assert_eq!(ambiguous, 5, "every ambiguous shape was judged ambiguous");
+    }
+
     /// [`across`], with booking having refused `refused` (each one is in
     /// `early` and not in `late`, as the loader sets refused transactions
     /// aside).

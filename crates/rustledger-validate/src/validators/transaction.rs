@@ -315,10 +315,7 @@ pub fn validate_transaction_structure(
         let mut error = ValidationError::new(ErrorCode::MultipleInterpolation, message, txn.date);
         // On the posting itself when it has a source location (#2998);
         // a synthesized posting leaves the error on the transaction.
-        if let Some(posting) = txn.postings.get(ambiguity.posting)
-            && rustledger_core::is_source_file_id(posting.file_id)
-            && posting.span != rustledger_core::Span::ZERO
-        {
+        if let Some(posting) = ambiguity.located_posting(txn) {
             error = error.at_location(posting);
         }
         errors.push(error);

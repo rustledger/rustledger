@@ -546,7 +546,11 @@ pub(crate) fn run_ledger_validation(
                 failed[index] = true;
                 // Early validation, which always runs here, reported this
                 // refusal as E3002 on the posting beancount names; one
-                // diagnostic for one cause, as `check` gives (#2998).
+                // diagnostic for one cause, as `check` gives (#2998). Not
+                // looked up, as the loader does (`restated_e3002`): the
+                // validator reports that E3002 whenever this holds, pinned
+                // by rustledger-validate's
+                // `e3002_agrees_with_ambiguous_elision_wherever_booking_defers_to_it`.
                 if e.restates_ambiguous_elision(txn) {
                     continue;
                 }

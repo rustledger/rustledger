@@ -324,16 +324,11 @@ fn restated_e3002_lines(ledger: &rustledger_loader::Ledger) -> Vec<u32> {
             let Directive::Transaction(txn) = &refused.value else {
                 return None;
             };
-            let posting = txn
-                .postings
-                .get(rustledger_booking::ambiguous_elision(txn)?.posting)?;
-            let (file_id, offset) = if rustledger_core::is_source_file_id(posting.file_id)
-                && posting.span != rustledger_core::Span::ZERO
-            {
-                (posting.file_id, posting.span.start)
-            } else {
-                (refused.file_id, refused.span.start)
-            };
+            let (file_id, offset) = rustledger_booking::ambiguous_elision(txn)?
+                .located_posting(txn)
+                .map_or((refused.file_id, refused.span.start), |p| {
+                    (p.file_id, p.span.start)
+                });
             let line = ledger.source_map.locate(file_id, offset)?.line;
             u32::try_from(line).ok()
         })

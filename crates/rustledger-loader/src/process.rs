@@ -1327,28 +1327,23 @@ impl crate::Directives<crate::LateValidated> {
     }
 }
 
-/// The Early validator's E3002 for `txn`, by index into `errors`: the one at
-/// the posting [`rustledger_booking::ambiguous_elision`] names (where the
-/// validator places it), else at the transaction (where it falls back for a
-/// posting with no source location). `None` when no such E3002 was reported,
-/// in which case the booking failure is reported as usual (#2998).
+/// The Early validator's E3002 for `txn`, by index into `errors`: the one
+/// where [`rustledger_booking::AmbiguousElision::located_posting`] places it
+/// (the posting, or the transaction for a posting with no source location),
+/// the same rule the validator places it by. `None` when no such E3002 was
+/// reported, in which case the booking failure is reported as usual (#2998).
 fn restated_e3002(
     errors: &[LedgerError],
     txn: &rustledger_core::Transaction,
     directive_span: rustledger_core::Span,
     file_id: u16,
 ) -> Option<usize> {
-    let ambiguity = rustledger_booking::ambiguous_elision(txn)?;
-    let posting = txn.postings.get(ambiguity.posting)?;
-    [(posting.file_id, posting.span), (file_id, directive_span)]
-        .into_iter()
-        .find_map(|(fid, span)| {
-            errors.iter().position(|e| {
-                e.code == "E3002"
-                    && e.file_id == Some(fid)
-                    && e.source_span == Some((span.start, span.end))
-            })
-        })
+    let (fid, span) = rustledger_booking::ambiguous_elision(txn)?
+        .located_posting(txn)
+        .map_or((file_id, directive_span), |p| (p.file_id, p.span));
+    errors.iter().position(|e| {
+        e.code == "E3002" && e.file_id == Some(fid) && e.source_span == Some((span.start, span.end))
+    })
 }
 
 /// The code a booking failure is reported under: the E4xxx code of a

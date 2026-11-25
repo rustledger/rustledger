@@ -1127,6 +1127,7 @@ pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
 /// Elided postings that compete for one residual, so interpolation cannot
 /// solve them: what `rustledger-validate` reports as E3002.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AmbiguousElision {
     /// The posting the diagnostic belongs on, by index into `txn.postings`.
     ///
@@ -1147,6 +1148,25 @@ pub struct AmbiguousElision {
     pub has_unassigned: bool,
     /// Indices of every elided unknown, in posting order.
     pub postings: Vec<usize>,
+}
+
+impl AmbiguousElision {
+    /// The posting of `txn` the E3002 is reported on, or `None` when it goes
+    /// on the transaction instead: [`Self::posting`] when that posting has a
+    /// source location, else the transaction (a synthesized posting has no
+    /// line of its own).
+    ///
+    /// The one placement rule: the validator places the E3002 by it, and the
+    /// loader and WASM find that E3002 by it, so they cannot drift (#2998).
+    #[must_use]
+    pub fn located_posting<'a>(
+        &self,
+        txn: &'a Transaction,
+    ) -> Option<&'a rustledger_core::Spanned<rustledger_core::Posting>> {
+        txn.postings.get(self.posting).filter(|p| {
+            rustledger_core::is_source_file_id(p.file_id) && p.span != rustledger_core::Span::ZERO
+        })
+    }
 }
 
 /// The E3002 condition on `txn`, or `None` when interpolation can solve every

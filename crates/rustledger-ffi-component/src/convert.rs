@@ -551,7 +551,7 @@ fn load_result(
         .collect();
     // #1663 (Part 2): stamp each `balance` directive with `computed − asserted`.
     attach_balance_diffs(&mut entries, &balance_actuals);
-    let mut errors = loaded.errors;
+    let mut errors = errors_beside_validation(loaded.errors, &loaded.error_restates_e3002);
     errors.extend(validation_errs);
     // Last, once validation has run: in `errors` an option diagnostic is a
     // parse-phase error, which would have skipped it (#2929).
@@ -753,9 +753,23 @@ fn simple_error(message: String) -> wit::Error {
 pub fn validate(source: &str) -> out::ValidateResult {
     let load = ffi::helpers::load_source(source);
     let (validation_errs, _actuals) = semantic_validation_errors(&load, None);
-    let mut errors = load.errors;
+    let mut errors = errors_beside_validation(load.errors, &load.error_restates_e3002);
     errors.extend(validation_errs);
     validate_result(errors, load.option_errors)
+}
+
+/// The errors of a load that did not validate, as a surface that validates it
+/// itself reports them: all but the booking failures that restate an E3002
+/// its validation reports (#2998), so one cause is one error, as in
+/// `rledger check`. `restates` is parallel to `errors`
+/// ([`ffi::helpers::LoadResult::error_restates_e3002`]).
+fn errors_beside_validation(errors: Vec<ffi::Error>, restates: &[bool]) -> Vec<ffi::Error> {
+    errors
+        .into_iter()
+        .zip(restates.iter().copied().chain(std::iter::repeat(false)))
+        .filter(|&(_, restated)| !restated)
+        .map(|(error, _)| error)
+        .collect()
 }
 
 /// The validate-result for a load's `errors` (its own and its validation

@@ -79,6 +79,9 @@ pub struct SurfaceCase {
     /// validator raises (E1004) and no surface reports: `rledger lint
     /// closed-nonempty` must find it, so the case is not passing vacuously.
     pub closes_nonempty: bool,
+    /// The narrations of the transactions booking refuses, in order, each
+    /// beside the error that refused it.
+    pub refused: &'static [&'static str],
 }
 
 /// The cases.
@@ -97,6 +100,7 @@ pub const SURFACE_CASES: &[SurfaceCase] = &[
 ",
         findings: &[],
         closes_nonempty: true,
+        refused: &[],
     },
     SurfaceCase {
         name: "close with a balance under auto_accounts",
@@ -110,6 +114,7 @@ pub const SURFACE_CASES: &[SurfaceCase] = &[
 ",
         findings: &[],
         closes_nonempty: true,
+        refused: &[],
     },
     SurfaceCase {
         name: "close with a balance under currency_accounts",
@@ -131,6 +136,7 @@ pub const SURFACE_CASES: &[SurfaceCase] = &[
 ",
         findings: &[],
         closes_nonempty: true,
+        refused: &[],
     },
     SurfaceCase {
         name: "validation after a STRICT booking error",
@@ -166,6 +172,7 @@ pub const SURFACE_CASES: &[SurfaceCase] = &[
             },
         ],
         closes_nonempty: false,
+        refused: &["sell"],
     },
     SurfaceCase {
         name: "validation after a parse error",
@@ -198,6 +205,7 @@ garbage
             },
         ],
         closes_nonempty: false,
+        refused: &[],
     },
     SurfaceCase {
         name: "no balance check for a transaction holding an invalid token",
@@ -252,6 +260,7 @@ garbage
             },
         ],
         closes_nonempty: false,
+        refused: &[],
     },
     SurfaceCase {
         name: "a line a BOM starts discards the transaction it breaks into",
@@ -289,6 +298,7 @@ garbage
             },
         ],
         closes_nonempty: false,
+        refused: &[],
     },
     SurfaceCase {
         name: "a BOM-led account after a transaction keeps its residual",
@@ -313,6 +323,7 @@ garbage
             },
         ],
         closes_nonempty: false,
+        refused: &[],
     },
     SurfaceCase {
         name: "a column-0 invalid token after a transaction discards its residual",
@@ -348,6 +359,7 @@ $x
             },
         ],
         closes_nonempty: false,
+        refused: &[],
     },
     SurfaceCase {
         name: "a parse error on a transaction's lines, or an invalid-date directive after it, discards its residual",
@@ -392,5 +404,37 @@ $x
             },
         ],
         closes_nonempty: false,
+        refused: &[],
+    },
+    SurfaceCase {
+        name: "two elided postings are one E3002, on the posting beancount names, which is the booking failure refusing the transaction",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+2024-01-01 open Assets:C
+
+2024-01-02 * \"two fully elided: the last one\"
+  Assets:A  1 USD
+  Assets:B
+  Assets:C
+
+2024-01-03 * \"two in one currency: the first one\"
+  Assets:A  1 USD
+  Assets:B  USD
+  Assets:C  USD
+",
+        findings: &[
+            Finding {
+                code: "E3002",
+                line: 8,
+                message: "Transaction has 2 postings with missing amounts; at most one is allowed",
+            },
+            Finding {
+                code: "E3002",
+                line: 12,
+                message: "Transaction has multiple postings with missing amounts in the same currency (2 in USD)",
+            },
+        ],
+        closes_nonempty: false,
+        refused: &["two fully elided: the last one", "two in one currency: the first one"],
     },
 ];

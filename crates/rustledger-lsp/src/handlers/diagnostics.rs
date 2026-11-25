@@ -544,6 +544,16 @@ pub(crate) fn run_ledger_validation(
             // Leave the transaction as written; it is set aside below.
             Err(e) => {
                 failed[index] = true;
+                // Early validation, which always runs here, reported this
+                // refusal as E3002 on the posting beancount names; one
+                // diagnostic for one cause, as `check` gives (#2998). Not
+                // looked up, as the loader does (`restated_e3002`): the
+                // validator reports that E3002 whenever this holds, pinned
+                // by rustledger-validate's
+                // `e3002_agrees_with_ambiguous_elision_wherever_booking_defers_to_it`.
+                if e.restates_ambiguous_elision(txn) {
+                    continue;
+                }
                 booking_errors.push((
                     BookingDiagnostic {
                         code: rustledger_validate::ErrorCode::booking_failure_code_str(&e),
@@ -3479,11 +3489,9 @@ plugin "auto_accounts"
                 "cannot infer currency",
                 "2024-01-15 * \"Lunch\"\n  Expenses:Food   12.50\n  Assets:Cash\n",
             ),
-            // MultipleMissing (`check` adds a validator E3002 beside it).
-            (
-                "multiple postings missing",
-                "2024-01-15 * \"x\"\n  Expenses:Food  12.50 USD\n  Assets:Cash\n  Assets:Eur\n",
-            ),
+            // (MultipleMissing for elided postings is the validator's E3002
+            // on both surfaces since #2998:
+            // `ambiguous_elision_is_one_e3002_as_check_gives`.)
             // UnsolvableUnits
             (
                 "cannot interpolate the units",
@@ -3559,6 +3567,43 @@ plugin "auto_accounts"
                 "{needle}: same line as check"
             );
         }
+    }
+
+    /// #2998: two elided postings are one E3002 in the editor as in `check`,
+    /// on the posting beancount 3.2.3 names (the last fully elided one), with
+    /// no `BOOK` "interpolation failed" restating it.
+    #[test]
+    fn ambiguous_elision_is_one_e3002_as_check_gives() {
+        let source = "2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
+                      2024-01-01 open Assets:Eur\n\
+                      2024-01-15 * \"x\"\n  Expenses:Food  12.50 USD\n  Assets:Cash\n  Assets:Eur\n";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, source).unwrap();
+        let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let check: Vec<_> = ledger
+            .errors
+            .iter()
+            .map(|e| (e.code.as_str(), e.location.as_ref().map(|l| l.line)))
+            .collect();
+        assert_eq!(check, vec![("E3002", Some(7))], "{:?}", ledger.errors);
+
+        let parsed = parse(source);
+        let diags = all_diagnostics(
+            &parsed,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let editor: Vec<_> = diags
+            .iter()
+            .map(|d| (get_code(d), d.range.start.line as usize + 1))
+            .collect();
+        assert_eq!(editor, vec![("E3002".to_string(), 7)], "{diags:?}");
     }
 
     /// #2626: a regular plugin does not see a transaction booking refused,

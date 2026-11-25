@@ -124,7 +124,9 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     // Validation runs whatever loaded, as `rledger check` does (#2937); an
     // invalid option, reported beside it, does not stop it (#2299).
     let validation_errors = run_validation(&load);
-    let mut errors = load.reported_errors();
+    // Without a booking failure that restates an E3002 the validation
+    // reports: one cause, one error, as `rledger check` gives (#2998).
+    let mut errors = load.reported_errors_beside_validation();
     errors.extend(validation_errors);
 
     let result = ValidationResult {

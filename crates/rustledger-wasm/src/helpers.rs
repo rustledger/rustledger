@@ -218,6 +218,19 @@ pub struct ProcessedLedger {
     /// reported beside the rows. This is the query rule, not the soundness
     /// gate [`has_fatal`] reads, which also stops on a plugin's error.
     pub query_blocked: bool,
+    /// Parallel to `errors`: whether the error is a booking failure that
+    /// restates the E3002 [`run_validation`] reports
+    /// ([`rustledger_loader::LedgerError::restates_ambiguous_elision`],
+    /// #2998). This load does not validate, so it keeps such a failure; a
+    /// surface that also runs [`run_validation`] reports
+    /// [`Self::errors_beside_validation`] instead, so one cause is one error,
+    /// as in `rledger check`. Such a failure still blocks queries.
+    pub restates_e3002: Vec<bool>,
+    /// The lines of the E3002s [`run_validation`] reports for the transactions
+    /// whose booking failure [`Self::restates_e3002`] marks: a surface that
+    /// leaves those failures out moves exactly these E3002s to where the
+    /// failure was (#2998).
+    pub restated_e3002_lines: Vec<u32>,
     /// Raw parse result, needed by editor features and `ParsedLedger`.
     pub parse_result: ParserResult,
     pub lookup: LineLookup,
@@ -245,6 +258,34 @@ impl ProcessedLedger {
         all
     }
 
+    /// [`Self::errors`] as a surface that also runs [`run_validation`]
+    /// reports them: without the booking failures that restate an E3002 the
+    /// validation reports ([`Self::restates_e3002`], #2998).
+    #[must_use]
+    pub fn errors_beside_validation(&self) -> Vec<Error> {
+        self.errors
+            .iter()
+            .zip(
+                self.restates_e3002
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(false)),
+            )
+            .filter(|&(_, restated)| !restated)
+            .map(|(error, _)| error.clone())
+            .collect()
+    }
+
+    /// [`Self::reported_errors`] for a surface that also runs
+    /// [`run_validation`]: [`Self::errors_beside_validation`] plus the option
+    /// diagnostics.
+    #[must_use]
+    pub fn reported_errors_beside_validation(&self) -> Vec<Error> {
+        let mut all = self.errors_beside_validation();
+        all.extend(self.option_errors.iter().cloned());
+        all
+    }
+
     /// What a query over the source lists: load diagnostics plus option
     /// diagnostics as a query lists them ([`Self::query_option_errors`]), so a
     /// rejected `booking_method`'s E7002 is the refusal that says why the
@@ -256,6 +297,42 @@ impl ProcessedLedger {
         all.extend(self.query_option_errors.iter().cloned());
         all
     }
+}
+
+/// For each booking failure in `ledger` that restates an E3002
+/// ([`rustledger_loader::LedgerError::restates_ambiguous_elision`]), the line
+/// the validator reports that E3002 on: the posting
+/// [`rustledger_booking::ambiguous_elision`] names, or the transaction when
+/// that posting has no source location, as the validator places it (#2998).
+fn restated_e3002_lines(ledger: &rustledger_loader::Ledger) -> Vec<u32> {
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.restates_ambiguous_elision())
+        .filter_map(|e| {
+            let (start, _) = e.source_span?;
+            let file_id = e.file_id?;
+            // The refused transaction the failure is in: the latest-starting
+            // one at or before it (a span can run up to the next directive's
+            // start, where a failure placed on that directive begins).
+            let refused = ledger
+                .booking_refused
+                .iter()
+                .filter_map(|&i| ledger.directives.get(i))
+                .filter(|d| d.file_id == file_id && d.span.start <= start && start <= d.span.end)
+                .max_by_key(|d| d.span.start)?;
+            let Directive::Transaction(txn) = &refused.value else {
+                return None;
+            };
+            let (file_id, offset) = rustledger_booking::ambiguous_elision(txn)?
+                .located_posting(txn)
+                .map_or((refused.file_id, refused.span.start), |p| {
+                    (p.file_id, p.span.start)
+                });
+            let line = ledger.source_map.locate(file_id, offset)?.line;
+            u32::try_from(line).ok()
+        })
+        .collect()
 }
 
 /// Parse, book, and process a Beancount source string.
@@ -295,6 +372,8 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
+                restates_e3002: Vec::new(),
+                restated_e3002_lines: Vec::new(),
                 parse_result,
                 lookup,
             };
@@ -348,6 +427,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                     .map(Error::from)
                     .collect(),
             );
+            let restated_e3002_lines = restated_e3002_lines(&ledger);
             let booking_refused = ledger.booking_refused;
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
@@ -356,6 +436,13 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
+            let mut restates_e3002 = vec![false; parse_errors.len()];
+            restates_e3002.extend(
+                ledger
+                    .errors
+                    .iter()
+                    .map(rustledger_loader::LedgerError::restates_ambiguous_elision),
+            );
             let mut errors = parse_errors;
             errors.extend(
                 ledger
@@ -374,6 +461,8 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 option_errors,
                 query_option_errors,
                 query_blocked,
+                restates_e3002,
+                restated_e3002_lines,
                 parse_result,
                 lookup,
             }
@@ -391,6 +480,8 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 query_option_errors: option_errors.clone(),
                 option_errors,
                 query_blocked: true,
+                restates_e3002: Vec::new(),
+                restated_e3002_lines: Vec::new(),
                 parse_result,
                 lookup,
             }
@@ -1521,7 +1612,7 @@ mod parse_error_mapping_parity {
         ];
         for source in cases {
             let load = load_and_book(source);
-            let mut single = load.reported_errors();
+            let mut single = load.reported_errors_beside_validation();
             single.extend(run_validation(&load));
             let single = places(single);
             assert!(

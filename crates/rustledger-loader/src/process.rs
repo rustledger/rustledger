@@ -533,6 +533,9 @@ pub struct LedgerError {
     /// Whether this is [`Ledger::query_refusal`]: a rejected option that
     /// would change the ledger's figures. See [`Self::blocks_queries`].
     option_refusal: bool,
+    /// Whether this booking failure restates a validator E3002. See
+    /// [`Self::restates_ambiguous_elision`].
+    restates_e3002: bool,
     /// Whether the validator reported this. See
     /// [`Self::is_validation_finding`].
     validation_finding: bool,
@@ -578,6 +581,7 @@ impl LedgerError {
             blocking_load: false,
             option_refusal: false,
             validation_finding: false,
+            restates_e3002: false,
         }
     }
 
@@ -597,6 +601,7 @@ impl LedgerError {
             blocking_load: false,
             option_refusal: false,
             validation_finding: false,
+            restates_e3002: false,
         }
     }
 
@@ -616,10 +621,35 @@ impl LedgerError {
     /// [`rustledger_validate::ErrorCode::for_booking_failure`] gives it (an
     /// E4xxx lot-matching code, the code the LSP shows), else `BOOK`
     /// (#2631), and a validator can raise the same E4xxx codes without
-    /// booking having refused anything.
+    /// booking having refused anything. Interpolation refusing elided
+    /// postings the validator already reported is that E3002 itself (#2998).
     #[must_use]
     pub const fn is_booking_failure(&self) -> bool {
         self.booking_failure
+    }
+
+    /// Make this validator E3002 the booking failure for the transaction
+    /// booking refused for the same reason (#2998): interpolation could not
+    /// solve the elided postings E3002 names. One error then reports both,
+    /// as beancount reports one, and it is no longer only a finding about
+    /// the ledger as written ([`Self::is_validation_finding`]): booking left
+    /// the transaction out.
+    const fn mark_booking_refusal(&mut self) {
+        self.booking_failure = true;
+        self.validation_finding = false;
+    }
+
+    /// Whether this booking failure is interpolation refusing elided postings
+    /// the validator reports as E3002
+    /// ([`rustledger_booking::BookingError::restates_ambiguous_elision`],
+    /// #2998). A load that validated never reports it (its E3002 is the
+    /// booking failure instead); a load without validation reports it, since
+    /// nothing else does. A surface that validates such a load itself, and so
+    /// reports the E3002, leaves this one out of its diagnostics, as
+    /// `rledger check` does; it still stops queries ([`Self::blocks_queries`]).
+    #[must_use]
+    pub const fn restates_ambiguous_elision(&self) -> bool {
+        self.restates_e3002
     }
 
     /// Whether a plugin failed rather than reported a finding: it could not
@@ -820,10 +850,18 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         (options.run_plugins && !raw.plugins.is_empty()) || !options.extra_plugins.is_empty();
     #[cfg(not(feature = "plugins"))]
     let mark_interpolated = false;
+    // Whether Early validation ran and so reported every ambiguous elision as
+    // E3002; only then may booking leave out the failure that restates it
+    // (#2998). Without validation the booking failure is the only report.
+    #[cfg(feature = "validation")]
+    let elision_validated = validation_session.is_some();
+    #[cfg(not(feature = "validation"))]
+    let elision_validated = false;
     let (booked, failed) = directives.book(
         effective_booking_method,
         tolerance_policy,
         mark_interpolated,
+        elision_validated,
         &mut errors,
         options.collect_capital_gains.then_some(&mut capital_gains),
         &raw.source_map,
@@ -1083,6 +1121,7 @@ impl crate::Directives<crate::EarlyValidated> {
         effective_method: rustledger_core::BookingMethod,
         tolerance_policy: rustledger_booking::TolerancePolicy,
         mark_interpolated: bool,
+        elision_validated: bool,
         errors: &mut Vec<LedgerError>,
         gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
         source_map: &SourceMap,
@@ -1095,6 +1134,7 @@ impl crate::Directives<crate::EarlyValidated> {
             effective_method,
             tolerance_policy,
             mark_interpolated,
+            elision_validated,
             errors,
             gains,
             source_map,
@@ -1287,6 +1327,25 @@ impl crate::Directives<crate::LateValidated> {
     }
 }
 
+/// The Early validator's E3002 for `txn`, by index into `errors`: the one
+/// where [`rustledger_booking::AmbiguousElision::located_posting`] places it
+/// (the posting, or the transaction for a posting with no source location),
+/// the same rule the validator places it by. `None` when no such E3002 was
+/// reported, in which case the booking failure is reported as usual (#2998).
+fn restated_e3002(
+    errors: &[LedgerError],
+    txn: &rustledger_core::Transaction,
+    directive_span: rustledger_core::Span,
+    file_id: u16,
+) -> Option<usize> {
+    let (fid, span) = rustledger_booking::ambiguous_elision(txn)?
+        .located_posting(txn)
+        .map_or((file_id, directive_span), |p| (p.file_id, p.span));
+    errors.iter().position(|e| {
+        e.code == "E3002" && e.file_id == Some(fid) && e.source_span == Some((span.start, span.end))
+    })
+}
+
 /// The code a booking failure is reported under: the E4xxx code of a
 /// lot-matching failure, else `BOOK`, through
 /// [`rustledger_validate::ErrorCode::booking_failure_code_str`], the
@@ -1332,6 +1391,7 @@ fn run_booking(
     booking_method: BookingMethod,
     tolerance_policy: rustledger_booking::TolerancePolicy,
     mark_interpolated: bool,
+    elision_validated: bool,
     errors: &mut Vec<LedgerError>,
     mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
     source_map: &SourceMap,
@@ -1371,6 +1431,21 @@ fn run_booking(
                     }
                 }
                 Err(e) => {
+                    // The validator already reported this refusal as E3002, on
+                    // the posting beancount names: one error for one cause, as
+                    // in beancount (#2998). That E3002 becomes the booking
+                    // failure, so the transaction is still refused beside an
+                    // error that says so and still stops queries over the
+                    // ledger, as the `BOOK` it replaces did.
+                    let restates = e.restates_ambiguous_elision(txn);
+                    if elision_validated
+                        && restates
+                        && let Some(found) = restated_e3002(errors, txn, directive_span, file_id)
+                    {
+                        errors[found].mark_booking_refusal();
+                        failed_indices.push(i);
+                        continue;
+                    }
                     // Point at the posting the failure names, falling back to
                     // the directive. Booking errors carried no location at
                     // all before this: `rledger check --format json` placed
@@ -1383,6 +1458,7 @@ fn run_booking(
                         LedgerError::error(booking_failure_code(&e), e.diagnostic_message(txn))
                             .with_source_span((span.start, span.end), file_id);
                     err.booking_failure = true;
+                    err.restates_e3002 = restates;
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
@@ -2483,6 +2559,7 @@ pub fn validation_error_to_ledger_error(
         blocking_load: false,
         option_refusal: false,
         validation_finding: true,
+        restates_e3002: false,
     }
 }
 

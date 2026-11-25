@@ -92,8 +92,6 @@ fn test_validating_load_gives_each_case_its_findings() {
             .filter(|e| e.is_booking_failure())
             .count();
         assert_eq!(refused.len(), failures, "{context}");
-        if failures > 0 {
-            assert_eq!(refused, ["sell"], "{context}");
-        }
+        assert_eq!(refused, case.refused, "{context}");
     }
 }

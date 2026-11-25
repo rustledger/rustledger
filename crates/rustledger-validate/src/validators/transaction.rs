@@ -284,55 +284,41 @@ pub fn validate_transaction_structure(
     // currencies entirely (#1914). The grouping was also never populated: the
     // hint used `as_amount()`, which is `None` for exactly the partial-units
     // postings the rule is about, so everything landed in one bucket.
-    {
-        let groups = rustledger_booking::elided_unknown_groups(txn);
-        let mut per_currency: FxHashMap<&rustledger_core::Currency, u32> = FxHashMap::default();
-        let mut unassigned = 0_u32;
-        for (_, group) in &groups {
-            match group {
-                rustledger_booking::UnknownGroup::Currency(c) => {
-                    *per_currency.entry(c).or_default() += 1;
-                }
-                rustledger_booking::UnknownGroup::Unassigned => unassigned += 1,
-            }
-        }
-
-        // A fully-elided posting has no currency of its own, so it can absorb
-        // any residual -- including one another unknown is already claiming.
-        // Beancount refuses the combination outright ("CategorizationError"),
-        // and so do we: more than one unknown in play alongside one is
-        // ambiguous no matter which currencies the others sit in.
-        let ambiguous = if unassigned > 0 {
-            groups.len() > 1
+    //
+    // A fully-elided posting has no currency of its own, so it can absorb any
+    // residual -- including one another unknown is already claiming. Beancount
+    // refuses the combination outright ("CategorizationError"), and so do we.
+    // The condition, and the posting it is reported on (beancount's: the last
+    // fully-elided posting, else the first unknown of the crowded group), are
+    // `rustledger_booking::ambiguous_elision`'s, which the booking surfaces
+    // also ask so they do not report the same refusal again as a `BOOK`
+    // "interpolation failed" (#2998).
+    if let Some(ambiguity) = rustledger_booking::ambiguous_elision(txn) {
+        let detail = ambiguity
+            .crowded
+            .iter()
+            .map(|(c, n)| format!("{n} in {c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = if detail.is_empty() {
+            format!(
+                "Transaction has {} postings with missing amounts; at most one is allowed \
+                 when any of them has no currency to interpolate in",
+                ambiguity.unknowns
+            )
         } else {
-            per_currency.values().any(|&n| n > 1)
+            format!(
+                "Transaction has multiple postings with missing amounts in the same \
+                 currency ({detail}); at most one per currency is allowed"
+            )
         };
-
-        if ambiguous {
-            let detail = per_currency
-                .iter()
-                .filter(|&(_, &n)| n > 1)
-                .map(|(c, n)| format!("{n} in {c}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let message = if detail.is_empty() {
-                format!(
-                    "Transaction has {} postings with missing amounts; at most one is allowed \
-                     when any of them has no currency to interpolate in",
-                    groups.len()
-                )
-            } else {
-                format!(
-                    "Transaction has multiple postings with missing amounts in the same \
-                     currency ({detail}); at most one per currency is allowed"
-                )
-            };
-            errors.push(ValidationError::new(
-                ErrorCode::MultipleInterpolation,
-                message,
-                txn.date,
-            ));
+        let mut error = ValidationError::new(ErrorCode::MultipleInterpolation, message, txn.date);
+        // On the posting itself when it has a source location (#2998);
+        // a synthesized posting leaves the error on the transaction.
+        if let Some(posting) = ambiguity.located_posting(txn) {
+            error = error.at_location(posting);
         }
+        errors.push(error);
     }
 
     // Check for negative cost amounts. One error per posting, even

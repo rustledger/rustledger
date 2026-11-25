@@ -627,7 +627,15 @@ use crate::types::{Error, LedgerOptions};
 /// which the loader's cache is never saved for; parsed directives do not
 /// move. Both payloads here archive parse errors, and an older blob would
 /// keep serving the old ones.
-pub const CACHE_VERSION: u32 = 124;
+/// v125: loader v75, unchanged; both payloads' findings move (#2998). Two
+/// elided postings interpolation cannot tell apart are one `E3002`, on the
+/// posting beancount reports (the last fully elided one, else the first
+/// unknown of the crowded currency group), where it was on the transaction
+/// beside a `BOOK` "interpolation failed" restating it. Every such source
+/// has that error, before and after, which the loader's cache is never saved
+/// for; parsed directives do not move. Both payloads here archive findings,
+/// and an older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 125;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

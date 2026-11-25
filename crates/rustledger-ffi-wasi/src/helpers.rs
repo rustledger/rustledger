@@ -53,6 +53,13 @@ pub struct LoadResult {
     /// outright. Every other error, a plugin's among them, is reported beside
     /// the rows.
     pub error_blocks_queries: Vec<bool>,
+    /// Parallel to `errors`: whether the error is a booking failure that
+    /// restates a validator E3002
+    /// ([`rustledger_loader::LedgerError::restates_ambiguous_elision`],
+    /// #2998). This load does not validate, so it reports such a failure; a
+    /// surface that validates it and so reports the E3002 leaves it out of
+    /// its diagnostics. It still blocks queries.
+    pub error_restates_e3002: Vec<bool>,
     /// Why a query over the source refuses though no error blocks it: a
     /// rejected `booking_method`
     /// ([`rustledger_loader::Ledger::query_refusal`]). Not among `errors`;
@@ -169,6 +176,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 errors: vec![Error::new(e).validate_phase()],
                 // Nothing was loaded, so a query has nothing to answer from.
                 error_blocks_queries: vec![true],
+                error_restates_e3002: vec![false],
                 query_refusal: None,
                 option_errors: Vec::new(),
                 query_option_errors: Vec::new(),
@@ -245,7 +253,7 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = parse_errors
+    let kept: Vec<&rustledger_loader::LedgerError> = parse_errors
         .iter()
         .chain(&ledger.errors)
         .filter(|e| {
@@ -257,8 +265,13 @@ pub fn load_source(source: &str) -> LoadResult {
             let msg = e.message.replace('\\', "/");
             !normalized_includes.iter().any(|p| msg.contains(p))
         })
-        .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
-        .unzip();
+        .collect();
+    let errors: Vec<Error> = kept.iter().copied().map(ledger_error_to_ffi).collect();
+    let error_blocks_queries: Vec<bool> = kept.iter().map(|e| e.blocks_queries()).collect();
+    let error_restates_e3002: Vec<bool> = kept
+        .iter()
+        .map(|e| e.restates_ambiguous_elision())
+        .collect();
     let query_refusal = query_refusal_error(&ledger);
     let option_errors = option_errors(&ledger);
     let query_option_errors = query_option_errors(&ledger);
@@ -289,6 +302,7 @@ pub fn load_source(source: &str) -> LoadResult {
         line_lookup: lookup,
         errors,
         error_blocks_queries,
+        error_restates_e3002,
         query_refusal,
         option_errors,
         query_option_errors,

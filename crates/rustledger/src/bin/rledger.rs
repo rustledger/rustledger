@@ -323,6 +323,21 @@ fn render_error(e: &anyhow::Error) -> String {
     rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned()
 }
 
+/// The exit for a command that failed with `e`: print it and exit `code`.
+///
+/// The one place every command's error goes through, so they all treat a
+/// broken pipe alike: a downstream reader closing the pipe early
+/// (`rledger explain | head`) is not an error, so it exits 0 silently, as
+/// git does. Checking it per command left `explain` and `doctor` printing
+/// `error: Broken pipe (os error 32)` while `check` and `query` did not.
+fn exit_with_error(e: &anyhow::Error, code: u8) -> ExitCode {
+    if rustledger::pager::is_broken_pipe(e) {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("error: {}", render_error(e));
+    ExitCode::from(code)
+}
+
 fn main() -> ExitCode {
     // Load config early (before parsing) for alias expansion.
     //
@@ -388,13 +403,7 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::check::run(&args) {
                 Ok(code) => code,
-                // A downstream reader (e.g. `| head`) closing the pipe is not an
-                // error — exit cleanly, matching the Query/Format arms.
-                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(2)
-                }
+                Err(e) => exit_with_error(&e, 2),
             }
         }
         Commands::Query { mut args } => {
@@ -410,13 +419,7 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::query::run(&args) {
                 Ok(()) => ExitCode::SUCCESS,
-                // A downstream reader (e.g. `| head`) closing the pipe is not an
-                // error — exit cleanly, matching the Report arm and git.
-                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Format { mut args } => {
@@ -429,13 +432,7 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::format::run(&args) {
                 Ok(code) => code,
-                // A downstream reader (e.g. `| head`) closing the pipe is not an
-                // error — exit cleanly, matching the Report arm and git.
-                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(2)
-                }
+                Err(e) => exit_with_error(&e, 2),
             }
         }
         Commands::Split { mut args } => {
@@ -444,10 +441,7 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::restructure::split::run(&args) {
                 Ok(code) => code,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(2)
-                }
+                Err(e) => exit_with_error(&e, 2),
             }
         }
         Commands::Merge { mut args } => {
@@ -456,10 +450,7 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::restructure::merge::run(&args) {
                 Ok(code) => code,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(2)
-                }
+                Err(e) => exit_with_error(&e, 2),
             }
         }
         Commands::Report { mut args } => {
@@ -488,11 +479,7 @@ fn main() -> ExitCode {
                 args.no_cache,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Doctor { args } => {
@@ -502,10 +489,7 @@ fn main() -> ExitCode {
             };
             match rustledger::cmd::doctor::run(command) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Extract { args } => {
@@ -513,10 +497,7 @@ fn main() -> ExitCode {
             if args.list_importers {
                 match rustledger::cmd::extract_cmd::list_importers(&args) {
                     Ok(()) => return ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("error: {}", render_error(&e));
-                        return ExitCode::from(1);
-                    }
+                    Err(e) => return exit_with_error(&e, 1),
                 }
             }
             let file = match require_file(args.file.as_ref(), &config, profile_ref) {
@@ -525,27 +506,18 @@ fn main() -> ExitCode {
             };
             match rustledger::cmd::extract_cmd::run(&args, &file) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Price { args } => {
             match rustledger::cmd::price_cmd::run(&args.price_args, &config.price) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Config { args } => match rustledger::cmd::config_cmd::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {}", render_error(&e));
-                ExitCode::from(1)
-            }
+            Err(e) => exit_with_error(&e, 1),
         },
         Commands::Add { args } => {
             let file = match require_file(args.file.as_ref(), &config, profile_ref) {
@@ -554,46 +526,28 @@ fn main() -> ExitCode {
             };
             match rustledger::cmd::add_cmd::run(&args, &file) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {}", render_error(&e));
-                    ExitCode::from(1)
-                }
+                Err(e) => exit_with_error(&e, 1),
             }
         }
         Commands::Explain { args } => match rustledger::cmd::explain::run(&args) {
             Ok(code) => code,
-            Err(e) => {
-                eprintln!("error: {}", render_error(&e));
-                ExitCode::from(1)
-            }
+            Err(e) => exit_with_error(&e, 1),
         },
         Commands::Lint { args } => match rustledger::cmd::lint::run(&args) {
             Ok(code) => code,
-            // A downstream reader (e.g. `| head`) closing the pipe is not an
-            // error, as in the Check arm.
-            Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {}", render_error(&e));
-                ExitCode::from(rustledger::cmd::lint::ERROR_EXIT_CODE)
-            }
+            Err(e) => exit_with_error(&e, rustledger::cmd::lint::ERROR_EXIT_CODE),
         },
         Commands::Compat { action } => match action {
             CompatAction::Install { prefix } => {
                 match rustledger::cmd::compat::install(prefix.as_deref()) {
                     Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("error: {}", render_error(&e));
-                        ExitCode::from(1)
-                    }
+                    Err(e) => exit_with_error(&e, 1),
                 }
             }
             CompatAction::Uninstall { prefix } => {
                 match rustledger::cmd::compat::uninstall(prefix.as_deref()) {
                     Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("error: {}", render_error(&e));
-                        ExitCode::from(1)
-                    }
+                    Err(e) => exit_with_error(&e, 1),
                 }
             }
         },

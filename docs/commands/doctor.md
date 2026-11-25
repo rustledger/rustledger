@@ -43,19 +43,23 @@ rledger doctor context ledger.beancount 42
 Output:
 
 ```
-Transaction at line 42:
-  Date: 2024-01-15
-  Payee: "Coffee Shop"
-  Narration: "Morning coffee"
+Context at ledger.beancount:42
+============================================================
 
-Postings:
-  Expenses:Food:Coffee     5.00 USD
-  Assets:Cash             -5.00 USD
+      40 | 2024-01-15 * "Coffee Shop" "Morning coffee"
+      41 |   Expenses:Food:Coffee     5.00 USD
+>>>   42 |   Assets:Cash             -5.00 USD
+      43 |
+      44 | 2024-01-16 * "Grocery Store"
+      45 |   Expenses:Food:Groceries  42.00 USD
 
-Account balances after this transaction:
-  Expenses:Food:Coffee   125.00 USD
-  Assets:Cash            350.00 USD
+Directive at this location (lines 40-42):
+2024-01-15 * "Coffee Shop" "Morning coffee"
+  Expenses:Food:Coffee   5.00 USD
+  Assets:Cash           -5.00 USD
 ```
+
+The directive is printed as Beancount text, as the loader parsed it.
 
 ### Find Linked Transactions
 

@@ -247,7 +247,7 @@ fn check_good_file_exits_zero_with_ok_envelope() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
 
-    let (code, env) = run(&["check", file.to_str().unwrap(), "--json"]);
+    let (code, env) = run(&["check", file.to_str().unwrap(), "--format=json"]);
 
     assert_eq!(code, 0, "good file should exit 0: {env}");
     assert_eq!(env["ok"], Value::Bool(true));
@@ -256,12 +256,42 @@ fn check_good_file_exits_zero_with_ok_envelope() {
     assert_eq!(env["result"]["data"]["error_count"], 0);
 }
 
+/// `--json` is agcli's reserved flag, which the root help documents as
+/// "accepted and ignored: output is always JSON". `check` used to read it
+/// as `--format json`, so the help was wrong for it and right for every
+/// other command; it is ignored now, and `--format json` is what fills
+/// `result.data`.
+#[test]
+fn test_check_json_flag_is_ignored_as_the_help_says() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    let file = file.to_str().unwrap();
+
+    let (_, help) = run(&["--help"]);
+    let documented = help["result"]["agent_flags"]
+        .as_array()
+        .expect("agent_flags")
+        .iter()
+        .find(|f| f["flag"] == "--json")
+        .expect("--json is documented")["description"]
+        .as_str()
+        .expect("description")
+        .to_string();
+    assert!(documented.contains("ignored"), "{documented}");
+
+    let (code, with_flag) = run(&["check", file, "--json"]);
+    assert_eq!(code, 0, "{with_flag}");
+    let (_, without) = run(&["check", file]);
+    assert_eq!(with_flag["result"], without["result"], "{with_flag}");
+    assert!(with_flag["result"].get("data").is_none(), "{with_flag}");
+}
+
 #[test]
 fn check_bad_file_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(tmp.path(), "bad.beancount", BAD_LEDGER);
 
-    let (code, env) = run(&["check", file.to_str().unwrap(), "--json"]);
+    let (code, env) = run(&["check", file.to_str().unwrap(), "--format=json"]);
 
     assert_ne!(code, 0, "unbalanced file should exit non-zero: {env}");
     assert_eq!(env["exit_code"], 1);

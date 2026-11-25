@@ -287,7 +287,7 @@ fn explain_escapes_the_code_it_echoes() {
     let bin = require_rledger!();
     let (out, err) = run(&bin, &["explain", HOSTILE]);
     let all = format!("{out}{err}");
-    assert!(all.contains("unknown error code"), "{all}");
+    assert!(all.contains("unknown code"), "{all}");
     assert!(!has_raw_control(&all), "raw control in:\n{all:?}");
     assert!(all.contains("\\u{9b}2J\\u{7f}\\u{202e}x"), "{all}");
 }

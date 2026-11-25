@@ -171,7 +171,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     } else {
         writeln!(
             writer,
-            "  Some files would be modified by `rledger format` — run `rledger format --diff` on the [reflow] / [MISMATCH] files to inspect"
+            "  Some files would be modified by `rledger format` — run `rledger format --check --diff` on the [reflow] / [MISMATCH] files to inspect"
         )?;
     }
 

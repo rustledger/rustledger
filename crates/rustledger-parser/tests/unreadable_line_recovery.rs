@@ -233,3 +233,16 @@ fn test_parse_unmodeled_recovery_shapes_keep_their_errors() {
         (format!("{P}pushtag #a $\n\n{S}"), vec![(2, 1), (4, 2)]),
     ]);
 }
+
+/// A string left unclosed to the end of the input on an unreadable or
+/// undated line runs, in beancount's lexer, to the end of the file, so
+/// beancount reports only that line. Here the string is cut at its line, and
+/// the line starts a window that quiets the lines after it the same way.
+#[test]
+fn test_parse_lines_after_a_string_unclosed_to_the_end_are_quiet() {
+    let cases = [(
+        "2024-01-01 open Assets:A\noption \"abc\n)\n)\n2024-01-01 open Assets:B\n".to_string(),
+        vec![(2, 1)],
+    )];
+    assert_counts(&cases);
+}

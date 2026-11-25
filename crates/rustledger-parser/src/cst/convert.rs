@@ -9891,9 +9891,11 @@ enum Trigger {
 /// unreadable line starts no window. Nor does such a line right after
 /// another line with an error (past blank or skipped lines), where beancount
 /// may still be recovering from that one; nor one whose node runs past its
-/// line. An indented line after a failed dated header, or after a failed
-/// undated declaration with a blank line between, is #2993's part B, not
-/// modeled.
+/// line. (A string left unclosed to the end of the input is cut at its
+/// line and does start a window: beancount's string runs to the end of
+/// the file, so nothing after it is reported there either.) An indented
+/// line after a failed dated header, or after a failed undated declaration
+/// with a blank line between, is #2993's part B, not modeled.
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree once and
 /// lexes each line after a failed line at most once.
@@ -10052,8 +10054,10 @@ fn quiet_after_failed_line_starts(
     // (`pushmeta k: "v"`). Its statement fails on that line and bison's
     // recovery takes over as after a dated one, so its window follows a dated
     // line's rules below. Not a line a BOM starts or a dated line, which have
-    // windows of their own, nor one whose node runs past its line (an
-    // unclosed string), whose lines this walk does not model.
+    // windows of their own, nor one whose node runs past its line (a string
+    // closed on a later line), whose lines this walk does not model. A string
+    // unclosed to the end of the input is cut at its line, so its line does
+    // start a window, as beancount reports nothing past such a string.
     // Whether the line starting at `pos` follows, past at most two blank or
     // skipped lines, a line with an error: beancount may still be in its
     // recovery from that line, which this pass does not model, so such a line
@@ -10089,7 +10093,11 @@ fn quiet_after_failed_line_starts(
         false
     };
     let unreadable_lines = error_nodes.iter().filter_map(|&(pos, end, error_node)| {
-        let at_line_start = pos == 0 || stripped.as_bytes()[pos - 1] == b'\n';
+        // Checked before `line_end` is found, so a node that does not start
+        // its line costs no scan to the line's end.
+        if !(pos == 0 || stripped.as_bytes()[pos - 1] == b'\n') {
+            return None;
+        }
         let line_end = stripped[pos..]
             .find('\n')
             .map_or(stripped.len(), |i| pos + i);
@@ -10105,8 +10113,7 @@ fn quiet_after_failed_line_starts(
         // A line holding a BOM starts no such window: it is left to the
         // BOM's own handling (#2956), and asking about a long BOM run costs
         // its length each time.
-        (at_line_start
-            && !stripped[pos..line_end].contains(crate::bom::BOM_CHAR)
+        (!stripped[pos..line_end].contains(crate::bom::BOM_CHAR)
             && end <= (line_end + 1).min(stripped.len())
             && !dated_line_at(pos)
             && !crate::logos_lexer::beancount_ignores_line(&stripped[pos..line_end])

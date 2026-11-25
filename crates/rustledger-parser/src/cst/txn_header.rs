@@ -130,6 +130,7 @@ where
     I: IntoIterator<Item = (SyntaxKind, Range<usize>)>,
 {
     let mut strings: usize = 0;
+    let mut first_string: Option<Range<usize>> = None;
     let mut third_string: Option<Range<usize>> = None;
     let mut seen_tag_or_link = false;
     let mut seen_header_content = false;
@@ -186,6 +187,9 @@ where
                     return Some((HeaderDefect::StringAfterTagOrLink, range));
                 }
                 strings += 1;
+                if strings == 1 {
+                    first_string = Some(range.clone());
+                }
                 if strings == 3 {
                     third_string = Some(range);
                 }
@@ -201,8 +205,12 @@ where
 
     // Checked last: it is the one defect that cannot be known until the header
     // ends, and beancount likewise reports it from the builder rather than the
-    // grammar.
-    third_string.map(|r| (HeaderDefect::TooManyStrings(strings), r))
+    // grammar. The builder reports it on the transaction's first line, so the
+    // range runs from the first string, which is on that line, to the third,
+    // the first with no slot: a multi-line string before the third would
+    // otherwise move the error onto a later line (#2994).
+    let first = first_string.map_or(0, |r| r.start);
+    third_string.map(|r| (HeaderDefect::TooManyStrings(strings), first..r.end))
 }
 
 /// [`first_header_defect`], plus the one check that needs the source text: a
@@ -388,6 +396,10 @@ where
     }
 }
 
+/// How [`defect_message`] starts for [`HeaderDefect::TooManyStrings`], an
+/// error beancount's builder raises (`is_a_builder_error` in `convert`).
+pub(super) const TOO_MANY_STRINGS: &str = "too many strings on transaction description";
+
 /// Diagnostic text for a defect. `text` is the source slice of the reported
 /// range — the caller has the source, this module does not.
 ///
@@ -399,10 +411,9 @@ pub(super) fn defect_message(defect: HeaderDefect, text: &str) -> String {
             "unexpected string {text} after a tag or link: \
              payee and narration must come before any #tag or ^link"
         ),
-        HeaderDefect::TooManyStrings(n) => format!(
-            "too many strings on transaction description: found {n}, \
-             expected at most 2 (payee and narration)"
-        ),
+        HeaderDefect::TooManyStrings(n) => {
+            format!("{TOO_MANY_STRINGS}: found {n}, expected at most 2 (payee and narration)")
+        }
         HeaderDefect::UnexpectedToken => {
             format!("unexpected {text:?} in transaction header")
         }
@@ -635,18 +646,18 @@ mod tests {
             first_header_defect(three.clone()).map(|(d, _)| d),
             Some(HeaderDefect::TooManyStrings(3))
         );
-        // Reported at the THIRD string — the first one that is too many.
-        // Taken from the token list rather than hand-computed, so the
-        // assertion stays true if the fixture above is edited.
-        let third = three
+        // Reported from the first string, on the transaction's first line
+        // where beancount's builder reports it, to the THIRD, the first one
+        // that is too many (#2994). Taken from the token list rather than
+        // hand-computed, so the assertion stays true if the fixture above is
+        // edited.
+        let strings: Vec<_> = three
             .iter()
             .filter(|(k, _)| *k == SyntaxKind::STRING)
-            .nth(2)
-            .expect("fixture has three strings")
-            .1
-            .clone();
+            .map(|(_, r)| r.clone())
+            .collect();
         let (_, range) = first_header_defect(three).unwrap();
-        assert_eq!(range, third);
+        assert_eq!(range, strings[0].start..strings[2].end);
 
         let mut five = vec![
             (SyntaxKind::DATE, "2013-05-18"),

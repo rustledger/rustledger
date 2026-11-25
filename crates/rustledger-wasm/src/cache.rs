@@ -649,7 +649,14 @@ use crate::types::{Error, LedgerOptions};
 /// loader's cache is never saved for; the kept `open` never reaches it. Both
 /// payloads here archive parse errors, and an older blob would keep serving
 /// the old ones.
-pub const CACHE_VERSION: u32 = 127;
+/// v128: loader v76, unchanged; parse errors move (#2994). A syntax error
+/// at a string that runs over line ends is reported on the line the string
+/// ends, as in beancount, and too many strings on a transaction header on
+/// its first line. Only error spans move, and every such source has a parse
+/// error, before and after, which the loader's cache is never saved for.
+/// Both payloads here archive parse errors, and an older blob would keep
+/// serving the old ones.
+pub const CACHE_VERSION: u32 = 128;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -25,7 +25,7 @@ rledger add [OPTIONS] [FILE]
 | `-P, --profile <PROFILE>` | Use a profile from config |
 | `-d, --date <DATE>` | Transaction date (YYYY-MM-DD, "today", "yesterday", "+1", "-1") |
 | `-n, --dry-run` | Print transaction without appending |
-| `-y, --yes` | Skip confirmation prompt |
+| `-y, --yes` | Append without the confirmation prompt. Needed when stdin is not a terminal: there only an explicit `y` answers the prompt, and no answer is an error that writes nothing |
 | `-q, --quick <ARGS>...` | Quick mode (see below) |
 | `--no-completion` | Disable account tab completion |
 

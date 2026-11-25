@@ -1664,8 +1664,12 @@ fn build_report_args(req: &Req<'_>) -> Result<ReportArgs, CommandError> {
     let first_is_report = positionals
         .first()
         .is_some_and(|s| parse_report_name(s).is_some());
+    // The file comes before the report name or after it, as in `rledger
+    // report`: `report FILE balances` and `report balances FILE`.
     let file = explicit_file.or_else(|| {
-        if first_is_report || positionals.is_empty() {
+        if first_is_report {
+            (positionals.len() > 1).then(|| PathBuf::from(positionals.remove(1)))
+        } else if positionals.is_empty() {
             None
         } else {
             Some(PathBuf::from(positionals.remove(0)))

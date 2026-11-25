@@ -6,9 +6,9 @@
 //! # Usage
 //!
 //! ```bash
-//! rledger report ledger.beancount balances
-//! rledger report ledger.beancount income
-//! rledger report ledger.beancount holdings
+//! rledger report balances ledger.beancount
+//! rledger report income ledger.beancount
+//! rledger report ledger.beancount holdings   # the file may also come first
 //! ```
 //!
 //! # Reports
@@ -56,8 +56,13 @@ pub struct Args {
     #[arg(long, value_name = "SHELL", hide = true)]
     generate_completions: Option<ShellType>,
 
-    /// The beancount file to process
-    #[arg(value_name = "FILE")]
+    /// The beancount file to process, before or after the report name
+    /// (`rledger report balances FILE` or `rledger report FILE balances`).
+    ///
+    /// Global, so clap accepts it after the report subcommand too: the
+    /// subcommands take no positionals of their own, so the two orders
+    /// cannot be confused.
+    #[arg(value_name = "FILE", global = true)]
     pub file: Option<PathBuf>,
 
     /// The report to generate

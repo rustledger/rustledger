@@ -8,7 +8,7 @@
 //! rledger check ledger.beancount
 //! rledger query ledger.beancount "SELECT account, sum(position)"
 //! rledger format ledger.beancount
-//! rledger report ledger.beancount balances
+//! rledger report balances ledger.beancount
 //! rledger doctor lex ledger.beancount
 //! rledger config show  # Show configuration
 //! rledger completions bash  # Generate shell completions

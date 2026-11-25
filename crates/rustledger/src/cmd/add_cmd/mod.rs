@@ -25,7 +25,7 @@
 //!
 //! - `-d, --date <DATE>`: Transaction date (YYYY-MM-DD, "today", "yesterday", "+1", "-1")
 //! - `-n, --dry-run`: Preview transaction without appending to file
-//! - `-y, --yes`: Skip confirmation prompt
+//! - `-y, --yes`: Skip confirmation prompt (needed when stdin is not a terminal)
 //! - `-q, --quick <ARGS>`: Quick mode with inline arguments
 //! - `--no-completion`: Disable account tab completion in interactive mode
 
@@ -48,7 +48,7 @@ use rustyline::validate::Validator;
 use rustyline::{Editor, Helper};
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as IoRead, Seek, SeekFrom, Write};
+use std::io::{IsTerminal, Read as IoRead, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 #[cfg(test)]
 use {rust_decimal::Decimal, std::str::FromStr};
@@ -69,7 +69,10 @@ pub struct Args {
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Skip confirmation prompt.
+    /// Append without the confirmation prompt.
+    ///
+    /// Needed when stdin is not a terminal (a script or an agent): there,
+    /// only an explicit `y` answers the prompt, and no answer is an error.
     #[arg(short, long)]
     pub yes: bool,
 
@@ -388,11 +391,9 @@ fn run_quick_mode_with_writer<W: std::io::Write>(
         write!(out, "Append to {}? [Y/n] ", shown_path(file))?;
         out.flush()?;
 
-        let mut response = String::new();
-        std::io::stdin().read_line(&mut response)?;
-        let response = response.trim().to_lowercase();
-
-        if !response.is_empty() && response != "y" && response != "yes" {
+        let stdin = std::io::stdin();
+        let interactive = stdin.is_terminal();
+        if !read_append_answer(&mut stdin.lock(), interactive)? {
             writeln!(out, "Cancelled.")?;
             return Ok(());
         }
@@ -626,11 +627,9 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
         print!("Append to {}? [Y/n] ", shown_path(file));
         std::io::stdout().flush()?;
 
-        let mut response = String::new();
-        std::io::stdin().read_line(&mut response)?;
-        let response = response.trim().to_lowercase();
-
-        if !response.is_empty() && response != "y" && response != "yes" {
+        let stdin = std::io::stdin();
+        let interactive = stdin.is_terminal();
+        if !read_append_answer(&mut stdin.lock(), interactive)? {
             println!("Cancelled.");
             return Ok(());
         }
@@ -716,7 +715,44 @@ fn shown_path(path: &std::path::Path) -> String {
     rustledger_plugin::escape_untrusted_line(&path.display().to_string()).into_owned()
 }
 
+/// The answer to `Append to FILE? [Y/n]`, read from `input`: `true` to
+/// append, `false` to cancel.
+///
+/// At a terminal (`interactive`), pressing Enter takes the default, yes.
+/// Anywhere else (a script, a pipe, an agent with stdin closed) only an
+/// explicit `y`/`yes` appends: the prompt used to read end-of-file as the
+/// empty answer and append, so `rledger add` without `-y` wrote to the
+/// ledger with nobody having said yes. An empty answer or end-of-file is
+/// now an error naming `-y` and `-n`. `interactive` is a parameter so tests
+/// do not depend on how they are run.
+///
+/// # Errors
+///
+/// When not interactive and the answer is empty or missing, or reading
+/// `input` fails.
+fn read_append_answer<R: std::io::BufRead>(input: &mut R, interactive: bool) -> Result<bool> {
+    let mut response = String::new();
+    input.read_line(&mut response)?;
+    let response = response.trim().to_lowercase();
+    if response.is_empty() {
+        if interactive {
+            return Ok(true);
+        }
+        bail!(
+            "no answer to the confirmation prompt (stdin is not a terminal), so \
+             nothing was appended; pass -y/--yes to append without asking, or \
+             -n/--dry-run to preview"
+        );
+    }
+    Ok(response == "y" || response == "yes")
+}
+
 /// Run the add command.
+///
+/// # Errors
+///
+/// When the confirmation prompt cannot be answered (see
+/// `read_append_answer`), and on date-parse, formatting, and file errors.
 pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
     // Parse the date
     let date = if let Some(ref d) = args.date {
@@ -1075,5 +1111,27 @@ mod tests {
         assert!(!content.contains("\n\n\n"));
 
         std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[test]
+    fn test_read_append_answer_terminal_enter_takes_the_default() {
+        assert!(read_append_answer(&mut &b"\n"[..], true).unwrap());
+        assert!(read_append_answer(&mut &b""[..], true).unwrap());
+        assert!(!read_append_answer(&mut &b"n\n"[..], true).unwrap());
+    }
+
+    #[test]
+    fn test_read_append_answer_non_terminal_needs_an_explicit_yes() {
+        for input in ["", "\n", "  \n"] {
+            let err = read_append_answer(&mut input.as_bytes(), false).unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.contains("--yes") && text.contains("--dry-run"),
+                "{text}"
+            );
+        }
+        assert!(read_append_answer(&mut &b"y\n"[..], false).unwrap());
+        assert!(read_append_answer(&mut &b"YES\n"[..], false).unwrap());
+        assert!(!read_append_answer(&mut &b"n\n"[..], false).unwrap());
     }
 }

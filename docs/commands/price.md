@@ -22,7 +22,7 @@ rledger price [OPTIONS] [SYMBOL]...
 
 | Option | Description |
 |--------|-------------|
-| `-f, --file <FILE>` | Beancount file to discover commodities from |
+| `-f, --file <FILE>` | Beancount file to discover commodities from. Unlike the other commands, where `-f` is `--format`, `price` has no `--format` (`-b` prints price directives) |
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
 | `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today). Historical dates need a source with historical support: `yahoo`, `coinbase` (from 2015-01-01), `ratesapi` and `ecb` (EU-reference history from 1999-01-04), `alphavantage` (stock tickers only), `quandl`, `tsp`, `eastmoneyfund`, or an external `--source-cmd` that honors `RLEDGER_DATE`. Latest-only sources (coincap, coinmarketcap, oanda) accept only today's date and refuse past or future dates instead of mislabeling the current quote (#1794, #1802). |
 | `-b, --beancount` | Output as beancount price directives |

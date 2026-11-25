@@ -351,6 +351,22 @@ fn query_returns_structured_json() {
     assert_eq!(rows.as_array().unwrap().len(), 2, "two accounts: {env}");
 }
 
+/// The file may follow the report name, as in `rledger report`. It used to
+/// be dropped as an extra argument, so the report ran on the configured
+/// default ledger (or failed for want of one).
+#[test]
+fn test_build_report_args_file_after_report_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    let file = file.to_str().unwrap();
+
+    let (code, after) = run(&["report", "balances", file, "--format", "json"]);
+    assert_eq!(code, 0, "{after}");
+    let (_, before) = run(&["report", file, "balances", "--format", "json"]);
+    assert_eq!(after["result"]["data"], before["result"]["data"], "{after}");
+    assert!(after["result"]["data"].is_array(), "{after}");
+}
+
 #[test]
 fn report_balances_returns_json_data() {
     let tmp = tempfile::tempdir().unwrap();

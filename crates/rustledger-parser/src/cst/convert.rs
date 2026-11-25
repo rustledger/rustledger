@@ -321,21 +321,24 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             }
             // State-only side effects: mutate the inherited
             // tag/meta sets that apply to subsequent directives.
-            // A header with an invalid token on it is never reduced by
+            // A header line with any error on it is never reduced by
             // beancount's grammar, so it pushes or pops nothing there: a later
             // `poptag` of the tag is reported as absent, an earlier push stays
-            // unbalanced (`header_has_invalid_token`).
+            // unbalanced, and a pop of nothing pushed reports no absent key
+            // (`push_pop_header_fails`). Errors and pushed spans start at the
+            // directive's own line, past the blank and comment lines stored at
+            // the start of the node (`node_content_span`).
             ast::Directive::Pushtag(node) => {
-                if !header_has_invalid_token(node.syntax())
+                if !push_pop_header_fails(node.syntax(), stripped, &mut header_tokens)
                     && let Some(tag_token) = node.tag()
                 {
-                    let span = node_span(node.syntax(), bom_offset);
+                    let span = node_content_span(node.syntax(), bom_offset);
                     tag_stack.push((Tag::new(tag_token.text().trim_start_matches('#')), span));
                 }
                 None
             }
             ast::Directive::Poptag(node) => {
-                if !header_has_invalid_token(node.syntax())
+                if !push_pop_header_fails(node.syntax(), stripped, &mut header_tokens)
                     && let Some(tag_token) = node.tag()
                 {
                     let name = tag_token.text().trim_start_matches('#');
@@ -344,25 +347,25 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                     } else {
                         errors.push(crate::ParseError::new(
                             crate::ParseErrorKind::InvalidPoptag(name.to_string()),
-                            node_span(node.syntax(), bom_offset),
+                            node_content_span(node.syntax(), bom_offset),
                         ));
                     }
                 }
                 None
             }
             ast::Directive::Pushmeta(node) => {
-                if !header_has_invalid_token(node.syntax())
+                if !push_pop_header_fails(node.syntax(), stripped, &mut header_tokens)
                     && let Some(key_token) = node.key()
                     && let Some(value) = pushmeta_value(node.syntax())
                 {
                     let key = key_token.text_without_colon().to_string();
-                    let span = node_span(node.syntax(), bom_offset);
+                    let span = node_content_span(node.syntax(), bom_offset);
                     meta_stack.push((key, value, span));
                 }
                 None
             }
             ast::Directive::Popmeta(node) => {
-                if !header_has_invalid_token(node.syntax())
+                if !push_pop_header_fails(node.syntax(), stripped, &mut header_tokens)
                     && let Some(key_token) = node.key()
                 {
                     let key = key_token.text_without_colon().to_string();
@@ -371,7 +374,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                     } else {
                         errors.push(crate::ParseError::new(
                             crate::ParseErrorKind::InvalidPopmeta(key),
-                            node_span(node.syntax(), bom_offset),
+                            node_content_span(node.syntax(), bom_offset),
                         ));
                     }
                 }
@@ -474,16 +477,22 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         }
     }
 
-    // Unclosed pushtag/pushmeta at EOF - legacy emits one error
-    // per leftover stack entry, pointing at the originating push
-    // directive's span.
+    // Unclosed pushtag/pushmeta at EOF, pointing at the originating push
+    // directive's own line. One error per leftover pushed tag, but one per
+    // leftover KEY: beancount 3.2.3 reports a key pushed twice and never
+    // popped once (`Unbalanced metadata key 'kk'; leftover metadata 'v, w'`),
+    // so the key's first leftover push carries it.
     for (tag, span) in &tag_stack {
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::UnclosedPushtag(tag.as_str().to_string()),
             *span,
         ));
     }
+    let mut unclosed_keys = std::collections::HashSet::new();
     for (key, _, span) in &meta_stack {
+        if !unclosed_keys.insert(key.as_str()) {
+            continue;
+        }
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::UnclosedPushmeta(key.clone()),
             *span,
@@ -1608,7 +1617,7 @@ fn convert_transaction(
     if header_has_pipe(node) {
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::DeprecatedPipeSymbol,
-            node_span(node.syntax(), bom_offset),
+            node_content_span(node.syntax(), bom_offset),
         ));
     }
 
@@ -3396,7 +3405,9 @@ fn apply_inherited_state(
 /// `pushmeta kk: "v" !` or `1 2`) pushes nothing, as in beancount, whose
 /// grammar rejects the directive; its `popmeta` then
 /// reports the absent key, as beancount does. The syntax error itself comes
-/// from the header-line check. An expression with no value (`1/0`) is
+/// from the header-line check. Every such line but a malformed expression is
+/// refused before this is asked, by `push_pop_header_fails`, the rule all four
+/// push and pop directives share (#2995). An expression with no value (`1/0`) is
 /// grammatical, so it pushes the key with no value, the same `MetaValue` a
 /// metadata line gets (the error comes from [`unevaluable_meta_value`]).
 fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
@@ -3412,35 +3423,9 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
     if cost_region_read(&value_region) == Some(ArithRead::Malformed) {
         return None;
     }
-    // Any syntax error on the line pushes nothing, as in beancount, so the
-    // matching `popmeta` then reports the absent key. Ask the same rule that
-    // reports the error, in node-relative offsets over the node's own text.
-    let text = node.text().to_string();
-    let start = usize::from(node.text_range().start());
-    let mut end = text.len();
-    let mut header = Vec::new();
-    for t in &tokens {
-        let range =
-            usize::from(t.text_range().start()) - start..usize::from(t.text_range().end()) - start;
-        // Leading blank lines belong to the node too: skip them before
-        // looking for the NEWLINE that ends the line, as the header check does.
-        if header.is_empty() && (is_trivia_kind(t.kind()) || t.kind() == crate::SyntaxKind::BOM) {
-            continue;
-        }
-        if t.kind() == crate::SyntaxKind::NEWLINE {
-            end = range.start;
-            break;
-        }
-        header.push((t.kind(), range));
-    }
-    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some() {
-        return None;
-    }
-    // A date that is not a real calendar date (`pushmeta kk: 2024-02-30`) is
-    // a lexer error in beancount, which pushes nothing (#2811).
-    if invalid_value_date(&header, &text, false).is_some() {
-        return None;
-    }
+    // Any other error on the line (a syntax error, an invalid token, a date
+    // that is not a calendar date, #2811) pushes nothing either; the caller
+    // asks `push_pop_header_fails` first.
     Some(meta_value_from_tokens(tokens.into_iter()))
 }
 
@@ -4041,20 +4026,35 @@ fn transaction_header_check(
     }
 }
 
-/// Whether `node`'s header line holds an invalid token (`ERROR_TOKEN`). The
-/// line is read by `header_line_tokens`, the header walk the header check
+/// Whether beancount's grammar fails on a `pushtag`, `poptag`, `pushmeta` or
+/// `popmeta` header line, so the directive changes no state there (#2995).
+///
+/// The line is read by `header_line_tokens`, the header walk the header check
 /// uses: past the blank and comment lines stored at the start of the node,
-/// up to the `NEWLINE` that ends the header. beancount's grammar never reduces
-/// such a line to its directive, so a `pushtag`, `poptag`, `pushmeta` or
-/// `popmeta` with one changes no state there (`pushtag" #t`, `pushtag #t $x`).
-/// An `open` asks `holds_an_invalid_token` instead, as its metadata lines
-/// belong to the same statement. Walks GREEN children only.
-fn header_has_invalid_token(node: &crate::SyntaxNode) -> bool {
-    let mut tokens = Vec::new();
-    header_line_tokens(node, &mut tokens);
+/// up to the `NEWLINE` that ends the header. It fails on an invalid token
+/// (`ERROR_TOKEN`: `pushtag" #t`, `pushtag #t $x`), on any token the
+/// statement does not take (`first_header_defect`, the rule that reports it:
+/// `poptag #a #b`, `poptag #a 2024-01-01`, `popmeta kk: 5`), and on a date
+/// that is not a calendar date anywhere on the line (`invalid_value_date`: the
+/// lexer raises it, so the parser never sees the token, `pushmeta kk:
+/// 2024-02-30`). beancount 3.2.3 then neither pushes nor pops: a later
+/// `poptag` of the tag is `Attempting to pop absent tag`, an earlier push
+/// stays unbalanced, and a pop of nothing pushed reports nothing more. An
+/// `open` asks `holds_an_invalid_token` instead, as its metadata lines belong
+/// to the same statement. `tokens` is scratch space. Walks GREEN children
+/// only.
+fn push_pop_header_fails(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) -> bool {
+    let end = header_line_tokens(node, tokens);
     tokens
         .iter()
         .any(|(kind, _)| *kind == crate::SyntaxKind::ERROR_TOKEN)
+        || super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)
+            .is_some()
+        || invalid_value_date(tokens, stripped, false).is_some()
 }
 
 /// A directive's header-line tokens into `tokens` (cleared first): its direct
@@ -5961,6 +5961,24 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
     Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
 }
 
+/// [`node_span`] from the node's first content token: past the blank and
+/// comment lines stored at the start of a directive node, so an error
+/// reported at the directive lands on its own line, where beancount reports
+/// it, not on a comment above it (#2995). A node of trivia alone keeps its
+/// start. The one rule for every directive-level error span and for
+/// `fixup_directive_spans`.
+fn node_content_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
+    let span = node_span(node, bom_offset);
+    let start = node
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| !is_trivia_kind(t.kind()))
+        .map_or(span.start, |t| {
+            (u32::from(t.text_range().start()) + bom_offset) as usize
+        });
+    Span::new(start, span.end)
+}
+
 /// The tokens [`value_groups`] skips: whitespace, line ends and `;` comments.
 /// Every caller of the walk (custom values, pushmeta values, and the
 /// expression check in both trees) filters with this one predicate, so they
@@ -6103,14 +6121,7 @@ fn fixup_directive_spans(
             .filter(|n| ast::Directive::can_cast(n.kind()))
             .map(|n| {
                 let raw_start: u32 = n.text_range().start().into();
-                let content_start = n
-                    .descendants_with_tokens()
-                    .filter_map(rowan::NodeOrToken::into_token)
-                    .find(|t| !is_trivia_kind(t.kind()))
-                    .map_or_else(
-                        || (raw_start + bom_offset) as usize,
-                        |t| (u32::from(t.text_range().start()) + bom_offset) as usize,
-                    );
+                let content_start = node_content_span(&n, bom_offset).start;
                 ((raw_start + bom_offset) as usize, content_start)
             }),
     );

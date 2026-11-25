@@ -671,10 +671,13 @@ fn convert_open(
         // beancount checks the booking method when it builds the directive,
         // which it never does for a statement with an invalid token in it, on
         // its header or a metadata line: the token is its only error there
-        // (`open Assets:C$;c "x"`, #2872). Here the directive is kept, as
-        // one with an invalid token is, without the booking method, and the
-        // token's own error is the one reported.
-        if !holds_an_invalid_token(node.syntax().green()) {
+        // (`open Assets:C$;c "x"`, #2872). Nor does it for one whose body
+        // holds a failed line (#2996, `open_body_holds_a_failed_line`). Here
+        // the directive is kept, as one with an invalid token is, without the
+        // booking method, and the failure's own error is the one reported.
+        if !holds_an_invalid_token(node.syntax().green())
+            && !open_body_holds_a_failed_line(node.syntax())
+        {
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::InvalidBookingMethod(b),
                 span,
@@ -692,6 +695,116 @@ fn convert_open(
         meta: meta.into(),
     };
     Some(Spanned::new(Directive::Open(open), span))
+}
+
+/// Whether the body of `node`, an `open`, holds a line at which beancount's
+/// statement fails, other than by an invalid token (`holds_an_invalid_token`
+/// answers for that), so its grammar never builds the `open` and never checks
+/// its booking method (#2996):
+///
+/// - a date that is no calendar date on a metadata line (`  kk: 2024-02-30`):
+///   beancount's lexer raises there;
+/// - a metadata line its grammar rejects (`  kk: 1 2`, `  kk: USD EUR`), by
+///   the rule `meta_entry_check` reports it with (`first_meta_defect`). A
+///   defect at a comma is left out: that rule is stricter than beancount on a
+///   doubled thousands separator (`kk: 1,,000`), which beancount reads as one
+///   number and so builds the `open`;
+/// - an indented line right after the `open`'s last line that is not one of
+///   its metadata lines (`  2024-02-30 5`, `  $x`, `  hh`, `  5`,
+///   `  Assets:A 1 USD`, `  #t`, an indented directive). beancount's `open`
+///   takes only `key: value` lines in its body, so the statement fails at
+///   such a line, and the parser here leaves the line outside the node (an
+///   `ERROR_NODE`, or the indented directive's own node). Indented comment
+///   lines between are skipped, as beancount's lexer skips them; a blank line,
+///   even an indented one, or a column-0 line ends the statement in beancount
+///   first, which then builds the `open` and reports its booking method, so
+///   the line after one is not looked at.
+///
+/// A lowercase account component is not here: beancount checks the account
+/// name when it reads the token, before the statement fails, so it reports it
+/// either way. Walks the tokens after the node's last content token only up to
+/// the first line that is not an indented comment.
+fn open_body_holds_a_failed_line(node: &crate::SyntaxNode) -> bool {
+    use crate::SyntaxKind as K;
+    let mut last_content = None;
+    for t in node
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        if t.kind() == K::DATE && parse_date_token(t.text()).is_none() {
+            return true;
+        }
+        if !is_trivia_kind(t.kind()) {
+            last_content = Some(t);
+        }
+    }
+    if node.children().any(|entry| meta_line_fails(&entry)) {
+        return true;
+    }
+    // The end of the last content token's line.
+    let mut next = last_content.and_then(|t| t.next_token());
+    while let Some(t) = next.take_if(|t| t.kind() != K::NEWLINE) {
+        next = t.next_token();
+    }
+    // Each line after it: an indented comment goes on, an indented content
+    // token is the failed line, anything else ends the statement.
+    let mut line_start = next.and_then(|newline| newline.next_token());
+    while let Some(indent) = line_start.take_if(|t| t.kind() == K::WHITESPACE) {
+        match indent.next_token() {
+            Some(comment) if comment.kind() == K::COMMENT => {
+                line_start = comment
+                    .next_token()
+                    .filter(|t| t.kind() == K::NEWLINE)
+                    .and_then(|newline| newline.next_token());
+            }
+            Some(t) => return t.kind() != K::NEWLINE,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Whether `entry`, a `META_ENTRY`, is a metadata line beancount's grammar
+/// fails on (`open_body_holds_a_failed_line`): `first_meta_defect` finds a
+/// defect in it other than at a comma. Its tokens are the ones
+/// `meta_entry_check` reads, in the entry's own frame.
+///
+/// Asked only of an `open` that holds no invalid token
+/// (`holds_an_invalid_token`), so an `ERROR_TOKEN` left here is part of an
+/// account beancount reads with its BOMs (`kk: <BOM>Assets:D`,
+/// `is_bom_account_token`): a token of BOMs alone is read as the BOM it is
+/// and any other as the account.
+fn meta_line_fails(entry: &crate::SyntaxNode) -> bool {
+    use crate::SyntaxKind as K;
+    if entry.kind() != K::META_ENTRY {
+        return false;
+    }
+    let text = entry.text().to_string();
+    let mut tokens = Vec::new();
+    let mut end = text.len();
+    let mut p = 0;
+    for t in entry
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        let range = p..p + t.text().len();
+        p = range.end;
+        let kind = match t.kind() {
+            K::ERROR_TOKEN if t.text().chars().all(|c| c == crate::bom::BOM_CHAR) => K::BOM,
+            K::ERROR_TOKEN => K::ACCOUNT,
+            kind => kind,
+        };
+        if tokens.is_empty() && (is_trivia_kind(kind) || kind == K::BOM) {
+            continue;
+        }
+        if kind == K::NEWLINE {
+            end = range.start;
+            break;
+        }
+        tokens.push((kind, range));
+    }
+    super::directive_header::first_meta_defect(&tokens, end, &text)
+        .is_some_and(|d| d.found != Some(K::COMMA))
 }
 
 fn convert_close(

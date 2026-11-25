@@ -642,7 +642,14 @@ use crate::types::{Error, LedgerOptions};
 /// loader's cache is never saved for; parsed directives do not move. Both
 /// payloads here archive parse errors, and an older blob would keep serving
 /// the old ones.
-pub const CACHE_VERSION: u32 = 126;
+/// v127: loader v76, unchanged; parse errors move (#2996). An `open` whose
+/// body holds a failed line (`  2024-02-30 5`, `  hh`, `  kk: 1 2`) reports
+/// no invalid booking method, as in beancount, and is kept without it. Every
+/// such source has that line's parse error, before and after, which the
+/// loader's cache is never saved for; the kept `open` never reaches it. Both
+/// payloads here archive parse errors, and an older blob would keep serving
+/// the old ones.
+pub const CACHE_VERSION: u32 = 127;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

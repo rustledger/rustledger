@@ -141,10 +141,17 @@ Reinvested dividend (DRIP):
 
 ### Opening Balance
 
-When starting to track an existing account:
+When starting to track an existing account, pad the day before the first
+balance (a balance holds at the start of its day, so a pad on the same day
+comes too late for it):
+
+<!-- docs-test: check-clean -->
 
 ```beancount
-2024-01-01 pad Assets:Bank:Checking Equity:Opening-Balances
+2023-12-31 open Assets:Bank:Checking USD
+2023-12-31 open Equity:Opening-Balances
+
+2023-12-31 pad Assets:Bank:Checking Equity:Opening-Balances
 2024-01-01 balance Assets:Bank:Checking  5432.10 USD
 ```
 

@@ -636,25 +636,9 @@ impl Loader {
         // Build display context from directives and options
         let display_context = build_display_context(&directives, &options);
 
-        // E7006: `option "documents"` roots that do not exist.
-        //
-        // This runs here rather than in option parsing because a relative
-        // `documents` path is relative to the LEDGER FILE — the same rule
-        // beancount and `include` use — and only the source map knows where
-        // that file is. Doing it during parsing meant `Path::new(value)`,
-        // which asked about the process CWD: `rledger check sub/ledger.bean`
-        // reported a missing document root that was present, and the same
-        // ledger checked clean from inside `sub/` (#1999).
         let base_dir = source_map.files().first().map(SourceFile::dir);
-        let mut doc_warnings =
-            process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
-        options.locate(&mut doc_warnings);
-        options.warnings.extend(doc_warnings);
-        // E7010: an account option written as a full name. Here, once every
-        // option is set, because `name_*` can follow the account options in
-        // the file (#2408).
-        let rooted = options.rooted_leaf_warnings();
-        options.warnings.extend(rooted);
+        let post_load = post_load_option_warnings(&options, base_dir, self.fs.as_ref());
+        options.warnings.extend(post_load);
 
         Ok(LoadResult {
             directives,
@@ -997,6 +981,42 @@ impl Loader {
         Ok(())
     }
 }
+
+/// The option diagnostics raised once every option is set, rather than while
+/// one is being set: E7006 (a `documents` root that does not exist) and E7010
+/// (an account option written as a full name), in that order, each located.
+///
+/// The one place both are derived, for [`Loader::load`] and for a parse-cache
+/// hit ([`CacheEntry::into_load_result`]). The cache archives only the
+/// warnings raised while setting options and re-derives these, because E7006
+/// depends on the filesystem, not the parsed source: a cached answer would go
+/// stale when the directory is created or removed (#3002). Their codes are
+/// [`POST_LOAD_OPTION_CODES`].
+///
+/// E7006 runs here rather than in option parsing because a relative
+/// `documents` path is relative to the LEDGER FILE — the same rule beancount
+/// and `include` use — and only the source map knows where that file is
+/// (`base_dir`). Doing it during parsing meant `Path::new(value)`, which asked
+/// about the process CWD: `rledger check sub/ledger.bean` reported a missing
+/// document root that was present, and the same ledger checked clean from
+/// inside `sub/` (#1999). E7010 runs here because `name_*` can follow the
+/// account options in the file (#2408).
+pub(crate) fn post_load_option_warnings(
+    options: &Options,
+    base_dir: Option<&Path>,
+    fs: &dyn FileSystem,
+) -> Vec<OptionWarning> {
+    let mut warnings = process::document_root_warnings(&options.documents, base_dir, fs);
+    options.locate(&mut warnings);
+    warnings.extend(options.rooted_leaf_warnings());
+    warnings
+}
+
+/// The codes [`post_load_option_warnings`] raises, and nothing else does. The
+/// parse cache leaves these out of the warnings it archives, since a hit
+/// re-derives them; `cache_hit_reports_the_option_warnings_a_fresh_load_does`
+/// fails if this list and that function drift apart.
+pub(crate) const POST_LOAD_OPTION_CODES: [&str; 2] = ["E7006", "E7010"];
 
 /// Build a display context from loaded directives and options.
 ///

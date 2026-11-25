@@ -182,3 +182,118 @@ fn a_stale_version_is_refused_rather_than_reinterpreted() {
     );
     rustledger_loader::invalidate_cache_in(&file, &no_env());
 }
+
+/// Archive a fresh load as `rledger`'s `loadcache` does, then restore it.
+fn cache_round_trip(file: &std::path::Path) -> rustledger_loader::LoadResult {
+    let loaded = rustledger_loader::Loader::new().load(file).expect("load");
+    let entry = rustledger_loader::CacheEntry {
+        directives: loaded.directives.clone(),
+        options: rustledger_loader::CachedOptions::from(&loaded.options),
+        plugins: Vec::new(),
+        files: loaded
+            .source_map
+            .files()
+            .iter()
+            .map(|f| f.opened_path.to_string_lossy().into_owned())
+            .collect(),
+    };
+    rustledger_loader::save_cache_entry_in(file, &entry, &no_env()).expect("save");
+    let back = rustledger_loader::load_cache_entry_in(file, &no_env()).expect("load cache");
+    rustledger_loader::invalidate_cache_in(file, &no_env());
+    back.into_load_result()
+}
+
+/// A cache hit must report the option warnings a fresh load reports: the same
+/// codes, messages and sites, in the same order (#3002). Before, a load with
+/// any option warning was never cached, so an included file's `option
+/// "title"` (E7009) made every run re-parse.
+///
+/// Covers both kinds: the warnings raised while setting options, which the
+/// cache archives (E7001, E7003, E7009), and the post-load ones a hit
+/// re-derives (E7006, E7010). A code added to one kind without the other
+/// (`POST_LOAD_OPTION_CODES`) duplicates or drops a warning here.
+#[test]
+fn test_into_load_result_replays_option_warnings() {
+    let dir = fixture_dir();
+    let file = dir.path().join("main.beancount");
+    fs::write(
+        &file,
+        "option \"title\" \"Main\"\n\
+         option \"title\" \"Main again\"\n\
+         option \"no_such_option\" \"x\"\n\
+         option \"documents\" \"missing-docs\"\n\
+         option \"account_previous_balances\" \"Equity:Opening\"\n\
+         include \"child.beancount\"\n",
+    )
+    .expect("write main");
+    fs::write(
+        dir.path().join("child.beancount"),
+        "option \"title\" \"Child\"\n2020-01-01 open Assets:Cash\n",
+    )
+    .expect("write child");
+
+    let fresh = rustledger_loader::Loader::new().load(&file).expect("load");
+    let codes: Vec<&str> = fresh.options.warnings.iter().map(|w| w.code).collect();
+    for code in ["E7001", "E7003", "E7006", "E7009", "E7010"] {
+        assert!(
+            codes.contains(&code),
+            "fixture no longer raises {code}: {codes:?}"
+        );
+    }
+    assert!(
+        fresh.options.warnings.iter().all(|w| w.site.is_some()),
+        "every warning here has an `option` line to point at: {:?}",
+        fresh.options.warnings
+    );
+
+    let hit = cache_round_trip(&file);
+    assert_eq!(
+        hit.options.warnings, fresh.options.warnings,
+        "a cache hit must report exactly the option warnings of a fresh load"
+    );
+}
+
+/// E7006 asks the filesystem, not the source, so a hit re-derives it rather
+/// than replaying the archived answer: creating the missing documents root
+/// after the cache was written must clear it, as it clears a fresh load.
+#[test]
+fn test_into_load_result_rederives_document_root_warning() {
+    let dir = fixture_dir();
+    let file = dir.path().join("main.beancount");
+    fs::write(
+        &file,
+        "option \"documents\" \"docs\"\n2020-01-01 open Assets:Cash\n",
+    )
+    .expect("write main");
+
+    let loaded = rustledger_loader::Loader::new().load(&file).expect("load");
+    assert_eq!(
+        loaded
+            .options
+            .warnings
+            .iter()
+            .map(|w| w.code)
+            .collect::<Vec<_>>(),
+        ["E7006"],
+    );
+    let entry = rustledger_loader::CacheEntry {
+        directives: loaded.directives.clone(),
+        options: rustledger_loader::CachedOptions::from(&loaded.options),
+        plugins: Vec::new(),
+        files: vec![file.to_string_lossy().into_owned()],
+    };
+    rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
+
+    fs::create_dir(dir.path().join("docs")).expect("create docs");
+    let hit = rustledger_loader::load_cache_entry_in(&file, &no_env())
+        .expect("load cache")
+        .into_load_result();
+    let fresh = rustledger_loader::Loader::new().load(&file).expect("load");
+    assert!(
+        fresh.options.warnings.is_empty(),
+        "{:?}",
+        fresh.options.warnings
+    );
+    assert_eq!(hit.options.warnings, fresh.options.warnings);
+    rustledger_loader::invalidate_cache_in(&file, &no_env());
+}

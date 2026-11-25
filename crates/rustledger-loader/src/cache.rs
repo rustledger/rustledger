@@ -51,8 +51,13 @@ pub struct CachedPlugin {
 
 /// Cached options - a serializable subset of Options.
 ///
-/// Excludes transient parsing-time fields like `warnings`, but DOES
-/// persist `set_options`: it is load-bearing downstream, because
+/// Persists the warnings raised while the options were set (#3002), with
+/// the sites of the applied values, so a cache hit reports the same option
+/// diagnostics, at the same lines, as a fresh load. The post-load ones
+/// (`crate::POST_LOAD_OPTION_CODES`) are left out and re-derived on the hit
+/// by `crate::post_load_option_warnings`, since E7006 asks the filesystem.
+///
+/// Also persists `set_options`: it is load-bearing downstream, because
 /// `resolve_effective_booking_method` gates on
 /// `set_options.contains("booking_method")` to decide whether the
 /// file-level `option "booking_method"` wins over the API default.
@@ -104,6 +109,39 @@ pub struct CachedOptions {
     /// refuses queries over a ledger whose `booking_method` was rejected
     /// (#2911).
     pub rejected_booking_method: Option<CachedRejectedOption>,
+    /// [`Options::warnings`] raised while setting the options, in order:
+    /// every option warning except the post-load ones, which a hit re-derives
+    /// (see the struct-level note). Before #3002 a load with any option
+    /// warning was never cached at all, so one `E7009` made every run
+    /// re-parse.
+    pub warnings: Vec<CachedOptionWarning>,
+    /// Each applied value's `(option, value, (file, line))`, in the order
+    /// applied, so the re-derived E7006 / E7010 are located as on a fresh
+    /// load (`Options::locate`, `Options::site_of`).
+    pub value_sites: Vec<(String, String, (String, u64))>,
+}
+
+/// A cached [`crate::OptionWarning`].
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[allow(missing_docs)]
+pub struct CachedOptionWarning {
+    pub code: String,
+    pub message: String,
+    pub option: String,
+    pub value: String,
+    /// The option's file and 1-based line, when known.
+    pub site: Option<(String, u64)>,
+}
+
+fn cache_site(site: &crate::OptionSite) -> (String, u64) {
+    (site.file.clone(), site.line as u64)
+}
+
+fn restore_site((file, line): (String, u64)) -> crate::OptionSite {
+    crate::OptionSite {
+        file,
+        line: usize::try_from(line).unwrap_or(usize::MAX),
+    }
 }
 
 /// A cached [`crate::RejectedOption`].
@@ -121,10 +159,7 @@ impl From<&crate::RejectedOption> for CachedRejectedOption {
         Self {
             key: rejected.key.clone(),
             value: rejected.value.clone(),
-            site: rejected
-                .site
-                .as_ref()
-                .map(|site| (site.file.clone(), site.line as u64)),
+            site: rejected.site.as_ref().map(cache_site),
         }
     }
 }
@@ -134,10 +169,7 @@ impl From<CachedRejectedOption> for crate::RejectedOption {
         Self {
             key: cached.key,
             value: cached.value,
-            site: cached.site.map(|(file, line)| crate::OptionSite {
-                file,
-                line: usize::try_from(line).unwrap_or(usize::MAX),
-            }),
+            site: cached.site.map(restore_site),
         }
     }
 }
@@ -187,6 +219,23 @@ impl From<&Options> for CachedOptions {
                 .collect(),
             set_options: opts.set_options.iter().cloned().collect(),
             rejected_booking_method: opts.rejected_booking_method.as_ref().map(Into::into),
+            warnings: opts
+                .warnings
+                .iter()
+                .filter(|w| !crate::POST_LOAD_OPTION_CODES.contains(&w.code))
+                .map(|w| CachedOptionWarning {
+                    code: w.code.to_string(),
+                    message: w.message.clone(),
+                    option: w.option.clone(),
+                    value: w.value.clone(),
+                    site: w.site.as_ref().map(cache_site),
+                })
+                .collect(),
+            value_sites: opts
+                .value_sites()
+                .iter()
+                .map(|(k, v, site)| (k.clone(), v.clone(), cache_site(site)))
+                .collect(),
         }
     }
 }
@@ -230,6 +279,29 @@ impl From<CachedOptions> for Options {
         opts.custom = cached.custom.into_iter().collect();
         opts.set_options = cached.set_options.into_iter().collect();
         opts.rejected_booking_method = cached.rejected_booking_method.map(Into::into);
+        // A code this build does not know cannot come from a blob of this
+        // `CACHE_VERSION`: `OPTION_WARNING_CODES` is pinned against the
+        // sources that raise them.
+        opts.warnings = cached
+            .warnings
+            .into_iter()
+            .filter_map(|w| {
+                Some(crate::OptionWarning {
+                    code: crate::OptionWarning::static_code(&w.code)?,
+                    message: w.message,
+                    option: w.option,
+                    value: w.value,
+                    site: w.site.map(restore_site),
+                })
+            })
+            .collect();
+        opts.set_value_sites(
+            cached
+                .value_sites
+                .into_iter()
+                .map(|(k, v, site)| (k, v, restore_site(site)))
+                .collect(),
+        );
         opts
     }
 }
@@ -269,7 +341,10 @@ impl CacheEntry {
     /// that reads it.
     ///
     /// `errors` is empty by construction: the cache is only written for
-    /// error-free, warning-free loads.
+    /// loads with no load errors. Option warnings are not load errors: the
+    /// ones raised while setting options come back from the archive, and the
+    /// post-load ones (E7006, E7010) are re-derived here exactly as
+    /// [`crate::Loader::load`] derives them (#3002).
     ///
     /// Strings are NOT re-interned here; a caller that wants the memory
     /// dedup should call [`crate::reintern_directives`] on
@@ -316,7 +391,11 @@ impl CacheEntry {
             })
             .collect();
 
-        let options: Options = self.options.into();
+        let mut options: Options = self.options.into();
+        let base_dir = source_map.files().first().map(crate::SourceFile::dir);
+        let post_load =
+            crate::post_load_option_warnings(&options, base_dir, &crate::DiskFileSystem);
+        options.warnings.extend(post_load);
         let display_context = crate::build_display_context(&self.directives, &options);
 
         crate::LoadResult {
@@ -763,12 +842,19 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     ledger loaded with no error on v74, so a v74 blob of it would keep
 ///     serving that error-free load.
 ///
+/// v76: ARCHIVED LAYOUT moved, loader output unchanged (#3002).
+///     `CachedOptions` gains `warnings` and `value_sites`, so a load with an
+///     option warning (an `E7009` for an included file's `option "title"`)
+///     is cached and its warnings replayed on a hit, where it was never
+///     cached before. A v75 blob would be read at the wrong offsets.
+///     `rustledger-wasm` archives no `CachedOptions`, so only its pin moves.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 75;
+pub const CACHE_VERSION: u32 = 76;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1655,7 +1741,9 @@ mod tests {
         // archived encoding moves, so the arrays still hold.
         // v75 (#2951) rejects a second date in a transaction header; no
         // archived encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 75;
+        // v76 (#3002) adds option warnings to `CachedOptions`; no
+        // `CostNumber` encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 76;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1816,7 +1904,9 @@ mod tests {
         // archived layout moves, so the hash below is unchanged.
         // v75 (#2951) rejects a second date in a transaction header; no
         // archived layout moves, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 75;
+        // v76 (#3002) adds option warnings to `CachedOptions`; the
+        // `MetaValue` layout does not move, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 76;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

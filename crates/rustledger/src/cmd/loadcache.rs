@@ -86,10 +86,13 @@ pub fn load_result_cached(
         .load(file)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Save to cache unless disabled, or the load had errors / option
-    // warnings (E7001-E7006 are not stored, so caching would silently
-    // drop them on a later hit). Mirrors `check`.
-    if !cache_disabled && result.errors.is_empty() && result.options.warnings.is_empty() {
+    // Save to cache unless disabled, or the load had errors. Option warnings
+    // do not block it (#3002): `CachedOptions` archives the ones raised while
+    // setting options, and a hit re-derives the post-load ones (E7006,
+    // E7010), so a cached run reports the same option diagnostics as this
+    // one. Refusing to cache them used to make a single `E7009` (an included
+    // file's `option "title"`) re-parse the ledger on every run.
+    if !cache_disabled && result.errors.is_empty() {
         let files: Vec<String> = result
             .source_map
             .files()

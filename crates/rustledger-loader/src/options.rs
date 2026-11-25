@@ -673,7 +673,25 @@ impl OptionWarning {
     pub const fn phase(&self) -> &'static str {
         "parse"
     }
+
+    /// The `&'static str` for an option warning code read back as text (the
+    /// parse cache archives [`Self::code`] as a `String`), or `None` for a
+    /// code no option warning carries.
+    pub(crate) fn static_code(code: &str) -> Option<&'static str> {
+        OPTION_WARNING_CODES.iter().copied().find(|c| *c == code)
+    }
 }
+
+/// Every code an [`OptionWarning`] can carry.
+///
+/// The parse cache archives warnings with their code as text and maps it back
+/// through this list on a hit ([`OptionWarning::static_code`]), so a code
+/// missing here would be dropped from a cached run. Pinned by
+/// `tests::test_static_code_knows_every_code_raised`, which scans the
+/// sources that raise them.
+const OPTION_WARNING_CODES: &[&str] = &[
+    "E7001", "E7002", "E7003", "E7004", "E7005", "E7006", "E7008", "E7009", "E7010", "E7011",
+];
 
 /// Beancount file options.
 ///
@@ -1079,6 +1097,19 @@ impl Options {
             self.value_sites
                 .push((key.to_string(), value.to_string(), site));
         }
+    }
+
+    /// Every applied value's `(option, value, site)`, in the order applied:
+    /// what [`Self::locate`] and [`Self::site_of`] read. The parse cache
+    /// persists them so a cache hit can re-derive and locate the post-load
+    /// diagnostics (E7006, E7010) exactly as a fresh load does (#3002).
+    pub(crate) fn value_sites(&self) -> &[(String, String, OptionSite)] {
+        &self.value_sites
+    }
+
+    /// Restore [`Self::value_sites`] from the parse cache.
+    pub(crate) fn set_value_sites(&mut self, sites: Vec<(String, String, OptionSite)>) {
+        self.value_sites = sites;
     }
 
     /// Where `option` was last applied with `value`, when it was set through
@@ -1694,6 +1725,29 @@ impl Options {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every `"E70NN"` code written in the sources that raise option warnings
+    /// is one the parse cache can restore (#3002): a code missing from
+    /// `OPTION_WARNING_CODES` would vanish from a cached run.
+    #[test]
+    fn test_static_code_knows_every_code_raised() {
+        for source in [include_str!("options.rs"), include_str!("process.rs")] {
+            for (at, _) in source.match_indices("\"E70") {
+                let Some(code) = source.get(at + 1..at + 6) else {
+                    continue;
+                };
+                if source.as_bytes().get(at + 6) == Some(&b'"')
+                    && code[1..].bytes().all(|b| b.is_ascii_digit())
+                {
+                    assert_eq!(
+                        OptionWarning::static_code(code),
+                        Some(code),
+                        "{code} is raised but missing from OPTION_WARNING_CODES"
+                    );
+                }
+            }
+        }
+    }
 
     /// The phase both surfaces report for option warnings.
     ///

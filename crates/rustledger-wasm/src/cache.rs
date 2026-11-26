@@ -656,7 +656,17 @@ use crate::types::{Error, LedgerOptions};
 /// error, before and after, which the loader's cache is never saved for.
 /// Both payloads here archive parse errors, and an older blob would keep
 /// serving the old ones.
-pub const CACHE_VERSION: u32 = 128;
+/// v130 (v129 is #3027's): loader v76, unchanged; parse errors and the
+/// directives of a source with a parse error move (#2995). A `pushtag`,
+/// `poptag`, `pushmeta` or `popmeta` whose line has any error (an invalid
+/// date, a token the statement does not take) pushes or pops nothing, as in
+/// beancount, so the tags and metadata after it can change; a pop error and
+/// an unclosed push are on the directive's own line, not a comment above it,
+/// and a key pushed twice and never popped is one error. Every such source
+/// has a parse error, before and after, which the loader's cache is never
+/// saved for. Both payloads here archive parse errors and directives, and an
+/// older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 130;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

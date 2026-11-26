@@ -2609,6 +2609,48 @@ option "name_equity" "Капитал"
         );
     }
 
+    /// #3038: the editor's ledger merges the options beancount merges
+    /// across files in its breadth-first parse order, as `rledger` does:
+    /// `LedgerState` loads through the loader, which merges them once.
+    /// `main` includes `x` then `y`, and `x` includes `z`; bean-check 3.2.3
+    /// gives `[MMM, XXX, YYY, ZZZ]`, depth first it was `[MMM, XXX, ZZZ,
+    /// MMM, YYY]`. The top-level file's `USD` precision wins over `y`'s.
+    #[test]
+    fn test_ledger_state_merges_options_across_files_breadth_first() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        for (name, text) in [
+            (
+                "main.beancount",
+                "option \"operating_currency\" \"MMM\"\noption \"display_precision\" \"USD:0.01\"\n\
+                 include \"x.beancount\"\ninclude \"y.beancount\"\n",
+            ),
+            (
+                "x.beancount",
+                "option \"operating_currency\" \"XXX\"\ninclude \"z.beancount\"\n",
+            ),
+            (
+                "z.beancount",
+                "option \"operating_currency\" \"ZZZ\"\noption \"operating_currency\" \"MMM\"\n",
+            ),
+            (
+                "y.beancount",
+                "option \"operating_currency\" \"YYY\"\noption \"display_precision\" \"USD:0.001\"\n",
+            ),
+        ] {
+            std::fs::write(tempdir.path().join(name), text).expect("write");
+        }
+        let mut ledger_state = LedgerState::new();
+        ledger_state
+            .load(&tempdir.path().join("main.beancount"))
+            .expect("LedgerState::load should succeed");
+        let ledger = ledger_state.ledger().expect("a loaded ledger");
+        assert_eq!(
+            ledger.options.operating_currency,
+            ["MMM", "XXX", "YYY", "ZZZ"]
+        );
+        assert_eq!(ledger.options.display_precision.get("USD"), Some(&2));
+    }
+
     /// End-to-end regression test for #760 through `all_diagnostics`.
     ///
     /// The direct helper test `test_multi_buffer_overlay_replaces_multiple_files_issue_760`

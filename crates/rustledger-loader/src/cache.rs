@@ -881,12 +881,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     archives per directive now come in that order, so it bumps its own
 ///     version too.
 ///
+/// v78: CACHED VALUES changed (#3038). `operating_currency` is merged across
+///     files in beancount's breadth-first parse order without repeats, and
+///     `display_precision` takes the top-level (first parsed) file's value
+///     over an included file's (`Options::merge_across_files`); a v77 entry
+///     holds the depth-first, repeated, last-wins values. The layout is
+///     unchanged. `rustledger-wasm` archives the options it reports, so it
+///     bumps its own version too.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 77;
+pub const CACHE_VERSION: u32 = 78;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1780,7 +1788,9 @@ mod tests {
         // `CostNumber` encoding moves, so the arrays still hold.
         // v77 (#2936) adds `CacheEntry::includes`; no `CostNumber`
         // encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 77;
+        // v78 (#3038) merges cached option values in beancount's order; no
+        // archived encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 78;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1945,7 +1955,9 @@ mod tests {
         // `MetaValue` layout does not move, so the hash below is unchanged.
         // v77 (#2936) adds `CacheEntry::includes`; the `MetaValue`
         // layout does not move, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 77;
+        // v78 (#3038) merges cached option values in beancount's order; no
+        // archived layout moves, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 78;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

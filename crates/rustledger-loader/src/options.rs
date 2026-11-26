@@ -60,6 +60,8 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 ///   `display_precision` goes into the merged `dcontext`, and
 ///   `insert_pythonpath` becomes `pythonpath`. A sub-ledger naming its own
 ///   operating currency is describing itself, not overriding its includer.
+///   The first two are merged in beancount's parse order once every file
+///   is read ([`Options::merge_across_files`], #3038).
 ///   `documents` is not among them: beancount keeps only the top-level
 ///   file's, so an included root is ignored (E7009) and never scanned or
 ///   checked for existence (#2925).
@@ -93,6 +95,13 @@ const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "insert_pythonpath",
     "display_precision",
 ];
+
+/// The options whose values from every file beancount merges into one, in
+/// its breadth-first parse order (`loader.aggregate_options_map`): see
+/// [`Options::merge_across_files`]. `insert_pythonpath` is aggregated there
+/// too, into a sorted set of directories, so its order cannot differ (and
+/// rledger reads no Python path from it).
+const MERGED_ACROSS_FILES: &[&str] = &["operating_currency", "display_precision"];
 
 /// Options that can be specified multiple times.
 const REPEATABLE_OPTIONS: &[&str] = &[
@@ -827,6 +836,13 @@ pub struct Options {
     /// [`Self::locate`], E7010 in [`Self::rooted_leaf_warnings`]). Transient,
     /// like `warnings`: filled by [`Self::set_scoped_at`] and not cached.
     value_sites: Vec<(String, String, OptionSite)>,
+
+    /// The applied values of the options beancount merges across files
+    /// ([`MERGED_ACROSS_FILES`]), each with the id of the file that set it,
+    /// in the order applied. Filled by [`Self::set_in_file_at`], read and
+    /// emptied by [`Self::merge_across_files`], so a loaded ledger's
+    /// options hold none.
+    file_values: Vec<(usize, &'static str, String)>,
 }
 
 impl Default for Options {
@@ -1040,6 +1056,7 @@ impl Options {
             warnings: Vec::new(),
             rejected_booking_method: None,
             value_sites: Vec::new(),
+            file_values: Vec::new(),
         }
     }
 
@@ -1091,10 +1108,116 @@ impl Options {
         top_level: bool,
         site: Option<OptionSite>,
     ) {
+        self.set_scoped_at_applied(key, value, top_level, site);
+    }
+
+    /// [`Self::set_scoped_at`] for an option written in file `file_id` of
+    /// the load: the loader's way in. The values of the options beancount
+    /// merges across files ([`MERGED_ACROSS_FILES`]) are recorded with
+    /// their file, for [`Self::merge_across_files`] to order once every
+    /// file is read.
+    pub fn set_in_file_at(
+        &mut self,
+        file_id: usize,
+        key: &str,
+        value: &str,
+        top_level: bool,
+        site: Option<OptionSite>,
+    ) {
+        if self.set_scoped_at_applied(key, value, top_level, site)
+            && let Some(merged) = MERGED_ACROSS_FILES.iter().find(|k| **k == key)
+        {
+            self.file_values.push((file_id, merged, value.to_string()));
+        }
+    }
+
+    /// Merge the options beancount merges across files
+    /// ([`MERGED_ACROSS_FILES`]) in beancount's order, from the values
+    /// [`Self::set_in_file_at`] recorded. `ranks` is each file's place in
+    /// beancount's parse order, by file id
+    /// ([`crate::SourceMap::parse_ranks`]).
+    ///
+    /// The one place this merge is done: [`crate::Loader::load`] calls it
+    /// once every file is read, and every surface (the CLI, the LSP, the
+    /// WASM `Ledger`, the FFI) reads the loader's options, a parse-cache hit
+    /// the merged values the load archived (#3038). Beancount 3.2.3 parses
+    /// the files breadth first (`loader._parse_recursive`) and then, in
+    /// `loader.aggregate_options_map`:
+    ///
+    /// * `operating_currency`: the top-level file's list, then every other
+    ///   file's in parse order, `uniquify`d (the first occurrence keeps its
+    ///   place). The loader reads depth first, so `main` including `x` then
+    ///   `y`, with `x` including `z`, collected `x`, `z`, `y` where
+    ///   beancount has `x`, `y`, `z`, and it kept repeats.
+    /// * `display_precision`: each file fixes its currencies in its own
+    ///   display context (the last value in the file wins), and the
+    ///   contexts are merged into the top-level file's with
+    ///   `DisplayContext::update_from`, which leaves a fixed precision as it
+    ///   is. So the top-level file's value wins over an included file's.
+    ///   For a currency the top-level file does not fix, beancount 3.2.3
+    ///   crashes in that merge (`_FixedPrecisionContext` has no
+    ///   `fractional_dist`); rledger extends the same rule and takes the
+    ///   value of the first file in parse order that fixes it. The loader
+    ///   applied them depth first, last wins, so an included file's value
+    ///   overrode the top-level file's.
+    ///
+    /// Does nothing when no value was recorded (options set without the
+    /// loader).
+    pub fn merge_across_files(&mut self, ranks: &[usize]) {
+        if self.file_values.is_empty() {
+            return;
+        }
+        let mut values = std::mem::take(&mut self.file_values);
+        // Stable: a file's values keep the order it gives them.
+        values.sort_by_key(|(file, _, _)| ranks.get(*file).copied().unwrap_or(usize::MAX));
+        let mut currencies: Vec<String> = Vec::new();
+        let mut precisions: FxHashMap<String, u32> = FxHashMap::default();
+        for file in values.chunk_by(|a, b| a.0 == b.0) {
+            let mut in_file: Vec<(&str, u32)> = Vec::new();
+            for (_, key, value) in file {
+                match *key {
+                    "operating_currency" => {
+                        if !currencies.contains(value) {
+                            currencies.push(value.clone());
+                        }
+                    }
+                    "display_precision" => {
+                        // Recorded only when accepted, so this parses.
+                        if let Ok((currency, example)) = parse_tolerance_map(value) {
+                            in_file.push((currency, example.scale()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // The file's last value for a currency is the file's.
+            for (currency, places) in in_file.into_iter().rev() {
+                precisions.entry(currency.to_string()).or_insert(places);
+            }
+        }
+        if values
+            .iter()
+            .any(|(_, key, _)| *key == "operating_currency")
+        {
+            self.operating_currency = currencies;
+        }
+        if values.iter().any(|(_, key, _)| *key == "display_precision") {
+            self.display_precision = precisions;
+        }
+    }
+
+    /// [`Self::set_scoped_at`], returning whether the value was applied.
+    fn set_scoped_at_applied(
+        &mut self,
+        key: &str,
+        value: &str,
+        top_level: bool,
+        site: Option<OptionSite>,
+    ) -> bool {
         let mark = self.warnings.len();
         let applied = self.set_scoped_inner(key, value, top_level);
         let Some(site) = site else {
-            return;
+            return applied;
         };
         for warning in &mut self.warnings[mark..] {
             warning.site.get_or_insert_with(|| site.clone());
@@ -1111,6 +1234,7 @@ impl Options {
             self.value_sites
                 .push((key.to_string(), value.to_string(), site));
         }
+        applied
     }
 
     /// Every applied value's `(option, value, site)`, in the order applied:
@@ -1445,7 +1569,14 @@ impl Options {
     fn apply(&mut self, key: &str, value: &str) -> bool {
         match key {
             "title" => self.title = Some(value.to_string()),
-            "operating_currency" => self.operating_currency.push(value.to_string()),
+            "operating_currency" => {
+                // A currency named again keeps its first place: beancount
+                // `uniquify`s the list (`loader.aggregate_options_map`), the
+                // top-level file's own repeats included (#3038).
+                if !self.operating_currency.iter().any(|c| c == value) {
+                    self.operating_currency.push(value.to_string());
+                }
+            }
             "name_assets" | "name_liabilities" | "name_equity" | "name_income"
             | "name_expenses" => {
                 if !self.check_root(key, value) {
@@ -2317,6 +2448,87 @@ mod tests {
             opts.warnings
         );
         assert_eq!(opts.operating_currency, vec!["USD", "EUR"]);
+    }
+
+    /// #3038: a currency named twice in one file keeps its first place, as
+    /// beancount's `uniquify` keeps it: `USD, USD, EUR, USD` is `[USD, EUR]`
+    /// in bean-check 3.2.3. No warning, as there.
+    #[test]
+    fn test_set_operating_currency_repeated_is_listed_once() {
+        let mut opts = Options::new();
+        for currency in ["USD", "USD", "EUR", "USD"] {
+            opts.set("operating_currency", currency);
+        }
+        assert_eq!(opts.operating_currency, ["USD", "EUR"]);
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
+    }
+
+    /// #3038: [`Options::merge_across_files`] orders the values each file
+    /// set by the file's rank in beancount's parse order, keeping a file's
+    /// own order, and drops a currency already listed. Files by id `main`,
+    /// `x`, `z`, `y` (read depth first) rank `main, x, y, z`.
+    #[test]
+    fn test_merge_across_files_operating_currency_in_parse_order() {
+        let mut opts = Options::new();
+        for (file, currency) in [
+            (0, "MMM"),
+            (1, "XXX"),
+            (2, "ZZZ"),
+            (2, "USD"),
+            (3, "YYY"),
+            (3, "USD"),
+            (3, "MMM"),
+        ] {
+            opts.set_in_file_at(file, "operating_currency", currency, file == 0, None);
+        }
+        assert_eq!(opts.operating_currency, ["MMM", "XXX", "ZZZ", "USD", "YYY"]);
+        opts.merge_across_files(&[0, 1, 3, 2]);
+        assert_eq!(opts.operating_currency, ["MMM", "XXX", "YYY", "USD", "ZZZ"]);
+        assert!(opts.file_values.is_empty(), "the merge empties its record");
+        // Nothing left to merge: a second call changes nothing.
+        opts.merge_across_files(&[0, 3, 2, 1]);
+        assert_eq!(opts.operating_currency, ["MMM", "XXX", "YYY", "USD", "ZZZ"]);
+    }
+
+    /// #3038: `display_precision` takes the top-level file's value over an
+    /// included file's (beancount's `DisplayContext::update_from` keeps a
+    /// fixed precision), within a file the last value, and for a currency
+    /// only included files fix, the first in parse order.
+    #[test]
+    fn test_merge_across_files_display_precision_first_file_wins() {
+        let mut opts = Options::new();
+        for (file, value) in [
+            (0, "USD:0.1"),
+            (0, "USD:0.01"),
+            (1, "USD:0.001"),
+            (1, "EUR:0.001"),
+            (2, "EUR:0.1"),
+            (2, "CHF:0.1"),
+            (3, "CHF:0.0001"),
+        ] {
+            opts.set_in_file_at(file, "display_precision", value, file == 0, None);
+        }
+        // Applied in id order, last wins: an include overrode the top level.
+        assert_eq!(opts.display_precision.get("USD"), Some(&3));
+        // Ids `main, x, z, y` rank `main, x, y, z`.
+        opts.merge_across_files(&[0, 1, 3, 2]);
+        assert_eq!(opts.display_precision.get("USD"), Some(&2));
+        assert_eq!(opts.display_precision.get("EUR"), Some(&3));
+        assert_eq!(opts.display_precision.get("CHF"), Some(&4));
+        assert_eq!(opts.display_precision.len(), 3);
+    }
+
+    /// Options set without the loader record nothing, so the merge leaves
+    /// them as set.
+    #[test]
+    fn test_merge_across_files_without_records_changes_nothing() {
+        let mut opts = Options::new();
+        opts.set("operating_currency", "EUR");
+        opts.set("operating_currency", "USD");
+        opts.set("display_precision", "USD:0.01");
+        let before = opts.clone();
+        opts.merge_across_files(&[]);
+        assert_eq!(opts, before);
     }
 
     #[test]

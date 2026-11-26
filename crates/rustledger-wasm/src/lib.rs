@@ -858,6 +858,99 @@ include "accounts.beancount"
         }
     }
 
+    /// Drift guard (#3038): the options beancount merges across files come
+    /// out in its breadth-first parse order, each currency once, on every
+    /// surface that loads includes: `rledger` (the loader), the multi-file
+    /// `Ledger` (before and after a cache round trip) and ffi-wasi's
+    /// `load_file_with_fs` (the WIT component's options). `main` names `MMM`
+    /// and includes `x` then `y`; `x` names `XXX` and includes `z` (`ZZZ`,
+    /// `MMM`); `y` names `YYY`. bean-check 3.2.3 gives
+    /// `[MMM, XXX, YYY, ZZZ]`; depth first it was `[MMM, XXX, ZZZ, MMM,
+    /// YYY]`. `main` fixes `USD` at 2 places and `y` at 3: the top-level
+    /// file's wins.
+    #[test]
+    fn test_options_merged_across_files_agree_across_surfaces() {
+        use rustledger_loader::{Loader, VirtualFileSystem};
+        use std::path::Path;
+
+        let files = [
+            (
+                "main.beancount",
+                "option \"operating_currency\" \"MMM\"\noption \"display_precision\" \"USD:0.01\"\n\
+                 include \"x.beancount\"\ninclude \"y.beancount\"\n",
+            ),
+            (
+                "x.beancount",
+                "option \"operating_currency\" \"XXX\"\ninclude \"z.beancount\"\n",
+            ),
+            (
+                "z.beancount",
+                "option \"operating_currency\" \"ZZZ\"\noption \"operating_currency\" \"MMM\"\n",
+            ),
+            (
+                "y.beancount",
+                "option \"operating_currency\" \"YYY\"\noption \"display_precision\" \"USD:0.001\"\n",
+            ),
+        ];
+        let vfs = || {
+            let mut vfs = VirtualFileSystem::new();
+            for (name, text) in files {
+                vfs.add_file(name, text);
+            }
+            vfs
+        };
+        let expected = ["MMM", "XXX", "YYY", "ZZZ"];
+
+        // The loader every `rledger` command reads.
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs()))
+            .load(Path::new("main.beancount"))
+            .expect("loads");
+        assert_eq!(raw.options.operating_currency, expected, "loader");
+        assert_eq!(raw.display_context.get_precision("USD"), Some(2), "loader");
+
+        // The multi-file `Ledger`, before and after a cache round trip.
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let Ok(multi) = parsed_ledger::Ledger::from_file_map(map, "main.beancount") else {
+            panic!("the multi-file ledger loads");
+        };
+        let Ok(bytes) = multi.serialize() else {
+            panic!("the ledger serializes");
+        };
+        let Ok(restored) = parsed_ledger::Ledger::from_cache(&bytes) else {
+            panic!("the ledger restores");
+        };
+        for (name, ledger) in [("Ledger", &multi), ("restored Ledger", &restored)] {
+            assert_eq!(
+                ledger.ledger_options().operating_currencies,
+                expected,
+                "{name}"
+            );
+        }
+
+        // ffi-wasi's file load, a native-only dependency.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(load) = rustledger_ffi_wasi::helpers::load_file_with_fs(
+                Path::new("main.beancount"),
+                false,
+                Some(Box::new(vfs())),
+                true,
+            ) else {
+                panic!("ffi-wasi loads the file");
+            };
+            assert_eq!(load.options.operating_currency, expected, "ffi-wasi");
+            assert_eq!(
+                load.options.display_precision.get("USD"),
+                Some(&2),
+                "ffi-wasi"
+            );
+        }
+    }
+
     /// Every surface that reports `source`'s "Attempt to pad an entry with
     /// cost" answers `expected`: `rledger check`, the WASM `ParsedLedger`'s
     /// validation and `expandPads`, and the multi-file `Ledger`'s errors and

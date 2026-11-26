@@ -634,6 +634,12 @@ impl Loader {
         // directive list regardless of how it was produced. Closes #1071.
         dedup::reintern_directives(&mut directives);
 
+        // The options beancount merges across files, in its breadth-first
+        // parse order rather than the depth-first order they were read in
+        // (#3038). Before the display context, which reads
+        // `display_precision`, and before the cache archives the options.
+        options.merge_across_files(&source_map.parse_ranks());
+
         // Build display context from directives and options
         let display_context = build_display_context(&directives, &options);
 
@@ -755,7 +761,7 @@ impl Loader {
                 file: file.path.display().to_string(),
                 line: file.line_col(span.start).0,
             });
-            options.set_scoped_at(&key, &value, top_level, site);
+            options.set_in_file_at(file_id, &key, &value, top_level, site);
         }
 
         // Process plugins

@@ -3927,6 +3927,15 @@ fn unexpected_body_input(line_start: u32, end: u32, bom_offset: u32) -> crate::P
 /// #2575 rledger silently added them to the transaction, so a file beancount
 /// refuses loaded clean, with a tag beancount would not report.
 ///
+/// Deliberately not where beancount reports it: beancount's builder raises
+/// the error at the transaction it is building, so bean-check puts it on the
+/// transaction's HEADER line. rledger reports it on the tag line itself, the
+/// line the mistake is on and the one to edit (Python compatibility policy:
+/// a fixable divergence; pinned by
+/// `test_parse_tags_after_first_posting_are_reported_on_the_tag_line`, and
+/// the parse-error parity harness moves beancount's report to the tag line,
+/// `move_tags_after_posting_errors`).
+///
 /// Shared by the red ([`transaction_body_check`]) and green
 /// (`green::tl_transaction_body_check`) body checks, so the two report the
 /// same words over the same span.
@@ -4735,8 +4744,11 @@ fn transaction_body_check(
         let mut saw_header_content = false;
         let mut line_start: Option<u32> = None;
         let mut line_has_content = false;
-        // #2575: a tag/link line after the first posting is an error. The
-        // line's tag and link tokens, as written, for the message.
+        // #2575: a tag/link line after the first posting is an error, on the
+        // tag line itself, where beancount reports it on the header line: a
+        // deliberate divergence, the error points at the mistake
+        // (`tags_after_posting_error`). The line's tag and link tokens, as
+        // written, for the message.
         let mut posting_seen = false;
         let mut line_tags = String::new();
         for el in child.children_with_tokens() {

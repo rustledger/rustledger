@@ -1245,7 +1245,9 @@ fn tl_transaction_body_check(
     let mut saw_header_content = false;
     let mut line_start: Option<usize> = None;
     let mut line_has_content = false;
-    // #2575, mirroring red `transaction_body_check`.
+    // #2575, mirroring red `transaction_body_check`: reported on the tag
+    // line, not the header line beancount uses, on purpose
+    // (`tags_after_posting_error`).
     let mut posting_seen = false;
     let mut line_tags = String::new();
     let mut offset = base;

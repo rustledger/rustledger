@@ -433,3 +433,60 @@ fn test_parse_indented_comment_after_a_column_0_comment_is_accepted() {
     // and an error as in beancount.
     assert_counts(&[("option \"title\" \"x\"\n  ; c\n".to_string(), vec![(2, 1)])]);
 }
+
+/// An orphan indented line (one no entry continues: at the top of the file,
+/// after a blank line or a column-0 comment, after a directive that takes no
+/// metadata) fails at its indent, `syntax error, unexpected INDENT`, and
+/// every lexer error on it is one more error there: `  $x` is two errors, the
+/// indent's and `Invalid token: '$x'`. rledger's line error stands for the
+/// indent, and the line's first invalid token gets an error of its own,
+/// which names it.
+#[test]
+fn test_parse_orphan_indented_line_reports_its_indent_and_its_invalid_tokens() {
+    assert_counts(&with_crlf(vec![
+        ("  $x\n".to_string(), vec![(1, 2)]),
+        ("  $x".to_string(), vec![(1, 2)]),
+        ("\t$\n".to_string(), vec![(1, 2)]),
+        ("\n  $x\n".to_string(), vec![(2, 2)]),
+        ("; c\n  $x\n".to_string(), vec![(2, 2)]),
+        (format!("{P}\n  $x\n"), vec![(3, 2)]),
+        ("option \"title\" \"t\"\n  $x\n".to_string(), vec![(2, 2)]),
+        ("  $x y\n".to_string(), vec![(1, 3)]),
+        ("  \"abc\n".to_string(), vec![(1, 2)]),
+        ("  1,50\n".to_string(), vec![(1, 2)]),
+        ("  Assets:A 1,50 USD\n".to_string(), vec![(1, 2)]),
+        ("  2024-01-01 $\n".to_string(), vec![(1, 2)]),
+        // The window from the first line keeps the second to its lexer's.
+        ("  $x\n  $y\n".to_string(), vec![(1, 2), (2, 1)]),
+        // Controls: no invalid token, and an invalid date, already its own.
+        ("  !\n".to_string(), vec![(1, 1)]),
+        ("  2024-02-30\n".to_string(), vec![(1, 2)]),
+        // Inside an entry the indent is taken: the invalid token alone.
+        (format!("{P}  $x\n"), vec![(2, 1)]),
+    ]));
+    let errors = parse("  $x\n").errors;
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message().contains("invalid token '$x'")),
+        "{errors:?}"
+    );
+}
+
+/// After an indented comment rledger accepts (above), bison is still
+/// recovering from that comment's indent: its line end and each gap line
+/// after it are shifts, so an orphan indented line within two of them is
+/// quiet but for its lexer errors, and one after two reports its indent too.
+#[test]
+fn test_parse_orphan_indented_line_after_an_accepted_indented_comment() {
+    assert_counts(&with_crlf(vec![
+        ("  ; c\n  $x\n".to_string(), vec![(2, 1)]),
+        ("  ; c\n  ; d\n  $x\n".to_string(), vec![(3, 1)]),
+        ("  ; c\n\n  $x\n".to_string(), vec![(3, 1)]),
+        ("  ; c\n; d\n  $x\n".to_string(), vec![(3, 1)]),
+        ("  ; c\n  Assets:A $\n".to_string(), vec![(2, 1)]),
+        ("  ; c\n  !\n".to_string(), vec![]),
+        ("  ; c\n\n\n  $x\n".to_string(), vec![(4, 2)]),
+        ("  ; c\n* h\n* h\n  $x\n".to_string(), vec![(4, 2)]),
+    ]));
+}

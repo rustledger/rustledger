@@ -1113,9 +1113,9 @@ impl Options {
 
     /// [`Self::set_scoped_at`] for an option written in file `file_id` of
     /// the load: the loader's way in. The values of the options beancount
-    /// merges across files ([`MERGED_ACROSS_FILES`]) are recorded with
-    /// their file, for [`Self::merge_across_files`] to order once every
-    /// file is read.
+    /// merges across files (`operating_currency` and `display_precision`,
+    /// the private `MERGED_ACROSS_FILES`) are recorded with their file, for
+    /// [`Self::merge_across_files`] to order once every file is read.
     pub fn set_in_file_at(
         &mut self,
         file_id: usize,
@@ -1132,7 +1132,8 @@ impl Options {
     }
 
     /// Merge the options beancount merges across files
-    /// ([`MERGED_ACROSS_FILES`]) in beancount's order, from the values
+    /// (`operating_currency` and `display_precision`) in beancount's order,
+    /// from the values
     /// [`Self::set_in_file_at`] recorded. `ranks` is each file's place in
     /// beancount's parse order, by file id
     /// ([`crate::SourceMap::parse_ranks`]).

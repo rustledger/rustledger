@@ -490,3 +490,130 @@ fn test_parse_orphan_indented_line_after_an_accepted_indented_comment() {
         ("  ; c\n* h\n* h\n  $x\n".to_string(), vec![(4, 2)]),
     ]));
 }
+
+/// An invalid account is rledger's line error for a line it cannot read,
+/// named for the account on it (P0006). beancount's lexer reads that account
+/// into an `ACCOUNT` (its account rules admit any non-ASCII character), so
+/// its grammar fails on the line as on any other, and bison's recovery keeps
+/// the lines after it quiet as after any failure: an indented line, at its
+/// indent, a column-0 line after a statement it cannot start, each for three
+/// shifts. Not on a line holding a stray `\r`, where no recovery is modeled.
+#[test]
+fn test_parse_invalid_account_starts_the_recovery_window() {
+    assert_counts(&with_crlf(vec![
+        (
+            "    Assets:FundoInclusão:X 1 BRL\n    Assets:Eventos:Y\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "    Assets:Café 1 BRL\n    Assets:B\n\n  Assets:C\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (format!("{P}  Assets:Café 1 USD\n5 5\n"), vec![(2, 1)]),
+        ("Assets:Café 1\n5 5\n5 5\n".to_string(), vec![(1, 1)]),
+        ("Ü:A $x\n  Assets:B 1 USD\n".to_string(), vec![(1, 2)]),
+    ]));
+    let errors = parse("    Assets:Café 1 BRL\n    Assets:B\n").errors;
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.kind, rustledger_parser::ParseErrorKind::InvalidAccount(_))),
+        "{errors:?}"
+    );
+}
+
+/// An `option` bison builds whole inside a transaction's body leaves it at a
+/// `declarations`, so the indented line after it fails at its indent
+/// (`syntax error, unexpected INDENT`), where rledger reads that line as part
+/// of the transaction. On `  $x` that indent error is one more than the
+/// invalid token's, which rledger names already: the indent's is added.
+#[test]
+fn test_parse_indented_line_after_an_option_in_a_body_reports_its_indent() {
+    let src = format!("{T}  Assets:A 1 USD\n  option \"title\" \"x\"\n  $x\n  Assets:B\n");
+    assert_counts(&with_crlf(vec![
+        (src.clone(), vec![(3, 1), (4, 2)]),
+        (
+            format!("{T}  option \"title\" \"x\"\n  $x\n"),
+            vec![(2, 1), (3, 2)],
+        ),
+        (
+            format!("{T}  option \"title\" \"x\"\n  $x $y\n  Assets:B\n"),
+            vec![(2, 1), (3, 3)],
+        ),
+    ]));
+    let errors = parse(&src).errors;
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message().contains("unexpected indent")),
+        "{errors:?}"
+    );
+}
+
+/// An undated declaration bison's recovery starts mid-line, once it has
+/// shifted its first three tokens, is reported again where it then fails
+/// (`popmeta pushmeta kk: @` is two errors: at `pushmeta`, and at the `@`
+/// that `pushmeta kk:` cannot take), and the recovery starts over at that
+/// token. It builds nothing, so it changes no state.
+#[test]
+fn test_parse_undated_declaration_failing_mid_line_is_reported() {
+    assert_counts(&with_crlf(vec![
+        ("popmeta pushmeta kk: @\n".to_string(), vec![(1, 2)]),
+        ("~ popmeta kk: } $\n".to_string(), vec![(1, 3)]),
+        ("~ popmeta kk: @ x y\n".to_string(), vec![(1, 4)]),
+        ("x option \"title\" \"t\" 5\n".to_string(), vec![(1, 2)]),
+        ("~ pushmeta kk: \"v\" @\n".to_string(), vec![(1, 2)]),
+        ("~ pushmeta kk: TRUE ,\n".to_string(), vec![(1, 2)]),
+        ("~ pushmeta kk: price\n".to_string(), vec![(1, 2)]),
+        ("~ plugin \"a\" \"b\" \"c\"\n".to_string(), vec![(1, 2)]),
+        // The recovery from the second failure keeps the lines after it.
+        (
+            "popmeta pushmeta kk: @\n\t\n 1,50 2024-13-45\n".to_string(),
+            vec![(1, 2), (3, 2)],
+        ),
+        (
+            format!("{P}open ( pushmeta kk: price close\n* $\n Assets:a x\n"),
+            vec![(2, 2), (4, 2)],
+        ),
+    ]));
+    let errors = parse("popmeta pushmeta kk: @\n").errors;
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message().contains("unexpected \"@\"")),
+        "{errors:?}"
+    );
+}
+
+/// An indented line inside a recovery on which bison shifts a date that
+/// starts no statement (`    date: 2024-01-02`, a metadata line) does not
+/// end the recovery: its line end is not taken after the date, so the count
+/// is back at three, as after any indented line.
+#[test]
+fn test_parse_date_on_an_indented_line_does_not_end_the_recovery() {
+    assert_counts(&with_crlf(vec![(
+        format!(
+            "{T}  option \"title\" \"x\"\n  Assets:A 1 USD\n    date: 2024-01-02\n\n  Assets:a 1 USD\n"
+        ),
+        vec![(2, 1), (6, 1)],
+    )]));
+}
+
+/// A line's grammar failure is one error beside its lexer's where it is
+/// known to be bison's own: a column-0 statement failing among its first
+/// three tokens, or a body line failing at its first token (a dated
+/// directive's takes a key there, a transaction's also a posting, a tag or a
+/// link). So a misgrouped number after it is reported too. A posting whose
+/// flag bison takes (`Z`) fails at no token before the number.
+#[test]
+fn test_parse_grammar_failure_counts_beside_the_invalid_tokens() {
+    assert_counts(&with_crlf(vec![
+        (
+            "Assets:B Assets:a # 1.5 1,50 @@\n".to_string(),
+            vec![(1, 3)],
+        ),
+        (format!("{P}  open $ 1,50\n"), vec![(2, 3)]),
+        (format!("{T}  open $ 1,50\n"), vec![(2, 3)]),
+        (format!("{T}  Z   1,50  2 HOOL\n"), vec![(2, 1)]),
+    ]));
+}

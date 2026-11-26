@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 016af6e544e0fefcd493c242ff302ed0cf4013baa8a9d4f594f1feda39d6fd6b # shrinks to v = 0.00000000000000000001, n = 0.000000001, d = 0.1
+cc 42faa76659c75d6f37e794ebb71c1b5c10be03a62bf64951f3e7c5bdc037504c # shrinks to v = 0.0000000000000000000000001, n = 0.002, d = 4

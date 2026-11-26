@@ -1198,7 +1198,10 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// The slow path rounds to nearest with ties away from zero, which is what
 /// `Decimal::from_str` does; `rust_decimal` arithmetic on the fast path breaks
 /// ties to even. They can only disagree on an exact tie at the 29th
-/// significant digit, one unit in the last place.
+/// significant digit, one unit in the last place. The one tie that is NOT
+/// left to the fast path is the one whose even neighbor is zero, a share of
+/// exactly half of `1e-28`: that would make a nonzero share zero, so it is
+/// handed to the slow path, which gives `1e-28`.
 ///
 /// For an EXACT quotient whose ideal scale is non-negative, both paths give
 /// Python's ideal-exponent scale, `value.scale() + num.scale() - den.scale()`:
@@ -1260,14 +1263,27 @@ pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
     // scale IS `value.scale() + num.scale()`, so an exact share lands on
     // Python's scale for the whole of `value * num / den` (#2349). An inexact
     // one keeps `rust_decimal`'s precision; see the doc above.
+    //
+    // A ZERO share of a nonzero product falls through too. `rust_decimal`'s
+    // division breaks ties to even, so a quotient of exactly half the `1e-28`
+    // floor rounds to zero: `1e-25 * 0.002 / 4` is `5e-29`, which this path
+    // returned as `0`, a nonzero share flushed to nothing, the same class as
+    // the underflow above. The exact path rounds that tie away from zero, to
+    // `1e-28`. Every other zero quotient is below half the floor, and the
+    // exact path rounds it to zero as well, so the fall-through costs time
+    // only, and only for a zero share.
     if let Some(share) = value
         .checked_mul(num)
         .filter(|p| p.scale() == value.scale() + num.scale())
-        .and_then(|p| rustledger_core::checked_div_python_scale(p, den))
+        .and_then(|p| {
+            rustledger_core::checked_div_python_scale(p, den)
+                .filter(|share| !share.is_zero() || p.is_zero())
+        })
     {
         return Some(share);
     }
-    // Reached when the product overflowed, or was rounded to fit. Either way
+    // Reached when the product overflowed, was rounded to fit, or divided to
+    // a zero it should not be. Either way
     // the exact product is formed here and divided, and the result is rounded
     // once. A share genuinely below `Decimal`'s `1e-28` floor rounds to the
     // nearest representable value (`6e-29` to `1e-28`, `1e-29` to `0`), which

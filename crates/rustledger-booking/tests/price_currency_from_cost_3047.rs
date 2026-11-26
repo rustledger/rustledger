@@ -1,8 +1,8 @@
 //! A price written without a currency on a posting at cost takes the cost's
 //! currency (#3047, reported by tomelliot).
 //!
-//! Beancount's `booking_full.categorize_by_currency` fills it ("price_currency
-//! is MISSING and cost_currency is a str"), so `-2 STK {5 USD} @ 7` books with
+//! Beancount's `booking_full.categorize_by_currency` fills it (`price_currency
+//! is MISSING and cost_currency is a str`), so `-2 STK {5 USD} @ 7` books with
 //! the price `7 USD`. rledger kept a bare `NumberOnly` price, which every reader
 //! of the price annotation (BQL's `price`, `implicit_prices`) saw as no price.
 //!
@@ -58,7 +58,7 @@ fn stk(n: Decimal, spec: CostSpec) -> Posting {
 }
 
 /// `@ <number>` (or `@@ <number>`), with no currency.
-fn bare_number_price(kind: PriceKind, number: Decimal) -> PriceAnnotation {
+const fn bare_number_price(kind: PriceKind, number: Decimal) -> PriceAnnotation {
     let amount = Some(IncompleteAmount::NumberOnly(number));
     PriceAnnotation { kind, amount }
 }

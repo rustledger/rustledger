@@ -285,8 +285,9 @@ rledger explain E2001     # also e2001 or 2001
 rledger explain           # list codes
 ```
 
-It knows the validator's `E` codes; it does not explain parse (`P`) codes or
-every option code (see [errors.md](errors.md)).
+It knows every code `check` prints: the validator's `E` codes, the parse (`P`)
+codes, the loader's `E0xxx` include codes, the option (`E7xxx`) and plugin
+(`E8xxx`) codes, and `BOOK`, `PLUGIN` and `LOAD`.
 
 ## config, compat, completions
 

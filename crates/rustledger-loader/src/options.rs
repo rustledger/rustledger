@@ -656,8 +656,22 @@ impl OptionWarning {
     /// false there and here (#2925).
     #[must_use]
     pub fn is_error(&self) -> bool {
-        !matches!(self.code, "E7003" | "E7009" | "E7010" | "E7011")
+        Self::is_error_code(self.code)
     }
+
+    /// [`is_error`](Self::is_error) for a bare code, for a surface that
+    /// describes a code without holding a warning (`rledger explain`).
+    #[must_use]
+    pub fn is_error_code(code: &str) -> bool {
+        !matches!(code, "E7003" | "E7009" | "E7010" | "E7011")
+    }
+
+    /// Every code an option warning can carry, `E7001` through `E7011`.
+    ///
+    /// Pinned against the sources that raise them by the loader's tests, so
+    /// a surface that must know every code (`rledger explain`'s drift guard)
+    /// reads it from here rather than keeping its own list.
+    pub const ALL_CODES: &'static [&'static str] = OPTION_WARNING_CODES;
 
     /// The processing phase these belong to.
     ///

@@ -230,7 +230,7 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(
             name,
-            "ag-rledger check [<file>] [--format <format>] [-f <format>] [--json] [--verbose] [-v] [--quiet] \
+            "ag-rledger check [<file>] [--format <format>] [-f <format>] [--verbose] [-v] [--quiet] \
              [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>] [--plugin <path>] [--include-rules <rules>] \
              [--exclude-rules <rules>] [--cache-filename <file>] [--lint-min-confidence <n>] \
              [--file <file>] [--show-summary]",
@@ -1537,14 +1537,14 @@ fn outcome_json(command: &str, outcome: &Outcome) -> serde_json::Map<String, Val
 }
 
 fn build_check_args(req: &Req<'_>) -> Result<rustledger::cmd::check::Args, CommandError> {
-    let format = if bool_flag(req, "json", None) {
-        rustledger::cmd::check::OutputFormat::Json
-    } else {
-        match flag(req, "format", Some("f")).unwrap_or("text") {
-            "text" => rustledger::cmd::check::OutputFormat::Text,
-            "json" => rustledger::cmd::check::OutputFormat::Json,
-            other => return Err(invalid_enum("format", other, &["text", "json"])),
-        }
+    // Only `--format json` selects the JSON output. `--json` is agcli's
+    // reserved flag, documented in the root help as "accepted and ignored:
+    // output is always JSON"; `check` alone read it as `--format json`,
+    // which contradicted that help and every other command.
+    let format = match flag(req, "format", Some("f")).unwrap_or("text") {
+        "text" => rustledger::cmd::check::OutputFormat::Text,
+        "json" => rustledger::cmd::check::OutputFormat::Json,
+        other => return Err(invalid_enum("format", other, &["text", "json"])),
     };
 
     // Repeatable in rledger (`--lint a --lint b`), so merged when repeated

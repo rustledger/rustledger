@@ -67,9 +67,9 @@ JSON output is one object:
 
 `severity` is `error` or `warning`; `phase` is `parse` or `validate`; some
 diagnostics also carry a `hint`. Parse errors have `P` codes (`P0012`);
-validation errors have `E` codes. `rledger explain E3001` describes an `E` code
-and how to fix it, and `rledger explain` lists them. Fix parse errors first:
-one bad line can hide everything after it.
+validation errors have `E` codes. `rledger explain E3001` (or `P0012`)
+describes a code and how to fix it, and `rledger explain` lists them all. Fix
+parse errors first: one bad line can hide everything after it.
 
 See [references/errors.md](references/errors.md) for the common codes and
 their fixes.
@@ -140,7 +140,7 @@ Reports: `balances`, `balsheet`, `income`, `journal`, `register`, `holdings`,
 | `rledger lint closed-nonempty FILE` | advisory checks that `check` does not run |
 | `rledger price -f FILE --dry-run` | show which prices would be fetched (`-f` is the file here) |
 | `rledger split` / `rledger merge` | restructure files; `-n` previews and verifies |
-| `rledger explain [CODE]` | explain a validation error code |
+| `rledger explain [CODE]` | explain any diagnostic code `check` prints (`E`, `P`, `BOOK`, ...) |
 
 `rledger add` asks before appending. When stdin is not a terminal, only an
 explicit `y` on stdin appends, and no answer is an error, so pass `-y` to

@@ -779,6 +779,22 @@ impl<'src> StringLiterals<'src> {
     }
 }
 
+/// Byte offset of the first `\n` in `emitted` that ends a line, i.e. is not
+/// inside a string literal. `emitted` is formatter output starting at a line
+/// start (a directive or a posting), so it lexes as it will be read back.
+///
+/// The trailing-comment splices use this to find the end of the line a
+/// directive or posting header ends on. A plain `find('\n')` stops at a
+/// newline inside a multi-line string, and a comment spliced there becomes
+/// part of the string's value (#3046).
+fn first_line_end_outside_strings(emitted: &str) -> Option<usize> {
+    let mut strings = StringLiterals::new(emitted);
+    emitted
+        .match_indices('\n')
+        .map(|(at, _)| at)
+        .find(|&at| !strings.contains(at))
+}
+
 #[cfg(test)]
 thread_local! {
     /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
@@ -1662,15 +1678,18 @@ fn emit_directive(
         ast::Directive::Popmeta(d) => emit_popmeta(d, out),
         ast::Directive::Transaction(d) => emit_transaction(d, align, group, out),
     }
-    // Splice the same-line trailing comment in: find the FIRST '\n'
-    // after `len_before` (= end of the directive's header line in
-    // the emitted bytes) and insert `" ; comment"` before it. For
-    // single-line directives the first '\n' is also the only one
-    // and this lands the comment on the directive line. For multi-
-    // line transactions it lands the comment on the header line
-    // (where the source had it), not after the body.
+    // Splice the same-line trailing comment in: find the first '\n'
+    // after `len_before` that is OUTSIDE every string literal (= end of
+    // the directive's header line in the emitted bytes) and insert
+    // `" ; comment"` before it. For single-line directives that is the
+    // only line ending and this lands the comment on the directive line.
+    // For multi-line transactions it lands the comment on the header line
+    // (where the source had it), not after the body. A multi-line string
+    // in the header (narration, query, custom value, note, ...) carries
+    // `\n` bytes of its own; splicing before one of those moved the
+    // comment INTO the string and silently changed its value (#3046).
     if let Some(c) = trailing
-        && let Some(newline_rel) = out[len_before..].find('\n')
+        && let Some(newline_rel) = first_line_end_outside_strings(&out[len_before..])
     {
         let insert_at = len_before + newline_rel;
         let mut splice = String::with_capacity(c.len() + 1);
@@ -2528,9 +2547,11 @@ fn emit_posting(
     }
     out.push('\n');
     // Splice the trailing comment in BEFORE the posting-line
-    // NEWLINE (the first '\n' in the emitted posting region).
+    // NEWLINE: the first '\n' in the emitted posting region that is
+    // outside a string literal. A cost-spec label can be a multi-line
+    // string (`{"lab\nel"}`), and its `\n` is part of the value (#3046).
     if let Some(c) = trailing
-        && let Some(rel) = out[posting_start..].find('\n')
+        && let Some(rel) = first_line_end_outside_strings(&out[posting_start..])
     {
         let mut splice = String::with_capacity(c.len() + 1);
         splice.push(' ');

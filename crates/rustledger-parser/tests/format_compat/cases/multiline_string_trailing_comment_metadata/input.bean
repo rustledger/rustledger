@@ -1,0 +1,10 @@
+2020-01-01 open Assets:A EUR
+  key: "multi
+line"  ; c1
+2020-01-02 * "x"
+  txn-key: "a
+b"  ; c2
+  Assets:A  1 EUR
+    posting-key: "c
+d"  ; c3
+  Assets:A  -1 EUR

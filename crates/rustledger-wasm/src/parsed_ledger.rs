@@ -737,6 +737,12 @@ impl Ledger {
         )
     }
 
+    /// The options `getOptions` answers with.
+    #[cfg(test)]
+    pub(crate) const fn ledger_options(&self) -> &LedgerOptions {
+        &self.options
+    }
+
     /// The messages of the errors `getErrors` answers with.
     #[cfg(test)]
     pub(crate) fn error_messages(&self) -> Vec<String> {

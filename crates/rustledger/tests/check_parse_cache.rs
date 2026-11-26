@@ -201,3 +201,95 @@ fn test_check_cache_hit_keeps_the_breadth_first_file_order() {
         );
     }
 }
+
+/// `rledger <args>` with the cache at its default path next to the source,
+/// hermetic as [`check`] is.
+fn rledger(bin: &Path, args: &[&str]) -> Output {
+    Command::new(bin)
+        .args(args)
+        .env_remove("BEANCOUNT_DISABLE_LOAD_CACHE")
+        .env_remove("BEANCOUNT_LOAD_CACHE_FILENAME")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run rledger")
+}
+
+/// The options beancount merges across files come out in its breadth-first
+/// parse order on a cold run and on a cache hit alike (#3038): the cache
+/// archives the merged values.
+///
+/// `main` includes `x` then `y`, and `x` includes `z`. `z` names `ZZZ` and
+/// `y` names `YYY` as operating currencies, so beancount 3.2.3's list is
+/// `[YYY, ZZZ]` (depth first it was `[ZZZ, YYY]`), and `report returns`
+/// reports in the first. `main` fixes `USD` at 2 places and `y` at 3: the
+/// top-level file's wins, so bean-query renders `1.23456 USD` as `1.23 USD`.
+#[test]
+fn test_cache_hit_keeps_the_options_merged_across_files() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, text) in [
+        (
+            "main.beancount",
+            "option \"display_precision\" \"USD:0.01\"\n\
+             include \"x.beancount\"\ninclude \"y.beancount\"\n\
+             2020-01-01 open Assets:Inv\n2020-01-01 open Assets:Cash\n2020-01-01 open Equity:O\n\
+             2020-01-02 * \"buy\"\n  Assets:Inv  10 STK {10 YYY}\n  Assets:Cash  -100 YYY\n\
+             2020-01-03 * \"usd\"\n  Assets:Cash  1.23456 USD\n  Equity:O\n",
+        ),
+        ("x.beancount", "include \"z.beancount\"\n"),
+        ("z.beancount", "option \"operating_currency\" \"ZZZ\"\n"),
+        (
+            "y.beancount",
+            "option \"operating_currency\" \"YYY\"\noption \"display_precision\" \"USD:0.001\"\n",
+        ),
+    ] {
+        std::fs::write(dir.path().join(name), text).expect("write");
+    }
+    let path = dir.path().join("main.beancount");
+    let file = path.to_str().expect("utf-8 path");
+    let returns = [
+        "report",
+        "returns",
+        "-i",
+        "Assets:Inv",
+        "--end",
+        "2020-12-31",
+        file,
+        "--verbose",
+    ];
+    let query = [
+        "query",
+        file,
+        "--verbose",
+        "SELECT position WHERE account = 'Assets:Cash' AND currency = 'USD'",
+    ];
+
+    for run in ["cold", "warm"] {
+        let out = rledger(&bin, &returns);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{run} returns: {stdout}{stderr}");
+        assert_eq!(
+            stderr.contains("from cache"),
+            run == "warm",
+            "{run} returns: {stderr}"
+        );
+        let currency = stdout
+            .lines()
+            .find(|l| l.starts_with("Reporting currency"))
+            .unwrap_or_default();
+        assert!(
+            currency.split_whitespace().nth(2) == Some("YYY"),
+            "{run} returns reports in the first operating currency: {stdout}"
+        );
+
+        let out = rledger(&bin, &query);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("from cache"), "{run} query: {stderr}");
+        assert!(
+            stdout.lines().any(|l| l.trim() == "1.23 USD"),
+            "{run} query renders with the top-level file's precision: {stdout}"
+        );
+    }
+}

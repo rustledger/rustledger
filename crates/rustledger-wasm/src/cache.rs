@@ -713,7 +713,12 @@ use crate::types::{Error, LedgerOptions};
 /// (after an indented comment rledger accepts) keeps its lexer errors only.
 /// Parsed directives do not move, and every such source has a parse error,
 /// before and after, which the loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 136;
+/// v137: loader v78 (#3038). The
+/// `operating_currencies` both payloads archive move: merged across files in
+/// beancount's breadth-first parse order, and a currency named twice listed
+/// once (`Options::merge_across_files`). An older blob would keep serving
+/// the depth-first, repeated list.
+pub const CACHE_VERSION: u32 = 137;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -745,7 +750,7 @@ pub const CACHE_VERSION: u32 = 136;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 77;
+const LOADER_CACHE_VERSION_PIN: u32 = 78;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

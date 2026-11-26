@@ -36,6 +36,10 @@ pub enum ErrorCode {
     /// E2005: A `pad` pads a currency held at cost (beancount's "Attempt to
     /// pad an entry with cost").
     PadWithCost,
+    /// E2006: Two `balance` assertions for one account, currency and date
+    /// assert different amounts (beancount's "Duplicate balance assertion
+    /// with different amounts").
+    DuplicateBalanceAssertion,
 
     // === Transaction Errors (E3xxx) ===
     /// E3001: Transaction does not balance.
@@ -72,6 +76,9 @@ pub enum ErrorCode {
     CurrencyNotAllowed,
     /// E5003: Invalid `precision` metadata on commodity directive (warning).
     InvalidPrecisionMetadata,
+    /// E5004: More than one `commodity` directive for one currency
+    /// (beancount's "Duplicate commodity directives").
+    DuplicateCommodity,
 
     // === Budget Errors (E11xxx) ===
     /// E11001: Malformed `custom "budget"` directive (warning).
@@ -205,6 +212,7 @@ impl ErrorCode {
         Self::BalanceToleranceExceeded,
         Self::PadWithoutBalance,
         Self::PadWithCost,
+        Self::DuplicateBalanceAssertion,
         Self::TransactionUnbalanced,
         Self::MultipleInterpolation,
         Self::NoPostings,
@@ -217,6 +225,7 @@ impl ErrorCode {
         Self::UndeclaredCurrency,
         Self::CurrencyNotAllowed,
         Self::InvalidPrecisionMetadata,
+        Self::DuplicateCommodity,
         Self::MalformedBudget,
         Self::UnknownOption,
         Self::InvalidOptionValue,
@@ -240,6 +249,7 @@ impl ErrorCode {
             Self::BalanceToleranceExceeded => "E2002",
             Self::PadWithoutBalance => "E2003",
             Self::PadWithCost => "E2005",
+            Self::DuplicateBalanceAssertion => "E2006",
             // Transaction errors
             Self::TransactionUnbalanced => "E3001",
             Self::MultipleInterpolation => "E3002",
@@ -255,6 +265,7 @@ impl ErrorCode {
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",
             Self::InvalidPrecisionMetadata => "E5003",
+            Self::DuplicateCommodity => "E5004",
             // Budget errors. E6xxx is RESERVED for metadata errors by
             // docs/reference/errors.md and left alone, even though nothing uses
             // it yet — the one metadata error that exists (E5003) was filed
@@ -319,6 +330,7 @@ impl ErrorCode {
             Self::BalanceToleranceExceeded => "Balance exceeds explicit tolerance",
             Self::PadWithoutBalance => "Pad without a subsequent balance assertion",
             Self::PadWithCost => "Pad of a currency held at cost",
+            Self::DuplicateBalanceAssertion => "Duplicate balance assertion with different amounts",
             Self::TransactionUnbalanced => "Transaction does not balance",
             Self::MultipleInterpolation => "Multiple postings missing amounts for one currency",
             Self::NoPostings => "Transaction has no postings",
@@ -331,6 +343,7 @@ impl ErrorCode {
             Self::UndeclaredCurrency => "Currency used without a commodity declaration",
             Self::CurrencyNotAllowed => "Currency not allowed in this account",
             Self::InvalidPrecisionMetadata => "Invalid precision metadata on commodity",
+            Self::DuplicateCommodity => "Duplicate commodity directive for a currency",
             Self::MalformedBudget => "Malformed budget directive",
             Self::UnknownOption => "Unknown option name",
             Self::InvalidOptionValue => "Invalid option value",
@@ -415,6 +428,17 @@ impl ErrorCode {
                  record the purchase or sale that explains the difference with its \
                  cost, instead of padding it."
             }
+            Self::DuplicateBalanceAssertion => {
+                "Two `balance` assertions for the same account and currency on the \
+                 same date assert different amounts.\n\nBeancount has no time of \
+                 day, and the order of entries within a day is meant not to matter, \
+                 so the two cannot both describe the account. Identical assertions \
+                 (same number and currency) are allowed, since importers often \
+                 repeat one; only the amounts are compared, not the tolerances. The \
+                 error is reported at the later assertion, as beancount does.\n\n\
+                 Fix: delete the wrong assertion, or move one to the date it \
+                 belongs to."
+            }
             Self::TransactionUnbalanced => {
                 "The weights of a transaction's postings do not sum to zero per \
                  currency (beyond the inferred tolerance).\n\nA posting's weight is \
@@ -491,6 +515,14 @@ impl ErrorCode {
                  is ignored; display precision falls back to \
                  `option \"display_precision\"`, then to inference.\n\nFix: use e.g. \
                  `precision: 2`."
+            }
+            Self::DuplicateCommodity => {
+                "A currency has more than one `commodity` directive, whatever their \
+                 dates or metadata.\n\nThe error is reported at every declaration \
+                 after the first, as beancount does: two declarations can carry \
+                 different metadata (`name`, `precision`, ...), and nothing says \
+                 which one applies.\n\nFix: keep one `commodity` directive per \
+                 currency, merging the metadata into it."
             }
             Self::UnknownOption => {
                 "An `option` directive names an option rustledger does not recognize \

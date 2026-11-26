@@ -162,6 +162,38 @@ pub fn validate_balance_account(
     }
 }
 
+/// Duplicate balance assertions (E2006): a `balance` on the same account,
+/// currency and date as an earlier one, asserting a different number.
+///
+/// Matches beancount's `validate_duplicate_balances`: the amounts are
+/// compared, not the tolerances, and numerically (`0.0` equals `0.00`, as
+/// Python's `Decimal` compares), so an identical repeat — common when an
+/// importer re-emits an assertion — stays allowed. Each later assertion is
+/// compared with the FIRST on its key, which beancount keeps; the walk is in
+/// booking order, beancount's entry order. The assertion itself is still
+/// checked by [`validate_balance_late`], as beancount checks both.
+pub fn validate_balance_duplicate(
+    state: &mut LedgerState,
+    bal: &Balance,
+    errors: &mut Vec<ValidationError>,
+) {
+    let key = (bal.account.clone(), bal.amount.currency.clone(), bal.date);
+    match state.balance_assertions.entry(key) {
+        std::collections::hash_map::Entry::Occupied(first) => {
+            if *first.get() != bal.amount.number {
+                errors.push(ValidationError::new(
+                    ErrorCode::DuplicateBalanceAssertion,
+                    "Duplicate balance assertion with different amounts",
+                    bal.date,
+                ));
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(bal.amount.number);
+        }
+    }
+}
+
 /// Late-phase balance validation — runs after booking + plugins.
 ///
 /// Compares the asserted balance against the accumulated inventory state,

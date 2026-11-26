@@ -95,6 +95,7 @@ fn empty_cache_entry(file: &Path) -> CacheEntry {
         options: CachedOptions::from(&Options::new()),
         plugins: vec![],
         files: vec![file.to_string_lossy().into_owned()],
+        includes: Vec::new(),
     }
 }
 

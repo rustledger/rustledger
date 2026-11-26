@@ -2383,11 +2383,13 @@ pub fn document_root_warnings(
 /// For the validator's
 /// [`rustledger_validate::ValidationOptions::source_lines`]. A loaded
 /// file's directive has the line of its byte offset, whichever file it is
-/// in (#2901), ranked by its file id. A plugin's directive has the line the
-/// plugin gave it ([`SourceMap::placeholder`]: `auto_accounts` numbers its
-/// `open`s by the account's place in its sorted list), ranked ahead of
-/// every file, and one with no location at all (a synthesized directive)
-/// has line 0. See [`rustledger_booking::SourcePosition`].
+/// in (#2901), ranked by its file's place in beancount's breadth-first
+/// parse order ([`SourceMap::parse_ranks`], #2936). A plugin's directive
+/// has the line the plugin gave it ([`SourceMap::placeholder`]:
+/// `auto_accounts` numbers its `open`s by the account's place in its
+/// sorted list), ranked ahead of every file, and one with no location at
+/// all (a synthesized directive) has line 0. See
+/// [`rustledger_booking::SourcePosition`].
 ///
 /// Cheap to take: no line table is built or copied until a lookup needs
 /// it (the validator only looks when the ledger has a `pad`), and the
@@ -2419,7 +2421,11 @@ pub fn source_lines_overlaid<'a>(
             *lines = crate::source_map::DetachedLines::of_text(text);
         }
     }
-    detached_source_lines(files, Some(source_map.placeholder_lines()))
+    detached_source_lines(
+        files,
+        source_map.parse_ranks(),
+        Some(source_map.placeholder_lines()),
+    )
 }
 
 /// [`source_lines`] for one text standing alone as file 0: an editor's
@@ -2427,14 +2433,21 @@ pub fn source_lines_overlaid<'a>(
 #[cfg(feature = "validation")]
 #[must_use]
 pub fn source_lines_of_text(text: &str) -> rustledger_validate::SourceLines {
-    detached_source_lines(vec![crate::source_map::DetachedLines::of_text(text)], None)
+    detached_source_lines(
+        vec![crate::source_map::DetachedLines::of_text(text)],
+        vec![0],
+        None,
+    )
 }
 
 /// The positions, and the text (for the validator's error-recovery check,
-/// #2954), of `files` by file id; any other id is a placeholder location.
+/// #2954), of `files` by file id, each ranked by its place in `ranks`
+/// (by file id; [`SourceMap::parse_ranks`]); any other id is a placeholder
+/// location.
 #[cfg(feature = "validation")]
 fn detached_source_lines(
     files: Vec<crate::source_map::DetachedLines>,
+    ranks: Vec<usize>,
     placeholders: Option<crate::source_map::PlaceholderLines>,
 ) -> rustledger_validate::SourceLines {
     use rustledger_booking::SourcePosition;
@@ -2442,7 +2455,11 @@ fn detached_source_lines(
     let texts = std::sync::Arc::clone(&files);
     rustledger_validate::SourceLines::new(move |file_id, offset| {
         if let Some(lines) = files.get(usize::from(file_id)) {
-            SourcePosition::in_file(lines.line(offset), file_id)
+            let rank = ranks
+                .get(usize::from(file_id))
+                .copied()
+                .unwrap_or(usize::from(file_id));
+            SourcePosition::in_parsed_file(lines.line(offset), rank)
         } else {
             let line = placeholders
                 .as_ref()

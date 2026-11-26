@@ -762,14 +762,13 @@ pub struct SourcePosition {
     /// Where its file comes in the load: 0 for a directive a plugin made
     /// (`auto_accounts` and `currency_accounts` put theirs ahead of the
     /// parsed entries, so they come first among ties) and for a directive
-    /// with no location; 1 + its file id for a source file's directive.
+    /// with no location; 1 + its file's place in beancount's parse order
+    /// for a source file's directive ([`Self::in_parsed_file`]).
     ///
-    /// File ids number the files in the order the loader reads them, depth
-    /// first: an include's own includes come before the files included
-    /// after it. Beancount reads breadth first. The two orders differ only
-    /// for a file included from an included file, against a file its
-    /// parent includes later, and only for entries on the same date, type
-    /// and line (#2901).
+    /// Beancount parses its files breadth first, the main file's includes
+    /// before theirs; the loader reads them depth first, so a file's id is
+    /// not its place. `rustledger_loader::SourceMap::parse_ranks` derives
+    /// the place from the includes the loader recorded (#2936).
     pub file_rank: usize,
 }
 
@@ -787,11 +786,21 @@ impl SourcePosition {
         Self::new(index, 0)
     }
 
+    /// The position of the directive at `line` of the source file that
+    /// comes `parse_rank`th (from 0) in beancount's parse order, ranked after
+    /// every directive a plugin made.
+    #[must_use]
+    pub const fn in_parsed_file(line: usize, parse_rank: usize) -> Self {
+        Self::new(line, parse_rank.saturating_add(1))
+    }
+
     /// The position of the directive at `line` of source file `file_id`,
-    /// ranked after every directive a plugin made.
+    /// its id standing in for its place in the parse order: for a caller
+    /// with no source map to rank the files by. The id is the place when
+    /// no file includes another from an included file.
     #[must_use]
     pub const fn in_file(line: usize, file_id: u16) -> Self {
-        Self::new(line, file_id as usize + 1)
+        Self::in_parsed_file(line, file_id as usize)
     }
 
     /// The position of a directive a plugin made at `line`.

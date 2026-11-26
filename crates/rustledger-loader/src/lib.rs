@@ -107,7 +107,7 @@ pub use process::{PluginPass, plugin_error_to_ledger_error, run_plugins};
 
 use rustledger_core::{Directive, DisplayContext};
 use rustledger_parser::{ParseError, Span, Spanned};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -461,8 +461,9 @@ pub(crate) fn decrypt_gpg_file(path: &Path) -> Result<String, LoadError> {
 /// Beancount file loader.
 #[derive(Debug)]
 pub struct Loader {
-    /// Files that have been loaded (for cycle detection).
-    loaded_files: HashSet<PathBuf>,
+    /// Files that have been loaded (for cycle detection), with their file
+    /// ids (to record an include of one in the source map).
+    loaded_files: HashMap<PathBuf, u16>,
     /// Stack for cycle detection during loading (maintains order for error messages).
     include_stack: Vec<PathBuf>,
     /// Set for O(1) cycle detection (mirrors `include_stack`).
@@ -479,7 +480,7 @@ pub struct Loader {
 impl Default for Loader {
     fn default() -> Self {
         Self {
-            loaded_files: HashSet::new(),
+            loaded_files: HashMap::new(),
             include_stack: Vec::new(),
             include_stack_set: HashSet::new(),
             root_dir: None,
@@ -688,7 +689,7 @@ impl Loader {
         // Check if already loaded. Beancount reports this and carries on with
         // the single copy it already has, and `bean-check` exits non-zero for
         // it; record the same and do the same.
-        if self.loaded_files.contains(&path_buf) {
+        if self.loaded_files.contains_key(&path_buf) {
             errors.push(LoadError::DuplicateInclude {
                 path: path.display().to_string(),
             });
@@ -728,7 +729,7 @@ impl Loader {
         // Mark as loading (update both stack and set)
         self.include_stack_set.insert(path_buf.clone());
         self.include_stack.push(path_buf.clone());
-        self.loaded_files.insert(path_buf.clone());
+        self.loaded_files.insert(path_buf.clone(), fid_u16);
 
         // Collect parse errors
         if !result.errors.is_empty() {
@@ -934,6 +935,7 @@ impl Loader {
                     ) {
                         errors.push(e.at_include(include_site.clone()));
                     }
+                    self.record_include(source_map, file_id, canonical);
                 }
             } else {
                 // Sequential fallback: single file or VFS.
@@ -950,6 +952,7 @@ impl Loader {
                     ) {
                         errors.push(e.at_include(include_site.clone()));
                     }
+                    self.record_include(source_map, file_id, &canonical);
                 }
             }
         }
@@ -979,6 +982,18 @@ impl Loader {
         }
 
         Ok(())
+    }
+
+    /// Record in `source_map` that file `includer` includes `included`,
+    /// when `included` is a loaded file: one loaded by this include, or
+    /// earlier (a duplicate include, or a cycle). Beancount's parse order,
+    /// [`SourceMap::parse_ranks`], is read off these (#2936). An include
+    /// that loaded nothing (a missing file) parses nothing in beancount
+    /// either, so it is not recorded.
+    fn record_include(&self, source_map: &mut SourceMap, includer: usize, included: &Path) {
+        if let Some(&to) = self.loaded_files.get(included) {
+            source_map.add_include(includer, usize::from(to));
+        }
     }
 }
 
@@ -1365,6 +1380,105 @@ include "level2.beancount"
         // Should have 2 open directives from nested includes
         assert_eq!(result.directives.len(), 2);
         assert!(result.errors.is_empty());
+    }
+
+    /// The names of `result`'s files in beancount's parse order
+    /// ([`SourceMap::parse_ranks`]).
+    fn parse_order(result: &LoadResult) -> Vec<String> {
+        let ranks = result.source_map.parse_ranks();
+        let mut files: Vec<&SourceFile> = result.source_map.files().iter().collect();
+        files.sort_by_key(|f| ranks[f.id]);
+        files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// #2936: the loader records each include in the source map, so the
+    /// files rank as beancount parses them, breadth first: a nested chain,
+    /// a glob, a duplicate include and a cycle. bean-check 3.2.3 orders the
+    /// tied entries of each of these trees this way.
+    #[test]
+    fn test_load_records_includes_for_the_breadth_first_parse_order() {
+        let load = |files: &[(&str, &str)]| {
+            let mut vfs = VirtualFileSystem::new();
+            for (name, text) in files {
+                vfs.add_file(name, *text);
+            }
+            Loader::new()
+                .with_filesystem(Box::new(vfs))
+                .load(Path::new(files[0].0))
+                .unwrap()
+        };
+        // A three-level tree.
+        let tree = load(&[
+            (
+                "main.beancount",
+                "include \"a.beancount\"\ninclude \"b.beancount\"\n",
+            ),
+            (
+                "a.beancount",
+                "include \"c.beancount\"\ninclude \"d.beancount\"\n",
+            ),
+            ("b.beancount", "include \"f.beancount\"\n"),
+            ("c.beancount", "include \"e.beancount\"\n"),
+            ("d.beancount", ""),
+            ("e.beancount", ""),
+            ("f.beancount", ""),
+        ]);
+        let ids: Vec<String> = tree
+            .source_map
+            .files()
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            ids,
+            ["main", "a", "c", "e", "d", "b", "f"].map(|n| format!("{n}.beancount")),
+            "file ids are depth first"
+        );
+        assert_eq!(
+            parse_order(&tree),
+            ["main", "a", "b", "c", "d", "f", "e"].map(|n| format!("{n}.beancount"))
+        );
+
+        // A glob's matches, in the loader's sorted order, then the next
+        // include; a match's own includes come after both.
+        let glob = load(&[
+            (
+                "main.beancount",
+                "include \"g/*.beancount\"\ninclude \"y.beancount\"\n",
+            ),
+            ("g/p.beancount", "include \"../z.beancount\"\n"),
+            ("g/q.beancount", ""),
+            ("y.beancount", ""),
+            ("z.beancount", ""),
+        ]);
+        assert_eq!(
+            parse_order(&glob),
+            ["main", "p", "q", "y", "z"].map(|n| format!("{n}.beancount"))
+        );
+
+        // `c` includes `b`, which loads there (depth first) and again from
+        // `main` (a duplicate), and `a` (a cycle): beancount parses `b` from
+        // `main`'s include, ahead of `c`.
+        let repeated = load(&[
+            (
+                "main.beancount",
+                "include \"a.beancount\"\ninclude \"b.beancount\"\n",
+            ),
+            ("a.beancount", "include \"c.beancount\"\n"),
+            ("b.beancount", ""),
+            (
+                "c.beancount",
+                "include \"b.beancount\"\ninclude \"a.beancount\"\n",
+            ),
+        ]);
+        assert_eq!(
+            parse_order(&repeated),
+            ["main", "a", "b", "c"].map(|n| format!("{n}.beancount"))
+        );
+        assert_eq!(repeated.errors.len(), 2, "{:?}", repeated.errors);
     }
 
     /// Plugins are collected in `file_id` order, each file's in declaration

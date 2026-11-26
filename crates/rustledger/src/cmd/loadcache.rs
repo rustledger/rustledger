@@ -121,6 +121,9 @@ pub fn load_result_cached(
                 })
                 .collect(),
             files,
+            // Which file includes which, so a hit ranks the files in
+            // beancount's parse order as this load does (#2936).
+            includes: result.source_map.include_lists(),
         };
 
         if let Err(e) = save_cache_entry(file, &entry) {

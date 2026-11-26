@@ -445,15 +445,15 @@ fn test_pad_ranks_a_tied_line_by_file_not_by_booking_order() {
     }
 }
 
-/// A known difference (#2901): beancount parses its files breadth first
-/// (the main file's includes, then theirs), the loader depth first, and a
-/// tie on the line goes by the loader's order. `x.beancount` includes
-/// `z.beancount`, and the main file includes `x` then `y`; each opens one
-/// account on line 2. bean-check 3.2.3 prints `(1 XXX, 1 YYY, 1 ZZZ, ...)`;
-/// this pins the loader's `(1 XXX, 1 ZZZ, 1 YYY, ...)`, so a change to the
-/// order shows here.
+/// Beancount parses its files breadth first (the main file's includes, then
+/// theirs) and a tie on the line goes by that order (#2936); the loader
+/// reads depth first, but ranks the files breadth first
+/// (`SourceMap::parse_ranks`). `x.beancount` includes `z.beancount`, and the
+/// main file includes `x` then `y`; each opens one account on line 2.
+/// bean-check 3.2.3 prints `(1 XXX, 1 YYY, 1 ZZZ, ...)`; depth first was
+/// `(1 XXX, 1 ZZZ, 1 YYY, ...)`.
 #[test]
-fn test_pad_ranks_a_tied_line_by_the_loaders_depth_first_file_order() {
+fn test_pad_ranks_a_tied_line_by_beancounts_breadth_first_file_order() {
     let main = format!(
         "include \"x.beancount\"\ninclude \"y.beancount\"\n{}",
         three_account_tail(["X", "Y", "Z"])
@@ -470,7 +470,133 @@ fn test_pad_ranks_a_tied_line_by_the_loaders_depth_first_file_order() {
     assert_eq!(
         pad_at_cost_messages(&path),
         ["Attempt to pad an entry with cost for balance: \
-          (1 XXX, 1 ZZZ, 1 YYY, 10 STK {10 USD, 2024-02-01})"]
+          (1 XXX, 1 YYY, 1 ZZZ, 10 STK {10 USD, 2024-02-01})"]
+    );
+}
+
+use std::fmt::Write as _;
+
+/// A ledger of `files`, `(name, includes)` with the main file first: each
+/// file other than the main one writes its includes, then opens
+/// `Assets:A:<NAME>` (its file name's stem, upper-cased) on line 9, so
+/// every open ties on the line. The main file writes its includes, then a
+/// pad onto `Assets:A` whose "Attempt to pad an entry with cost" lists
+/// those accounts in the order beancount meets them.
+fn include_tree(files: &[(&str, &[&str])]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut accounts = Vec::new();
+    let mut main = String::new();
+    for (index, (name, includes)) in files.iter().enumerate() {
+        let mut text = String::new();
+        for i in *includes {
+            let _ = writeln!(text, "include \"{i}\"");
+        }
+        if index == 0 {
+            main = text;
+            continue;
+        }
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_uppercase();
+        text.push_str(&"; pad\n".repeat(8 - includes.len()));
+        let _ = writeln!(text, "2024-01-01 open Assets:A:{stem}");
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+        std::fs::write(path, text).expect("write");
+        accounts.push(stem);
+    }
+    main.push_str(&"; pad\n".repeat(19 - files[0].1.len()));
+    main.push_str(
+        "2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n",
+    );
+    main.push_str(RANK_TAIL);
+    main.push_str("2024-02-02 * \"g\"\n");
+    for a in &accounts {
+        let _ = writeln!(main, "  Assets:A:{a}  1 {}", a.repeat(3));
+    }
+    for a in &accounts {
+        let _ = writeln!(main, "  Equity:O  -1 {}", a.repeat(3));
+    }
+    main.push_str("2024-02-03 pad Assets:A Equity:O\n2024-02-10 balance Assets:A 11 STK\n");
+    let path = dir.path().join(files[0].0);
+    std::fs::write(&path, main).expect("write");
+    (dir, path)
+}
+
+/// The "Attempt to pad an entry with cost" listing one of each of `units`
+/// then the lot.
+fn tied_message(units: &[&str]) -> String {
+    let units: Vec<String> = units.iter().map(|u| format!("1 {u}")).collect();
+    format!(
+        "Attempt to pad an entry with cost for balance: ({}, 10 STK {{10 USD, 2024-02-01}})",
+        units.join(", ")
+    )
+}
+
+/// #2936 on a three-level tree: `main` includes `a`, `b`; `a` includes
+/// `c`, `d`; `b` includes `f`; `c` includes `e`. bean-check 3.2.3 prints
+/// `(1 AAA, 1 BBB, 1 CCC, 1 DDD, 1 FFF, 1 EEE, ...)`; depth first would be
+/// `AAA, CCC, EEE, DDD, BBB, FFF`.
+#[test]
+fn test_pad_ranks_a_three_level_include_tree_breadth_first() {
+    let (_dir, path) = include_tree(&[
+        ("main.beancount", &["a.beancount", "b.beancount"]),
+        ("a.beancount", &["c.beancount", "d.beancount"]),
+        ("b.beancount", &["f.beancount"]),
+        ("c.beancount", &["e.beancount"]),
+        ("d.beancount", &[]),
+        ("e.beancount", &[]),
+        ("f.beancount", &[]),
+    ]);
+    assert_eq!(
+        pad_at_cost_messages(&path),
+        [tied_message(&["AAA", "BBB", "CCC", "DDD", "FFF", "EEE"])]
+    );
+}
+
+/// #2936: a file included twice ranks by the include breadth first meets
+/// first. `main` includes `a`, `b`; `a` includes `c`; `c` includes `b`
+/// again, where the loader reads it, depth first. bean-check 3.2.3 parses
+/// `b` from `main`, reports the other include as `Duplicate filename
+/// parsed`, and prints `(1 AAA, 1 BBB, 1 CCC, ...)`; depth first would be
+/// `AAA, CCC, BBB`. With `c` including `a` too (a cycle), the same.
+#[test]
+fn test_pad_ranks_a_duplicate_or_cyclic_include_where_beancount_parses_it() {
+    for c_includes in [&["b.beancount"][..], &["a.beancount", "b.beancount"]] {
+        let (_dir, path) = include_tree(&[
+            ("main.beancount", &["a.beancount", "b.beancount"]),
+            ("a.beancount", &["c.beancount"]),
+            ("b.beancount", &[]),
+            ("c.beancount", c_includes),
+        ]);
+        assert_eq!(
+            pad_at_cost_messages(&path),
+            [tied_message(&["AAA", "BBB", "CCC"])],
+            "c includes {c_includes:?}"
+        );
+    }
+}
+
+/// #2936 through a glob: `main` includes `g/*.beancount` (`g/p`, `g/q`)
+/// then `y`, and `g/p` includes `z`. Breadth first is `P, Q, Y, Z`; depth
+/// first would be `P, Z, Q, Y`. bean-check 3.2.3 agrees but for the order
+/// of the glob's own matches, which it takes from `glob.glob` unsorted (the
+/// directory's order: `QQQ, PPP` on the machine checked); the loader sorts
+/// them.
+#[test]
+fn test_pad_ranks_a_globs_matches_ahead_of_their_includes() {
+    let (_dir, path) = include_tree(&[
+        ("main.beancount", &["g/*.beancount", "y.beancount"]),
+        ("g/p.beancount", &["../z.beancount"]),
+        ("g/q.beancount", &[]),
+        ("y.beancount", &[]),
+        ("z.beancount", &[]),
+    ]);
+    assert_eq!(
+        pad_at_cost_messages(&path),
+        [tied_message(&["PPP", "QQQ", "YYY", "ZZZ"])]
     );
 }
 

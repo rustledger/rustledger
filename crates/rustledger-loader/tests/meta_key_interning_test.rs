@@ -115,6 +115,7 @@ fn test_cache_hit_metadata_keys_share_one_allocation() {
         options: rustledger_loader::CachedOptions::from(&loaded.options),
         plugins: Vec::new(),
         files: vec![path.to_string_lossy().into_owned()],
+        includes: Vec::new(),
     };
     rustledger_loader::save_cache_entry(&path, &entry).expect("save");
     let back = rustledger_loader::load_cache_entry(&path).expect("cache hit");

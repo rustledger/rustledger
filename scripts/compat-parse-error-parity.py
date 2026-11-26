@@ -59,6 +59,11 @@ Normalization, applied identically to both sides:
     merging (`{*}`), which rledger implements deliberately. Those errors are
     dropped from beancount's side (`is_not_syntax` from the matrix script,
     the predicate that excludes them there, plus `NOT_PARSE_ERRORS`).
+  * Tags after the first posting: beancount's builder reports `Tags or
+    links not allowed after first Posting` on the transaction's header
+    line; rledger reports it on the tag line, where the mistake is, a
+    deliberate difference (#2575). Each such beancount error is moved to
+    its transaction's next late tag line (`tags_after_posting_lines`).
   * Indented comments: rledger reads a line of blanks and a `;` comment
     after a column-0 comment, a blank line or the top of the file as a
     comment (`; note` then `  ; continued`), a deliberate difference (Python
@@ -329,6 +334,44 @@ def is_indented_comment_indent_error(message, line, lines):
     return before < 0 or _is_gap(lines[before])
 
 
+# beancount's builder error for a tag line after a transaction's first
+# posting, which it reports on the transaction's header line.
+TAGS_AFTER_POSTING_ERROR = "Tags or links not allowed after first Posting"
+
+
+def _is_tags_links_line(text):
+    """Whether `text` is an indented line of only `#tag` / `^link` tokens
+    (and a trailing `;` comment)."""
+    if text[:1] not in (" ", "\t"):
+        return False
+    words = text.split(";", 1)[0].split()
+    return bool(words) and all(w[:1] in "#^" and len(w) > 1 for w in words)
+
+
+def tags_after_posting_lines(header, lines):
+    """The tag lines (1-based) after the first posting of the transaction
+    whose header is on line `header` of `lines`, in order: its indented lines
+    up to the first line that is neither indented nor a `;` comment."""
+    out = []
+    posting_seen = False
+    for n in range(header, len(lines)):
+        text = lines[n].rstrip("\r")
+        if text.startswith(";"):
+            continue
+        if text[:1] not in (" ", "\t") or not text.strip():
+            break
+        if _is_tags_links_line(text):
+            if posting_seen:
+                out.append(n + 1)
+            continue
+        rest = text.lstrip(" \t")
+        if rest[:1] in "*!&#?%PSTCURM" and rest[1:2] in (" ", "\t"):
+            rest = rest[1:].lstrip(" \t")
+        if rest[:1].isupper() and ":" in rest.split()[0]:
+            posting_seen = True
+    return out
+
+
 def beancount_errors(parser, is_not_syntax, text):
     """beancount's parse errors for `text` as `[line, type, message]`."""
     _, errors, _ = parser.parse_string(strip_bom(text))
@@ -340,12 +383,21 @@ def keep_parse_errors(errors, is_not_syntax, text=None):
     (and, given the input `text`, minus its errors at indented comments)."""
     lines = text.split("\n") if text is not None else []
     out = []
+    # Per header line, the tag lines its errors are not yet moved to.
+    tag_lines = {}
     for e in errors:
         if is_not_syntax(e) or any(m in str(e.message) for m in NOT_PARSE_ERRORS):
             continue
         line = int((e.source or {}).get("lineno") or 0)
         if is_indented_comment_indent_error(str(e.message), line, lines):
             continue
+        if str(e.message).startswith(TAGS_AFTER_POSTING_ERROR) and 0 < line <= len(lines):
+            # Reported on the transaction's header line; rledger reports it
+            # on the tag line, where the mistake is, on purpose (#2575). The
+            # k-th such error of a header is its k-th late tag line.
+            pending = tag_lines.setdefault(line, tags_after_posting_lines(line, lines))
+            if pending:
+                line = pending.pop(0)
         if str(e.message).startswith(EOL_SYNTAX_ERROR) and line > 1:
             line -= 1
         out.append([line, type(e).__name__, str(e.message)])
@@ -914,6 +966,22 @@ def self_test():
     ]:
         line = 3 if src.startswith("2024") else 2
         kept = keep_parse_errors([ParserSyntaxError(line, indent)], lambda e: False, src)
+        assert [e[0] for e in kept] == want, (src, kept)
+    # beancount's tags-after-first-posting error, on the header line, moves
+    # to each late tag line in turn; a tag line before the first posting, a
+    # comment and a posting with a flag are read past.
+    tags = "Tags or links not allowed after first Posting: TagsLinks()"
+    for src, want in [
+        ('2024-01-02 * "x"\n  Assets:A 1 USD\n  #tag\n  Assets:A -1 USD\n', [3]),
+        (
+            '2024-01-02 * "x"\r\n  #pre\r\n  ! Assets:A 1 USD\r\n; c\r\n'
+            '  #t ^l ; c\r\n  Assets:A\r\n    ^m\r\n',
+            [5, 7],
+        ),
+        ('2024-01-02 * "x"\n  Assets:A 1 USD\n\n  #tag\n', [1, 1]),
+    ]:
+        errs = [ParserSyntaxError(1, tags) for _ in want]
+        kept = keep_parse_errors(errs, lambda e: False, src)
         assert [e[0] for e in kept] == want, (src, kept)
     assert bucket("more-on-line", [[1, syn, ""]], [[1, "P0012", ""]] * 2) == "count"
     assert bucket("off-by-one", [[3, syn, ""]], [[2, "P0012", ""]]) == "lines"

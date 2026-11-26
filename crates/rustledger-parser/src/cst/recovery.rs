@@ -711,11 +711,64 @@ pub(super) fn quiet_bison_recovery(
             _ => return ls,
         }
     };
+    // Each line that ends or starts what beancount's grammar continues with
+    // an indented line, in order: `(line start, whether it is a dated
+    // entry's header)`. A blank line (blanks only), and any line that starts
+    // at column 0 outside a string: a dated line starts an entry whose
+    // indented lines are its body; anything else (an undated directive, a
+    // column-0 comment, a line beancount's lexer skips) takes none. One pass
+    // over the input, only when there is an error.
+    let mut blocks: Vec<(usize, bool)> = Vec::new();
+    {
+        let mut at = 0;
+        while at < stripped.len() {
+            let le = stripped[at..]
+                .find('\n')
+                .map_or(stripped.len(), |i| at + i + 1);
+            let i = multiline.partition_point(|r| r.start < at);
+            let in_string = i.checked_sub(1).is_some_and(|i| multiline[i].end > at);
+            let line = &stripped[at..le];
+            if in_string {
+                at = le;
+                continue;
+            }
+            if line.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+                blocks.push((at, false));
+            } else if !line.starts_with([' ', '\t']) {
+                blocks.push((at, line.starts_with(|c: char| c.is_ascii_digit())));
+            }
+            at = le;
+        }
+        #[cfg(test)]
+        crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
+            .with(|c| c.set(c.get() + stripped.len()));
+    }
+    // Whether the indented line at `ls` continues a dated entry's body.
+    let in_dated_entry = |ls: usize| {
+        let i = blocks.partition_point(|&(start, _)| start < ls);
+        i.checked_sub(1).is_some_and(|i| blocks[i].1)
+    };
     // `(start, end, lexer errors there)`: stretches of the input where bison
     // is quiet.
     let mut segments: Vec<(usize, usize, usize)> = Vec::new();
     // Where each lexer error inside a quiet stretch starts, in order.
     let mut lexer_errors: Vec<(usize, usize)> = Vec::new();
+    // Where each line starts whose grammar failure is its indent (an orphan
+    // indented line bison fails at while not recovering), in order.
+    let mut indent_failures: Vec<usize> = Vec::new();
+    // Where bison is back at a `declarations` at a line start inside a dated
+    // entry's body: after a statement it built there whole (an indented
+    // `option "a" "b"`), so the indented line after it fails at its indent.
+    let mut declarations_at: Option<usize> = None;
+    // The line the last recovery window started at.
+    let mut window_line: Option<usize> = None;
+    // Where each error is that started no window (an invalid account, which
+    // beancount may read as an invalid token), in order.
+    let mut unstarted: Vec<usize> = Vec::new();
+    // The last indented line bison fails at, back at a `declarations` after
+    // a statement it built whole in an entry's body, that rledger reads as
+    // part of the entry and does not report.
+    let mut unreported_indent: Option<usize> = None;
     // `(first, end, errors)`: an entry bison builds mid-line, whose errors
     // replace rledger's after the error that failed its line (`order[first..]`)
     // up to the end of its body.
@@ -807,6 +860,7 @@ pub(super) fn quiet_bison_recovery(
             starts_recovery(e)
         };
         if !starts {
+            unstarted.push(at);
             continue;
         }
         // The lexer restarts at the error's line unless it is still before
@@ -872,6 +926,24 @@ pub(super) fn quiet_bison_recovery(
             && at == content
             && item_starts.binary_search(&content).is_ok()
             && !after_dated_header;
+        // Whether bison reports that indent: not in a dated entry's body
+        // past its header's line either (after a metadata line or an
+        // indented comment there), unless a statement it built in the body
+        // left it at a `declarations`.
+        let indent_reported = orphan_indent && (!in_dated_entry(ls) || declarations_at == Some(ls));
+        // Unless beancount is still recovering from the indent of an
+        // indented comment rledger accepts on purpose, just before
+        // (`before_orphan_indent`): bison is quiet at this indent, and the
+        // line has its lexer errors only. After a line with a stray `\r` or a
+        // BOM, where no recovery is modeled, rledger's errors decide, as
+        // before.
+        let before_indent = if orphan_indent {
+            before_orphan_indent(stripped, ls, window_line, unreported_indent, &unstarted)
+        } else {
+            Before::Reporting
+        };
+        window_line = Some(ls);
+        let shadowed = matches!(before_indent, Before::AcceptedComment | Before::Unreported);
         // The tokens on the line before it.
         let mut before: Vec<(Bc, Range<usize>)> = Vec::new();
         let mut tok = loop {
@@ -907,6 +979,9 @@ pub(super) fn quiet_bison_recovery(
                 reads = true;
             }
         }
+        if indent_reported && before_indent == Before::Reporting && tok.0 == Bc::Indent {
+            indent_failures.push(ls);
+        }
         let mut status = 3u8;
         let mut prefix: Vec<(Bc, usize)> = Vec::new();
         // The rest of the failed line, from the error, is quiet too but for
@@ -927,7 +1002,7 @@ pub(super) fn quiet_bison_recovery(
                 ok
             })
         };
-        if !(tok.0 == Bc::Error && reads_up_to_it) {
+        if !(tok.0 == Bc::Error && reads_up_to_it || shadowed) {
             // On the line bison reports it: where the error is (a string that
             // runs over line ends is reported where it ends).
             lexer_errors.push((at, at));
@@ -1119,12 +1194,16 @@ pub(super) fn quiet_bison_recovery(
                         let i = order.partition_point(|&j| effective[j] < after.1.start);
                         order.get(i).is_none_or(|&j| effective[j] > next_end)
                     });
+                if indented_next && after.0 == Bc::Indent {
+                    unreported_indent = Some(after.1.start);
+                }
                 peeked = Some(after);
                 if !indented_next {
                     if !at_eol && let Some(last) = segments.last_mut() {
                         last.1 = t.1.start;
                     }
                     resume = t.1.end;
+                    declarations_at = Some(resume);
                     continue;
                 }
             } else {
@@ -1291,10 +1370,22 @@ pub(super) fn quiet_bison_recovery(
                         trigger_run.is_some_and(|&(s, e)| (s..e).contains(&at))
                             || real_errors().any(|&(s, e)| s == at && e == at + crate::bom::BOM_LEN)
                     });
-            let mut keep = if simple {
-                keep.min(real.saturating_sub(candidates.len()))
-            } else {
+            // An orphan indented line that failed at its indent
+            // (`syntax error, unexpected INDENT`), whose error here stands
+            // for that failure: beancount's lexer errors on it are each one
+            // more error (`  $x` is two), where rledger's line error stands
+            // for the line's first invalid token too. Each one rledger has no
+            // error of its own for is added, as named as the line's later
+            // ones are, so the line reports which token is invalid.
+            let indent_line = trigger != usize::MAX
+                && candidates.contains(&trigger)
+                && indent_failures.binary_search(&line_from).is_ok();
+            let mut keep = if !simple {
                 0
+            } else if indent_line {
+                keep
+            } else {
+                keep.min(real.saturating_sub(candidates.len()))
             };
             for &(tok_start, tok_end) in &lexer_errors[la..lb] {
                 if keep == 0 {
@@ -1315,15 +1406,26 @@ pub(super) fn quiet_bison_recovery(
                         .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'.'));
                 // Not one rledger already reads into an invalid token of its
                 // own, or reports an error at.
-                let covered = order
-                    .get(at_or_after)
-                    .is_some_and(|&scan| effective[scan] < tok_end)
-                    || {
-                        let next_error = invalid.partition_point(|run| run.start <= tok_start);
-                        next_error
-                            .checked_sub(1)
-                            .is_some_and(|next_error| invalid[next_error].end > tok_start)
-                    };
+                // On an indent line the line error is the indent's, and covers
+                // no token (nor does an invalid token rledger merged into it);
+                // a BOM's own diagnostic already names it.
+                let covered = if indent_line {
+                    text.contains(crate::bom::BOM_CHAR)
+                        || order[at_or_after..]
+                            .iter()
+                            .take_while(|&&scan| effective[scan] < tok_end)
+                            .any(|&scan| scan != trigger)
+                } else {
+                    order
+                        .get(at_or_after)
+                        .is_some_and(|&scan| effective[scan] < tok_end)
+                        || {
+                            let next_error = invalid.partition_point(|run| run.start <= tok_start);
+                            next_error
+                                .checked_sub(1)
+                                .is_some_and(|next_error| invalid[next_error].end > tok_start)
+                        }
+                };
                 if covered {
                     continue;
                 }
@@ -1334,6 +1436,13 @@ pub(super) fn quiet_bison_recovery(
                     ))
                 } else if misgrouped_number {
                     crate::ParseErrorKind::InvalidNumber(text.to_string())
+                } else if indent_line && !first.is_ascii_digit() {
+                    // (One that starts with a digit is an invalid date, which
+                    // rledger reports wherever it stands.)
+                    crate::ParseErrorKind::SyntaxError(format!(
+                        "unexpected input: invalid token '{}'",
+                        super::convert::invalid_token_name(text)
+                    ))
                 } else {
                     continue;
                 };
@@ -1390,6 +1499,142 @@ pub(super) fn quiet_bison_recovery(
     if !added.is_empty() {
         errors.extend(added);
         errors.sort_by_key(|x| x.span.start);
+    }
+}
+
+/// What the lines before an orphan indented line say about bison's state at
+/// its indent ([`before_orphan_indent`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Before {
+    /// Nothing that keeps bison recovering: it reports the indent.
+    Reporting,
+    /// A run of indented `;` comments after a gap, which rledger accepts on
+    /// purpose: bison failed at its indent and is still recovering.
+    AcceptedComment,
+    /// An indented line bison fails at, which rledger reads as part of the
+    /// entry before it (after an `option "a" "b"` bison built there): bison
+    /// is still recovering from that line's indent.
+    Unreported,
+    /// A line holding a stray `\r` or a BOM, which this parser reads
+    /// differently from beancount (#2980, #2956), or an error from which no
+    /// recovery is modeled: unknown.
+    Unmodeled,
+}
+
+/// Whether bison may still be recovering at the indent of the orphan
+/// indented line starting at `ls`, read back from it over the lines after
+/// `floor`, the line the last recovery window started at (from there on the
+/// window decided).
+///
+/// An indented line's indent is an error to bison (one it reports only when
+/// it is not recovering), and its line end one shift; a gap line (a blank
+/// line, a line beancount's lexer skips at column 0) is a shift. So from the
+/// last indented line before `ls`, two gap lines end a recovery, and an
+/// indented line in between starts the count over, unless bison can start a
+/// statement on it (a date or a keyword), which may end the recovery. Read
+/// back that way, the run of lines `ls` is in starts at:
+///
+/// - an indented `;` comment after a gap or at the top of the file, which
+///   rledger accepts on purpose, where beancount fails at its indent
+///   (`syntax error, unexpected INDENT`, which the parity harness drops,
+///   `is_indented_comment_indent_error`): bison is still recovering at `ls`,
+///   so its indent is discarded in silence (`  ; c` then `  $x` is one error
+///   on the `$x` line; with two blank lines between, two);
+/// - `unreported`, an indented line bison fails at that rledger does not
+///   report: the same;
+/// - anything else (a column-0 statement, an indented line with a date or a
+///   keyword, two gap lines, the top of the file, `floor`), where rledger's
+///   own errors decide, as before.
+///
+/// Unless one of the four lines before `ls` holds a stray `\r`, a BOM or an
+/// error of rledger's that started no window (`unstarted`: an invalid
+/// account, which beancount may read as an invalid token), whose own failure
+/// may still keep bison recovering at `ls`, unmodeled.
+///
+/// Calls come in ascending order, each with the last one's line as its
+/// `floor`, so each line is read about once.
+fn before_orphan_indent(
+    src: &str,
+    ls: usize,
+    floor: Option<usize>,
+    unreported: Option<usize>,
+    unstarted: &[usize],
+) -> Before {
+    let line_before = |end: usize| {
+        let ps = src[..end - 1].rfind('\n').map_or(0, |i| i + 1);
+        (ps, &src[ps..end])
+    };
+    let indented_comment = |line: &str| {
+        let rest = line.trim_start_matches([' ', '\t']);
+        rest.len() < line.len() && rest.starts_with(';')
+    };
+    // A blank line, a `;` comment at column 0, or a line beancount's lexer
+    // skips there: `*`, `:`, `#` or a flag character with more after it (not
+    // a `#` starting a tag).
+    let gap = |line: &str| {
+        let b = line.as_bytes();
+        line.trim_matches([' ', '\t', '\r', '\n']).is_empty()
+            || line.starts_with(';')
+            || (b.len() >= 2
+                && b"*:#!&?%".contains(&b[0])
+                && !matches!(b[1], b'\r' | b'\n')
+                && !(b[0] == b'#' && (b[1].is_ascii_alphanumeric() || b"-_/.".contains(&b[1]))))
+    };
+    let mut end = ls;
+    for _ in 0..4 {
+        if end == 0 {
+            break;
+        }
+        let (ps, line) = line_before(end);
+        if floor == Some(ps) {
+            break;
+        }
+        if super::convert::holds_a_stray_cr(line) || line.contains(crate::bom::BOM_CHAR) {
+            return Before::Unmodeled;
+        }
+        end = ps;
+    }
+    let i = unstarted.partition_point(|&at| at < end);
+    if unstarted.get(i).is_some_and(|&at| at < ls) {
+        return Before::Unmodeled;
+    }
+    let mut end = ls;
+    let mut gaps = 0;
+    loop {
+        if end == 0 {
+            return Before::Reporting;
+        }
+        let (ps, line) = line_before(end);
+        if floor == Some(ps) {
+            return Before::Reporting;
+        }
+        #[cfg(test)]
+        crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
+            .with(|c| c.set(c.get() + line.len()));
+        if gap(line) {
+            gaps += 1;
+            if gaps == 2 {
+                return Before::Reporting;
+            }
+        } else if unreported == Some(ps) {
+            return Before::Unreported;
+        } else if indented_comment(line) {
+            if ps == 0 || gap(line_before(ps).1) {
+                return Before::AcceptedComment;
+            }
+            gaps = 0;
+        } else if line.starts_with([' ', '\t'])
+            && !BcLexer::at_line_start(src, ps)
+                .take_while(|(t, r)| r.start < end && *t != Bc::Eol)
+                .any(|(t, _)| matches!(t, Bc::Date | Bc::Kw(_)))
+        {
+            // An indented line on which bison can start no statement: inside
+            // a recovery, its indent starts the count over too.
+            gaps = 0;
+        } else {
+            return Before::Reporting;
+        }
+        end = ps;
     }
 }
 
@@ -1671,6 +1916,16 @@ mod tests {
                 "$ 2024-01-02 * \"y\" $\n  Assets:A 1 USD\n".repeat(N),
             ),
             ("misgrouped numbers", "$\n  x 1,50\n".repeat(N)),
+            ("orphan indented lines", "  $x\n\n\n".repeat(N)),
+            (
+                "orphan lines after indented comments",
+                "\n".to_string() + &"  ; c\n  ; d\n\n  $x\n\n\n".repeat(N),
+            ),
+            (
+                "orphan lines in a long body",
+                "2024-01-01 open Assets:A\n".to_string()
+                    + &"  $x\n  kk: \"v\"\n  kk: \"v\"\n  kk: \"v\"\n".repeat(N),
+            ),
         ] {
             RECOVERY_SHIFT_SCANNED_BYTES.with(|c| c.set(0));
             let _ = crate::parse(&src);

@@ -2000,6 +2000,38 @@ fn tags_after_first_posting_are_an_error_and_dropped() {
     }
 }
 
+/// A tag line after a transaction's first posting is reported on that tag
+/// line. A deliberate divergence from Python: beancount 3.2.3 reports "Tags
+/// or links not allowed after first Posting" on the transaction's header
+/// line (line 1 here), its builder raising it at the transaction; rledger
+/// points at the line holding the mistake (#2575). The parse-error parity
+/// harness moves beancount's report to the tag line to match.
+#[test]
+fn test_parse_tags_after_first_posting_are_reported_on_the_tag_line() {
+    let src = "2024-01-02 * \"x\"\n  Assets:A 1 USD\n  #tag\n  Assets:A -1 USD\n";
+    for (path, result) in [
+        ("parse", rustledger_parser::parse(src)),
+        (
+            "parse_red_only",
+            rustledger_parser::cst::parse_red_only(src),
+        ),
+    ] {
+        let lines: Vec<usize> = result
+            .errors
+            .iter()
+            .map(|e| src[..e.span.start].matches('\n').count() + 1)
+            .collect();
+        assert_eq!(lines, [3], "{path}: {:?}", result.errors);
+        assert!(
+            result.errors[0]
+                .message()
+                .contains("not allowed after a transaction's first posting"),
+            "{path}: {:?}",
+            result.errors
+        );
+    }
+}
+
 /// `ParseResult::account_at` binary-searches `account_occurrences`, so the
 /// occurrences must be in source order and must not overlap. Pinned on a
 /// ledger with accounts in every position (headers, postings, metadata,

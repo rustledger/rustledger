@@ -706,7 +706,14 @@ use crate::types::{Error, LedgerOptions};
 /// `1e-28` where it was `0`. Parsed directives do not move, so the loader's
 /// cache does not; both payloads here archive booked directives, and an
 /// older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 135;
+/// v136: loader v77, unchanged (after #3039's v135);
+/// parse errors move. An orphan indented line that beancount fails at its
+/// indent reports that failure and each lexer error on it (`  $x` is two
+/// errors, the second naming `$x`); one beancount is still recovering at
+/// (after an indented comment rledger accepts) keeps its lexer errors only.
+/// Parsed directives do not move, and every such source has a parse error,
+/// before and after, which the loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 136;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

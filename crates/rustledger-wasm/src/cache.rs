@@ -699,7 +699,14 @@ use crate::types::{Error, LedgerOptions};
 /// its depth-first file id, so the order of tied positions in an "Attempt to
 /// pad an entry with cost" matches bean-check when an included file includes
 /// another. An older blob would keep serving the depth-first ranks.
-pub const CACHE_VERSION: u32 = 134;
+/// v135: loader v77, unchanged; booked
+/// directives move. `prorate` no longer rounds a share of exactly half of
+/// `1e-28` to zero (ties to even) but to `1e-28`, so a total price (`@@`)
+/// split across lots, and the sale value its gain is booked from, can be
+/// `1e-28` where it was `0`. Parsed directives do not move, so the loader's
+/// cache does not; both payloads here archive booked directives, and an
+/// older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 135;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

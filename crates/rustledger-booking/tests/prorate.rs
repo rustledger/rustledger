@@ -308,3 +308,61 @@ fn a_huge_ideal_scale_yields_a_valid_decimal() {
     );
     assert_eq!(rebuilt, share);
 }
+
+/// The differential proptest's shrunk case. The product `2e-28` is exact, so
+/// the fast path divides it, and `rust_decimal` breaks the tie at
+/// `5e-29` to EVEN, which is zero. A nonzero share must not come back as zero:
+/// the exact quotient rounded once, ties away from zero, is `1e-28`.
+#[test]
+fn test_prorate_half_floor_tie_is_not_rounded_to_zero() {
+    let value = dec("0.0000000000000000000000001");
+    let num = dec("0.002");
+    let den = dec("4");
+    assert_eq!(
+        value.checked_mul(num).and_then(|p| p.checked_div(den)),
+        Some(Decimal::ZERO),
+        "the premise: the fast path's own division rounds this tie to zero"
+    );
+    assert_eq!(
+        prorate(value, num, den),
+        Some(dec("0.0000000000000000000000000001"))
+    );
+    assert_eq!(
+        prorate(value, num, -den),
+        Some(dec("-0.0000000000000000000000000001")),
+        "the sign is kept on the rounded share"
+    );
+}
+
+/// The older saved seed: the product `1e-29` needs 29 places and is rounded
+/// to zero by `checked_mul`, which the scale guard catches; the share `1e-28`
+/// is ordinary.
+#[test]
+fn test_prorate_product_below_the_floor_share_above_it() {
+    assert_eq!(
+        prorate(
+            dec("0.00000000000000000001"),
+            dec("0.000000001"),
+            dec("0.1")
+        ),
+        Some(dec("0.0000000000000000000000000001"))
+    );
+}
+
+/// The other side of the half-floor fall-through: a share genuinely below
+/// half of `1e-28` is still zero, from either path.
+#[test]
+fn test_prorate_share_below_half_the_floor_is_zero() {
+    assert_eq!(
+        prorate(
+            dec("0.0000000000000000000000000001"),
+            Decimal::ONE,
+            dec("4")
+        ),
+        Some(Decimal::ZERO)
+    );
+    assert_eq!(
+        prorate(Decimal::ZERO, Decimal::ONE, dec("4")),
+        Some(Decimal::ZERO)
+    );
+}

@@ -351,14 +351,16 @@ fn test_parse_dated_line_lone_date_with_a_glued_comment() {
     ]);
 }
 
-/// After a line with an error of its own, which beancount may report on the
-/// dated line (a flag-only posting `  !`), the dated line keeps both its
-/// errors: two there, as beancount counts that line.
+/// After a line that fails at its end (a flag-only posting `  !`), the dated
+/// line is inside bison's recovery: its invalid date, the lexer's error, is
+/// its one error. beancount reports the posting's `unexpected EOL` on the
+/// dated line; rledger reports it on the posting's own line, where the
+/// mistake is, on purpose (the parity harness moves beancount's end-of-line
+/// errors back one line, #2993).
 #[test]
 fn test_parse_dated_line_invalid_second_date_after_an_error_line() {
     let src = "2024-01-02 * \"x\"\n  !\n2024-01-02 2024-02-30 \"n\"\n";
-    let counts = per_line(src);
-    assert!(counts.contains(&(3, 2)), "{counts:?}");
+    assert_eq!(per_line(src), vec![(2, 1), (3, 1)]);
 }
 
 /// A lone capital after a second date is a transaction's flag to beancount,
@@ -512,13 +514,16 @@ fn test_parse_dated_line_glued_date_at_the_last_owed_token() {
     ]);
 }
 
-/// The invalid-second-date rule leaves the line alone after an `open` with
-/// no account, whose error beancount reports on the dated line: two errors
-/// there, as beancount counts that line.
+/// After an `open` with no account, which fails at its end of line, the
+/// dated line is inside bison's recovery: its invalid second date is its one
+/// error. (beancount reports the `open`'s `unexpected EOL` on the dated line,
+/// rledger on the `open`'s, on purpose; see the test above.)
 #[test]
 fn test_parse_dated_line_invalid_second_date_after_an_open_without_account() {
-    let counts = per_line("2024-01-01 open\n2024-01-02 2024-13-45\n");
-    assert!(counts.contains(&(2, 2)), "{counts:?}");
+    assert_eq!(
+        per_line("2024-01-01 open\n2024-01-02 2024-13-45\n"),
+        vec![(1, 1), (2, 1)]
+    );
 }
 
 /// The other punctuation beancount lexes as a token of its own

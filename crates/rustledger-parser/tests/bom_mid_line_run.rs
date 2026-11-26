@@ -592,8 +592,10 @@ fn test_parse_bom_led_line_tails_count_as_beancount() {
 }
 
 /// An account glued to a line-start BOM is not taken for an account of its
-/// own when the line is recovered after an error line: the BOM's diagnostic
-/// stands for the word, as it did before the BOM's run was split.
+/// own when the line is recovered after an error line. beancount reads the
+/// whole word as an account (a BOM is a character an account may hold), and
+/// bison, still recovering from the `x` line, discards it: the line reports
+/// nothing, as in bean-check 3.2.3 (#2993).
 #[test]
 fn test_parse_bom_glued_unicode_account_after_error_line_is_not_counted_twice() {
     let src = format!("{HEAD}x\n{BOM}F\u{77E}:\u{DC}\n");
@@ -606,7 +608,7 @@ fn test_parse_bom_glued_unicode_account_after_error_line_is_not_counted_twice() 
         "{:?}",
         result.errors
     );
-    assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
+    assert_eq!(bom_errors(&result), 0, "{:?}", result.errors);
 }
 
 /// An account word only partly inside an invalid token keeps main's message,

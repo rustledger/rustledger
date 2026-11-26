@@ -2225,20 +2225,20 @@ fn test_cause_brace_hash_before_tag_needs_more_errors() {
 }
 
 /// `brace-hash-before-tag` takes each character a tag starts with
-/// (beancount's `TAG`, `#[A-Za-z0-9-_/.]+`). Real counts (`recorded_row`):
-/// beancount 1 and rledger 2 for `"x" {#_`, `"x" {#.` and `"x" {#a`. rledger
-/// counts `"x" {#-`, `"x" {#/` and `"x" {#1` 1, as beancount does, so their
-/// counts here are made up.
+/// (beancount's `TAG`, `#[A-Za-z0-9-_/.]+`). rledger counts every one of
+/// these 1, as beancount does (`"x" {#_`, `"x" {#.` and `"x" {#a` counted 2
+/// until #2993's recovery model quieted the invalid run after the line's
+/// failure), so the counts here are made up.
 #[test]
 fn test_cause_brace_hash_before_tag_takes_each_tag_character() {
-    for tail in ["\"x\" {#_\\n", "\"x\" {#.\\n", "\"x\" {#a\\n"] {
-        assert_eq!(
-            recorded_cause(tail, "3:1 3:2 3:1 3:2 3:1 3:1 - - -", 3),
-            Some("brace-hash-before-tag"),
-            "{tail}"
-        );
-    }
-    for text in ["\"x\" {#-", "\"x\" {#/", "\"x\" {#1"] {
+    for text in [
+        "\"x\" {#_",
+        "\"x\" {#.",
+        "\"x\" {#a",
+        "\"x\" {#-",
+        "\"x\" {#/",
+        "\"x\" {#1",
+    ] {
         assert_eq!(
             line3_cause(text, &line3_counts(1, 2, 1, 0)),
             Some("brace-hash-before-tag"),

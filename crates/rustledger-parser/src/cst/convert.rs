@@ -521,6 +521,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         &grammar_failures,
         &transactions,
     );
+    super::recovery::quiet_bison_recovery(
+        &mut errors,
+        source_file.syntax(),
+        stripped,
+        bom_offset,
+        &grammar_failures,
+    );
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
     // Last: every pass above keys on where an error starts.
@@ -4201,11 +4208,17 @@ fn meta_entry_check(
 ) {
     use crate::SyntaxKind as K;
     let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    // Where this directive's errors so far start, sorted (see `MetaCheck`).
+    let mut own_starts: Vec<usize> = errors[errors_before..]
+        .iter()
+        .map(|e| e.span.start)
+        .collect();
+    own_starts.sort_unstable();
     let mut ctx = MetaCheck {
         stripped,
         off: bom_offset as usize,
         prior_error_starts,
-        errors_before,
+        own_starts,
         errors,
         tokens,
     };
@@ -4249,7 +4262,12 @@ struct MetaCheck<'a> {
     stripped: &'a str,
     off: usize,
     prior_error_starts: &'a [usize],
-    errors_before: usize,
+    /// Where the directive's errors start, sorted, from before the check: a
+    /// line with one of them is not checked. The errors the check adds are
+    /// each on an earlier line, so the snapshot is enough, and the test is a
+    /// binary search per line (a scan per line was quadratic in a directive
+    /// with many bad metadata lines).
+    own_starts: Vec<usize>,
     errors: &'a mut Vec<crate::ParseError>,
     tokens: &'a mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 }
@@ -4286,10 +4304,8 @@ impl MetaCheck<'_> {
             .get(first_after)
             .copied()
             .filter(|&s| s <= to);
-        if self.errors[self.errors_before..]
-            .iter()
-            .any(|e| (from..=to).contains(&e.span.start))
-        {
+        let i = self.own_starts.partition_point(|&s| s < from);
+        if self.own_starts.get(i).is_some_and(|&s| s <= to) {
             return;
         }
         let Some(before) = report_defects_before(first_prior, self.tokens, off) else {
@@ -4353,6 +4369,16 @@ fn posting_line_check(
     use crate::SyntaxKind as K;
     let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
     let off = bom_offset as usize;
+    // Where this directive's errors so far start, sorted, for the per-posting
+    // test below: a binary search, where a scan of them per posting was
+    // quadratic in a transaction with many bad postings. The errors this
+    // check adds are each inside an earlier posting, so none of them is in a
+    // later posting's range and the snapshot is enough.
+    let mut own_starts: Vec<usize> = errors[errors_before..]
+        .iter()
+        .map(|e| e.span.start)
+        .collect();
+    own_starts.sort_unstable();
     let mut at = usize::from(node.text_range().start());
     for child in node.green().children() {
         let posting_start = at;
@@ -4405,10 +4431,8 @@ fn posting_line_check(
             .get(first_after)
             .copied()
             .filter(|&s| s < to);
-        if errors[errors_before..]
-            .iter()
-            .any(|e| (from..to).contains(&e.span.start))
-        {
+        let i = own_starts.partition_point(|&s| s < from);
+        if own_starts.get(i).is_some_and(|&s| s < to) {
             continue;
         }
         let Some(before) = report_defects_before(first_prior, tokens, off) else {
@@ -10053,7 +10077,8 @@ enum Trigger {
 /// would shift a declaration ([`first_resync_point`]: a dated header after a
 /// blank, `2024-01-02 2024-01-03 * "n"`, or an undated declaration's keyword,
 /// `2024-01-02 option "a" "b"`), its recovery ends and it builds that
-/// declaration; that is not modeled either, so a dated line holding one starts
+/// declaration; that is not modeled in this pass (the general model after it
+/// does, `super::recovery`), so a dated line holding one starts
 /// no window, a column-0 line holding one ends a window before it, keeping its
 /// errors, and an indented one is quiet and ends the window after it, as
 /// beancount reports the line after it. A failed dated line inside a quiet window starts with a date bison
@@ -10110,9 +10135,16 @@ enum Trigger {
 /// may still be recovering from that one; nor one whose node runs past its
 /// line. (A string left unclosed to the end of the input is cut at its
 /// line and does start a window: beancount's string runs to the end of
-/// the file, so nothing after it is reported there either.) An indented
-/// line after a failed dated header, or after a failed undated declaration
-/// with a blank line between, is #2993's part B, not modeled.
+/// the file, so nothing after it is reported there either.)
+///
+/// What this pass leaves alone, the general model after it
+/// ([`super::recovery::quiet_bison_recovery`], #2993 part B) reads on
+/// beancount's own tokens: the window after every failed line (a header, a
+/// posting, a metadata line), the dates and keywords bison shifts mid-line,
+/// and the entry it builds at one (#2979). This pass stays ahead of it for
+/// the shapes it calibrates, which the general model does not yet cover
+/// alone (disabling either window kind here moves inputs away from
+/// beancount: the line a BOM starts, an invalid second date).
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree once and
 /// lexes each line after a failed line at most once.
@@ -10646,6 +10678,37 @@ fn quiet_after_failed_line_starts(
     });
 }
 
+/// Whether `e`, an error on a declaration's header line, is one at which
+/// beancount's grammar or lexer fails the statement (#2993 part B), so its
+/// recovery starts there: a grammar error or a construct check, an invalid
+/// token or date, an unclosed string. Not an error beancount's builder raises
+/// while it still builds the entry (`is_a_builder_error`: a booking method, too
+/// many strings), nor an account-name check, which beancount makes of a
+/// statement it builds, nor rledger's own diagnostics (the deprecated pipe,
+/// a pop of nothing pushed).
+pub(super) fn fails_the_header(e: &crate::ParseError) -> bool {
+    use crate::ParseErrorKind as K;
+    !is_a_builder_error(e)
+        && !matches!(&e.kind, K::SyntaxError(m) if is_a_builder_message(m))
+        && matches!(
+            e.kind,
+            K::SyntaxError(_)
+                | K::Expected(_)
+                | K::UnexpectedChar(_)
+                | K::UnexpectedEof
+                | K::MissingField(_)
+                | K::MissingAccount
+                | K::MissingAmount
+                | K::MissingCurrency
+                | K::MissingDirective
+                | K::MissingNewline
+                | K::InvalidDate(_)
+                | K::InvalidDateValue(_)
+                | K::UnclosedString
+                | K::InvalidEscape(_)
+        )
+}
+
 /// Whether `line` holds a number beancount's lexer rejects: a run of digits
 /// and commas, ending in a digit, whose commas are not thousands separators
 /// (`1,50`, `1234,567`, `1,000,0`; beancount reports `ValueError: Invalid
@@ -10703,7 +10766,7 @@ fn holds_a_misgrouped_number(line: &str) -> bool {
 /// parser reads it in ways that differ from that by context (#2980, `\r;c` is
 /// an error here, a blank line there), so the recovery windows after an
 /// unreadable line do not reach across such a line (#2993).
-fn holds_a_stray_cr(text: &str) -> bool {
+pub(super) fn holds_a_stray_cr(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes
         .iter()
@@ -11038,7 +11101,7 @@ fn header_grammar_reaches(root: &crate::SyntaxNode, stripped: &str, first: usize
 /// An unreadable token's text as an error message names it: escaped (so a
 /// control character or a quote cannot garble the message) and capped at 40
 /// characters, with `...` after a longer one.
-fn invalid_token_name(text: &str) -> String {
+pub(super) fn invalid_token_name(text: &str) -> String {
     const MAX: usize = 40;
     let mut name: String = text
         .chars()
@@ -11590,6 +11653,20 @@ fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bo
 /// first line, not at a token. An invalid booking method, and too many
 /// strings on a transaction header (whose span starts at the first string, on
 /// that line, for this reason).
+/// Whether `m` is the message of a check beancount's builder makes of a
+/// posting or an entry it builds, after its grammar has read them: a
+/// posting's cost or price (`posting_builder_error`), a tag line after the
+/// first posting, a repeated metadata key. Such an entry is built, so its
+/// grammar does not fail there and no recovery starts (#2993).
+fn is_a_builder_message(m: &str) -> bool {
+    m.contains("as beancount reports")
+        || m.contains("as in beancount")
+        || m.starts_with(crate::COST_PRICE_CURRENCY_MISMATCH)
+        || m.contains("not allowed after a transaction's first posting")
+        || m.starts_with("duplicate metadata field")
+        || m.starts_with("duplicate posting metadata field")
+}
+
 fn is_a_builder_error(e: &crate::ParseError) -> bool {
     match &e.kind {
         crate::ParseErrorKind::InvalidBookingMethod(_) => true,
@@ -11629,13 +11706,37 @@ fn report_at_multi_line_string_ends(
         return;
     }
     let off = bom_offset as usize;
+    // Every string that runs over a line end, as (start, offset of its last
+    // `\n` in it), in order: one walk of the green tree, so each error's
+    // lookup below is a binary search, not a descent from the root that
+    // scans the root's children (quadratic in a file with many errors).
+    let mut multi_line: Vec<(usize, usize)> = Vec::new();
+    let mut stack = vec![(root.green(), 0usize)];
+    while let Some((node, start)) = stack.pop() {
+        let mut pos = start;
+        for el in node.children() {
+            match el {
+                rowan::NodeOrToken::Node(n) => stack.push((n, pos)),
+                rowan::NodeOrToken::Token(t) => {
+                    let kind =
+                        <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+                    if kind == crate::SyntaxKind::STRING
+                        && let Some(nl) = t.text().rfind('\n')
+                    {
+                        multi_line.push((pos, nl));
+                    }
+                }
+            }
+            pos += usize::from(el.text_len());
+        }
+    }
+    multi_line.sort_unstable();
     // The multi-line string at `at` (stripped frame), if one starts there.
     let string_at = |at: usize| {
-        let offset = u32::try_from(at).ok()?;
-        let token = root.token_at_offset(offset.into()).right_biased()?;
-        (token.kind() == crate::SyntaxKind::STRING && usize::from(token.text_range().start()) == at)
-            .then(|| token.text().rfind('\n'))
-            .flatten()
+        multi_line
+            .binary_search_by_key(&at, |&(s, _)| s)
+            .ok()
+            .map(|i| multi_line[i].1)
     };
     let is_blank = |b: &u8| matches!(b, b' ' | b'\t');
     // First, without the gap rule: the errors whose first token is one.

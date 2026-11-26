@@ -234,14 +234,14 @@ fn test_transaction_holds_invalid_token_counts_a_bom_line_after_it() {
 /// Documented: the same recovery follows a line beancount cannot read for a
 /// reason other than a BOM (`5`, `$x`), modeled since #2993: the plain
 /// account line after `5` is its invalid token's error alone, as in
-/// beancount. That window ends at a line a BOM starts, a BOM-led account
-/// included, which it leaves as the parse gives it: one more than beancount
-/// there, as before.
+/// beancount, and so is the BOM-led one: bison's recovery reads beancount's
+/// own tokens, so a line a BOM starts is quiet like any other (one error
+/// there, the invalid run's).
 #[test]
 fn test_parse_bom_account_after_another_unreadable_line_counts_as_a_plain_account() {
     let bom = per_line(&format!("{OPENS}5\n{BOM}:A\"\n; c\n"));
     let plain = per_line(&format!("{OPENS}5\nAssets:A\"\n; c\n"));
     // beancount counts one on line 4 for both.
     assert_eq!(plain, vec![(3, 1), (4, 1)]);
-    assert_eq!(bom, vec![(3, 1), (4, 2)]);
+    assert_eq!(bom, vec![(3, 1), (4, 1)]);
 }

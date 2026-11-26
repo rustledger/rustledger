@@ -1763,6 +1763,9 @@ fn interpolate_inner(
                         // infer just the currency, exactly as the units path does
                         // for a bare `120.00`. Treating this as a sigil overwrote
                         // the author's rate with whatever balanced the books.
+                        // Only a cost-less posting gets here; the same
+                        // `@ 1.20` beside a cost takes the cost's currency in
+                        // `complete_price_currencies_from_cost` (#3047).
                         price_number_known.push((i, amount.clone(), price.kind, *price_number));
                     } else {
                         // A bare `@` / `@@` sigil, or `@ USD`: the NUMBER is to be
@@ -2416,6 +2419,8 @@ fn interpolate_inner(
         }
     }
 
+    complete_price_currencies_from_cost(transaction, inferred_cost_currency.as_ref(), rollback);
+
     // Prune postings filled from an ALREADY-ZERO residual. Beancount drops
     // exactly these — they contribute nothing to the balance and would just
     // clutter BQL / JSON / format output.
@@ -2480,6 +2485,49 @@ fn interpolate_inner(
     // Return the residuals we've been tracking incrementally
     // (no need to recalculate - we've updated residuals as we filled amounts)
     Ok((final_filled_indices, residuals.into_map()))
+}
+
+/// Give a price written without a currency (`@ 7`, `@@ 14`) on a posting at
+/// cost the cost's currency, keeping the number (#3047).
+///
+/// Beancount's rule, from `booking_full.categorize_by_currency`: `price_currency
+/// is MISSING and cost_currency is a str` fills the price from the cost. It is
+/// the rule [`currency_slots`] applies when categorizing, which only ever READ
+/// it: the booked posting kept a bare `NumberOnly` price, so every consumer of
+/// the price annotation (BQL's `price` column, `implicit_prices`,
+/// [`crate::price_weight`]) saw no price at all. A cost whose own currency is
+/// elided (`{5} @ 7`) takes the currency booking or interpolation gave the
+/// cost, as beancount's `replace_currencies` writes the group currency into
+/// both.
+///
+/// Runs after every fill, so it reads the cost currency as booked, through
+/// the canonical [`crate::cost_currency_of`]. The cost-less `@ 1.20` is a
+/// different case, solved against the residual above (`price_number_known`):
+/// there the price IS the weight, whereas cost beats price, so completing the
+/// price here never changes the balance.
+fn complete_price_currencies_from_cost(
+    transaction: &mut Transaction,
+    inferred_cost_currency: Option<&Currency>,
+    rollback: &mut Rollback,
+) {
+    for idx in 0..transaction.postings.len() {
+        let posting = &transaction.postings[idx];
+        let Some(IncompleteAmount::NumberOnly(number)) =
+            posting.price.as_deref().and_then(|p| p.amount.as_ref())
+        else {
+            continue;
+        };
+        let number = *number;
+        // `None` without a cost spec, so a cost-less posting is never touched.
+        let Some(currency) = crate::cost_currency_of(posting, || inferred_cost_currency.cloned())
+        else {
+            continue;
+        };
+        rollback.touch(transaction, idx);
+        if let Some(price) = transaction.postings[idx].price.as_deref_mut() {
+            price.amount = Some(IncompleteAmount::Complete(Amount::new(number, currency)));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5027,6 +5075,63 @@ mod tests {
             Some(dec!(1.20))
         );
         assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+    }
+
+    /// `@ 6` beside a cost takes the COST's currency, not the residual's
+    /// (#3047): beancount's `categorize_by_currency` fills a missing price
+    /// currency from the cost currency. Covers a written cost currency, one
+    /// interpolation infers (`{5}`), and elided units solved from the cost.
+    #[test]
+    fn test_interpolate_price_number_beside_a_cost_takes_the_cost_currency() {
+        let priced = |units: IncompleteAmount, cost: CostSpec, number: Decimal| {
+            let mut posting = Posting::new("Assets:S", Amount::new(dec!(0), "STK"));
+            posting.units = Some(units);
+            posting
+                .with_cost(cost)
+                .with_price(rustledger_core::PriceAnnotation::unit_incomplete(
+                    IncompleteAmount::NumberOnly(number),
+                ))
+        };
+        let cases = [
+            // Written cost currency, other leg in the same one.
+            (
+                IncompleteAmount::Complete(Amount::new(dec!(2), "STK")),
+                per_unit_cost(dec!(5), "EUR"),
+                Posting::new("Assets:C", Amount::new(dec!(-10), "EUR")),
+                "EUR",
+            ),
+            // Cost currency elided; interpolation infers USD from the cash leg.
+            (
+                IncompleteAmount::Complete(Amount::new(dec!(2), "STK")),
+                CostSpec::empty().with_number(CostNumber::PerUnit { value: dec!(5) }),
+                Posting::new("Assets:C", Amount::new(dec!(-10), "USD")),
+                "USD",
+            ),
+            // Units number elided, solved from the cost.
+            (
+                IncompleteAmount::CurrencyOnly("STK".into()),
+                per_unit_cost(dec!(5), "USD"),
+                Posting::new("Assets:C", Amount::new(dec!(-10), "USD")),
+                "USD",
+            ),
+        ];
+        for (units, cost, cash, currency) in cases {
+            let txn = Transaction::new(date(2020, 2, 1), "priced at cost")
+                .with_synthesized_posting(priced(units, cost, dec!(6)))
+                .with_synthesized_posting(cash);
+            let result = interpolate(&txn).expect("interpolates");
+            assert_eq!(
+                solved_price(&result.transaction.postings[0]),
+                Some((
+                    dec!(6),
+                    Currency::from(currency),
+                    rustledger_core::PriceKind::Unit
+                )),
+                "{currency}"
+            );
+            // Cost beats price: the completed price does not move the balance.
+            assert!(result.residuals.values().all(Decimal::is_zero));
+        }
     }
 
     /// The fallback candidate scan must see a price currency written WITHOUT a

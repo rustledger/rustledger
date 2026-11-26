@@ -734,7 +734,13 @@ use crate::types::{Error, LedgerOptions};
 /// after an `option` in a transaction's body reports its indent. Parsed
 /// directives do not move, and every such source has a parse error, before
 /// and after, which the loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 139;
+/// v140: loader v79, unchanged (after #3043's v139);
+/// booked directives move. A price written without a currency on a
+/// posting at cost (`-2 STK {5 USD} @ 7`) books in the cost's currency
+/// (`7 USD`, #3047) where it kept a bare number. Parsed directives do not
+/// move, so the loader's cache does not; both payloads here archive booked
+/// directives, and an older blob would keep serving the bare price.
+pub const CACHE_VERSION: u32 = 140;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

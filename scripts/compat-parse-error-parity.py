@@ -59,6 +59,16 @@ Normalization, applied identically to both sides:
     merging (`{*}`), which rledger implements deliberately. Those errors are
     dropped from beancount's side (`is_not_syntax` from the matrix script,
     the predicate that excludes them there, plus `NOT_PARSE_ERRORS`).
+  * Indented comments: rledger reads a line of blanks and a `;` comment
+    after a column-0 comment, a blank line or the top of the file as a
+    comment (`; note` then `  ; continued`), a deliberate difference (Python
+    compatibility policy): beancount reports `syntax error, unexpected
+    INDENT` there, its grammar taking an indent only inside an entry. Each
+    such beancount error is dropped (`is_indented_comment_indent_error`).
+    After a directive that takes no metadata (`option`, `pushtag`, ...)
+    both report it, and it is kept. What bison's recovery from it keeps
+    quiet after it is not modeled, so a line after it that rledger reports
+    stays a mismatch.
 
 beancount can crash on some inputs (`1./00` in an amount segfaults its C
 parser; some `pushmeta` / `popmeta` values make its builder raise). Each
@@ -279,19 +289,63 @@ NOT_PARSE_ERRORS = (
 EOL_SYNTAX_ERROR = "syntax error, unexpected EOL"
 
 
+# beancount's error at the indent of a line no entry continues.
+INDENT_SYNTAX_ERROR = "syntax error, unexpected INDENT"
+
+
+def _is_indented_comment(text):
+    rest = text.lstrip(" \t")
+    return len(rest) < len(text) and rest.startswith(";")
+
+
+def _is_gap(text):
+    """A blank line, or one beancount's lexer skips at column 0: a `;`
+    comment, or `*`, `:`, `#` or a flag character with more after it (not a
+    `#` starting a tag)."""
+    if not text.strip(" \t\r") or text.startswith(";"):
+        return True
+    tag = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/."
+    return (
+        len(text) >= 2
+        and text[0] in "*:#!&?%"
+        and not (text[0] == "#" and text[1] in tag)
+    )
+
+
+def is_indented_comment_indent_error(message, line, lines):
+    """Whether beancount's error `message` on `line` (1-based) of `lines` is
+    its `unexpected INDENT` on a line of blanks and a `;` comment after a gap
+    (a blank line, a column-0 comment, the top of the file; other indented
+    comments between), which rledger reads as a comment on purpose (see the
+    module docstring). Not one after a directive that takes no metadata
+    (`option "a" "b"` then `  ; c`), which rledger reports too."""
+    if not message.startswith(INDENT_SYNTAX_ERROR) or not 0 < line <= len(lines):
+        return False
+    if not _is_indented_comment(lines[line - 1]):
+        return False
+    before = line - 2
+    while before >= 0 and _is_indented_comment(lines[before]):
+        before -= 1
+    return before < 0 or _is_gap(lines[before])
+
+
 def beancount_errors(parser, is_not_syntax, text):
     """beancount's parse errors for `text` as `[line, type, message]`."""
     _, errors, _ = parser.parse_string(strip_bom(text))
-    return keep_parse_errors(errors, is_not_syntax)
+    return keep_parse_errors(errors, is_not_syntax, strip_bom(text))
 
 
-def keep_parse_errors(errors, is_not_syntax):
-    """beancount `errors` minus the ones that are not parse errors in rledger."""
+def keep_parse_errors(errors, is_not_syntax, text=None):
+    """beancount `errors` minus the ones that are not parse errors in rledger
+    (and, given the input `text`, minus its errors at indented comments)."""
+    lines = text.split("\n") if text is not None else []
     out = []
     for e in errors:
         if is_not_syntax(e) or any(m in str(e.message) for m in NOT_PARSE_ERRORS):
             continue
         line = int((e.source or {}).get("lineno") or 0)
+        if is_indented_comment_indent_error(str(e.message), line, lines):
+            continue
         if str(e.message).startswith(EOL_SYNTAX_ERROR) and line > 1:
             line -= 1
         out.append([line, type(e).__name__, str(e.message)])
@@ -846,6 +900,21 @@ def self_test():
         lambda e: False,
     )
     assert [e[0] for e in kept] == [2, 2, 4], kept
+    # beancount's error at an indented comment no entry continues is dropped
+    # (CRLF too); one at an indented line with content is kept.
+    indent = "syntax error, unexpected INDENT"
+    for src, want in [
+        ("2024-01-01 open Assets:A\n; note\n  ; continued\n", []),
+        ("; note\r\n\t; continued\r\n", []),
+        ("\n  ; c\n", []),
+        ("* heading\n  ; c\n", []),
+        ("; note\n  x ; c\n", [2]),
+        ("option \"a\" \"b\"\n  ; c\n", [2]),
+        ("#tag\n  ; c\n", [2]),
+    ]:
+        line = 3 if src.startswith("2024") else 2
+        kept = keep_parse_errors([ParserSyntaxError(line, indent)], lambda e: False, src)
+        assert [e[0] for e in kept] == want, (src, kept)
     assert bucket("more-on-line", [[1, syn, ""]], [[1, "P0012", ""]] * 2) == "count"
     assert bucket("off-by-one", [[3, syn, ""]], [[2, "P0012", ""]]) == "lines"
     assert set(CATEGORIES) == {w for _, _, w in cases} | {"crash"}

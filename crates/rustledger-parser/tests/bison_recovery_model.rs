@@ -313,3 +313,123 @@ fn test_parse_recovery_window_with_crlf_and_no_final_newline() {
         ),
     ]);
 }
+
+/// Each shape below, with LF and with CRLF line endings.
+fn with_crlf(cases: Vec<(String, Vec<(usize, usize)>)>) -> Vec<(String, Vec<(usize, usize)>)> {
+    let crlf: Vec<_> = cases
+        .iter()
+        .map(|(src, counts)| (src.replace('\n', "\r\n"), counts.clone()))
+        .collect();
+    cases.into_iter().chain(crlf).collect()
+}
+
+/// A BOM beancount's lexer reads into an invalid token (`<BOM>g`, a BOM
+/// alone after an indent) is that token's `YYerror`, which starts bison's
+/// recovery as `$` does: what follows it on its line and on the lines the
+/// window takes is quiet, but for the lexer's own errors. Not a BOM it reads
+/// into an account, a string or a comment.
+#[test]
+fn test_parse_bom_invalid_token_starts_the_recovery_window() {
+    assert_counts(&with_crlf(vec![
+        // The account after the BOM run is discarded.
+        (format!("{P}\u{FEFF}g Ü:A\n"), vec![(2, 1)]),
+        // The invalid token after it is the lexer's error.
+        (format!("{P}\u{FEFF}12$ Ü:A $n0\n"), vec![(2, 2)]),
+        // A BOM alone on a line indented under the `open` fails it, and the
+        // next indented line's grammar error is quiet: the entry bison
+        // builds at its date fails at the string, reported.
+        (
+            format!("{P}\t\u{FEFF}\n\tT 2024-01-02 commodity EUR \"a b\"\n"),
+            vec![(2, 1), (3, 1)],
+        ),
+    ]));
+}
+
+/// An entry bison builds mid-line (#2979) whose own line holds an invalid
+/// token after its first three: the token's `YYerror` drops the entry and
+/// starts the recovery over, so the entry's indented lines are quiet.
+#[test]
+fn test_parse_invalid_token_on_a_mid_line_entry_restarts_the_window() {
+    assert_counts(&with_crlf(vec![
+        (
+            format!("{P}$ 2024-01-02 * \"y\" $\n  Assets:A  1 USD\n  Assets:B\n"),
+            vec![(2, 2)],
+        ),
+        (
+            format!("{P}\u{FEFF}g 2024-01-02 * \"n\" $x\n  Assets:A  1 USD\n  Assets:B\n"),
+            vec![(2, 2)],
+        ),
+        // A lone capital before the line end is a `CAPITAL` with `\n`, and
+        // an invalid token with `\r\n`; both count two on the line.
+        (
+            format!("{P}$ 2024-01-02 * \"y\" T\n  Assets:A  1 USD\n"),
+            vec![(2, 2)],
+        ),
+    ]));
+}
+
+/// A number beancount's lexer rejects (`1,50`: `ValueError: Invalid number
+/// format`) is one of its lexer errors, reported inside the window, where
+/// this parser reads a number and a comma.
+#[test]
+fn test_parse_misgrouped_number_inside_the_window_is_reported() {
+    let cases = with_crlf(vec![
+        (format!("{P}$\n  x 1,50\n"), vec![(2, 1), (3, 2)]),
+        // After a string that runs over a line end, on the line it ends.
+        (format!("{P}$\n  \"a\nb\" 1,50\n"), vec![(2, 1), (4, 1)]),
+        // Control: thousands separators are a number.
+        (format!("{P}$\n  x 1,000\n"), vec![(2, 1), (3, 1)]),
+    ]);
+    assert_counts(&cases);
+    let errors = parse(&format!("{P}$\n  x 1,50\n")).errors;
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == rustledger_parser::ParseErrorKind::InvalidNumber("1,50".into())),
+        "{errors:?}"
+    );
+}
+
+/// A header that fails at a token after a string running over a line end
+/// fails on the line that token is on, where beancount's lexer then is
+/// (`event "x\nb" x`: at the `x`, on line 2).
+#[test]
+fn test_parse_header_failing_after_a_multi_line_string_reports_its_last_line() {
+    assert_counts(&with_crlf(vec![
+        ("2024/1/3 event \"x\nb\" x\n".to_string(), vec![(2, 1)]),
+        (
+            format!("{P}$\n\n2024-01-02 event \"x\nb\" x\n"),
+            vec![(2, 1), (5, 1)],
+        ),
+        // Failing at the string itself: where it ends, as before.
+        (format!("{P}2024-01-02 event \"x\nb\"\n"), vec![(3, 1)]),
+    ]));
+}
+
+/// Deliberate deviation from beancount (Python compatibility policy): an
+/// indented `;` comment that no entry continues, after a column-0 comment, a
+/// line beancount skips at column 0, a blank line or the top of the file, is
+/// a comment. bean-check 3.2.3 reports `syntax error, unexpected INDENT` on
+/// each (its grammar takes an indent only inside an entry); rejecting a
+/// comment is not copied (`cst/parser.rs`, the top-level trivia loop). The
+/// parity harness drops beancount's error there
+/// (`is_indented_comment_indent_error`).
+#[test]
+fn test_parse_indented_comment_after_a_column_0_comment_is_accepted() {
+    for src in [
+        format!("{P}; note\n  ; continued\n"),
+        format!("{P}; note\n  ; continued\n\t; more\n2024-01-02 open Assets:B\n"),
+        format!("{P}\n  ; after a blank line\n"),
+        format!("{P}* heading\n  ; under an org heading\n"),
+        "; note\n  ; at the top\n".to_string(),
+    ] {
+        for src in [src.clone(), src.replace('\n', "\r\n")] {
+            assert_eq!(per_line(&src), vec![], "{src:?}");
+            let opens = parse(&src).directives.len();
+            assert_eq!(opens, src.matches(" open ").count(), "{src:?}");
+        }
+    }
+    // After a directive that takes no metadata the line is that directive's,
+    // and an error as in beancount.
+    assert_counts(&[("option \"title\" \"x\"\n  ; c\n".to_string(), vec![(2, 1)])]);
+}

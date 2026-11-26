@@ -68,9 +68,14 @@ against it row by row, without needing Python at test time.
    directive, an indented line, a metadata value), followed by one to three
    tails glued to it or after a blank.
 
-The counts are beancount's parse errors only, filtered exactly as the
-parse-error parity harness (`scripts/compat-parse-error-parity.py`) filters
-them: an invalid account name or option is a load-time error in rledger.
+The counts are beancount's parse errors only, filtered as the parse-error
+parity harness (`scripts/compat-parse-error-parity.py`) filters them: an
+invalid account name or option is a load-time error in rledger. One filter
+of the harness is not applied here (no input text is passed to its
+`keep_parse_errors`): its drop of beancount's `unexpected INDENT` at an
+indented comment, which rledger reads as a comment on purpose, so the table
+keeps beancount's counts as they are, and the test sees those lines as
+differing.
 Each input is parsed in a forked child, as beancount's C parser can crash; an
 input it crashes or raises on is left out (an unclosed `pushmeta` makes its
 builder raise; the script names each one on stderr).

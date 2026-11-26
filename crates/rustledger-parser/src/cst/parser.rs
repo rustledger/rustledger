@@ -157,6 +157,20 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         // because every emit helper below terminates at the next
         // non-indented line (blank line, col-0 comment, top-level
         // content) or EOF.
+        //
+        // Deviates from Python beancount, deliberately: an indented `;`
+        // comment line that no item continues (after a column-0 comment, a
+        // blank line, or at the top of the file: `; note` then
+        // `  ; continued`) is its indent and its comment, both trivia here,
+        // so it is a comment, as it reads. beancount 3.2.3 reports
+        // `syntax error, unexpected INDENT` there (its grammar takes an
+        // indent only inside an entry). Rejecting a comment is not copied.
+        // (After a directive that takes no metadata, `option` or `pushtag`,
+        // the line is that directive's, and rejected as beancount does.)
+        // Pinned by
+        // `test_parse_indented_comment_after_a_column_0_comment_is_accepted`
+        // (`tests/bison_recovery_model.rs`); the parse-error parity harness
+        // drops beancount's error there (`is_indented_comment_indent_error`).
         loop {
             while i < tokens.len() && tokens[i].0.is_trivia() {
                 pending_leading.push((tokens[i].0, tokens[i].1.clone()));

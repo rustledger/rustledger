@@ -11747,13 +11747,21 @@ fn report_at_multi_line_string_ends(
         .filter_map(|(i, e)| {
             // A dropped directive's whole-node error fails where its header
             // grammar does (`grammar_failures`), which may be a string after
-            // the header's start (`note "a\nb"`, with no account).
+            // the header's start (`note "a\nb"`, with no account), or a token
+            // after such a string (`event "a\nb" x`, at the `x`): a header
+            // runs over a line end only inside a string, so the failure is
+            // on the line of that token, where beancount's lexer is then.
             let j = grammar_failures.partition_point(|&(start, _, _)| start < e.span.start);
-            if let Some(&(start, _, failed_at)) = grammar_failures.get(j)
+            if let Some(&(start, header_start, failed_at)) = grammar_failures.get(j)
                 && start == e.span.start
             {
                 let at = failed_at.checked_sub(off)?;
-                return string_at(at).map(|last_newline| (i, at + last_newline + 1, true));
+                if let Some(last_newline) = string_at(at) {
+                    return Some((i, at + last_newline + 1, true));
+                }
+                let header_start = header_start.checked_sub(off)?;
+                let line = stripped.get(..at)?.rfind('\n').map_or(0, |n| n + 1);
+                return (line > header_start).then_some((i, line, true));
             }
             let from = e.span.start.checked_sub(off)?.min(stripped.len());
             let at = from + stripped[from..].bytes().take_while(is_blank).count();

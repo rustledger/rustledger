@@ -40,7 +40,17 @@
 //! ones the entry's own parse gives, so that text is parsed on its own and its
 //! errors replace rledger's on those lines. An undated declaration shifted
 //! that way (`$ pushtag #a`) changes beancount's state, which is not modeled:
-//! from there rledger's errors are kept as they are.
+//! from there rledger's errors are kept as they are. Where such an entry's
+//! own line holds an invalid token (`$ 2024-01-02 * "y" $`), that token's
+//! `YYerror` drops the entry and starts the recovery over: the line gets the
+//! errors it has parsed on its own, and the window goes on from its end.
+//!
+//! A BOM diagnostic starts the recovery where beancount's lexer reads that
+//! BOM into an invalid token (`<BOM>g`, a BOM alone after an indent), as the
+//! `$` it then stands for would. Inside the window, a lexer error rledger has
+//! no error for is added where this parser reads the text as something else:
+//! a lone capital glued to a `\r` (an invalid token) or a misgrouped number
+//! (`1,50`, `InvalidNumber`).
 
 use std::ops::Range;
 
@@ -161,6 +171,17 @@ impl<'a> BcLexer<'a> {
             src,
             pos,
             bol: true,
+            done: false,
+        }
+    }
+
+    /// A lexer at `pos`, which must be where a token ends on a line, outside
+    /// any string (flex's `^` does not hold there).
+    const fn mid_line(src: &'a str, pos: usize) -> Self {
+        Self {
+            src,
+            pos,
+            bol: false,
             done: false,
         }
     }
@@ -581,10 +602,39 @@ const fn is_droppable(e: &crate::ParseError) -> bool {
 
 /// Whether `e` starts bison's recovery where rledger reports it: an error at
 /// which beancount's grammar or lexer fails the statement
-/// (`convert::fails_the_header`), not a BOM beancount reads into an account.
+/// (`convert::fails_the_header`). A BOM diagnostic is decided by the token
+/// beancount reads the BOM into ([`bom_is_invalid_token`]).
 fn starts_recovery(e: &crate::ParseError) -> bool {
     !matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody)
         && super::convert::fails_the_header(e)
+}
+
+/// Whether beancount's lexer reads the BOM at `bom` into an invalid token
+/// (`Invalid token: '<BOM>...'`, a `YYerror`), not into an account, a string
+/// or a comment. `probe` is a lexer kept from the last call with the token it
+/// is at: it reads on from there while that token starts at or before `bom`,
+/// and restarts at `bom`'s line (`line_start`, outside any string) only when
+/// it is past it, so over the ascending positions the errors give it, it
+/// lexes each byte about once.
+fn bom_is_invalid_token<'a>(
+    probe: &mut Option<(BcLexer<'a>, (Bc, Range<usize>))>,
+    src: &'a str,
+    bom: usize,
+    line_start: &dyn Fn(usize) -> usize,
+) -> bool {
+    let eof = || (Bc::Eof, src.len()..src.len());
+    if probe.as_ref().is_none_or(|(_, (_, r))| r.start > bom) {
+        let mut l = BcLexer::at_line_start(src, line_start(bom));
+        let first = l.next().unwrap_or_else(eof);
+        *probe = Some((l, first));
+    }
+    let Some((lexer, tok)) = probe.as_mut() else {
+        return false;
+    };
+    while tok.1.end <= bom && tok.0 != Bc::Eof {
+        *tok = lexer.next().unwrap_or_else(eof);
+    }
+    tok.0 == Bc::Error && tok.1.start <= bom
 }
 
 /// Drop the errors rledger reports where bison's recovery keeps beancount
@@ -722,13 +772,41 @@ pub(super) fn quiet_bison_recovery(
         .collect();
     let mut order: Vec<usize> = (0..errors.len()).collect();
     order.sort_by_key(|&i| effective[i]);
+    // A lexer of its own, run forward only, to read the token a BOM
+    // diagnostic is at (`bom_is_invalid_token`).
+    let mut probe: Option<(BcLexer<'_>, (Bc, Range<usize>))> = None;
     for (oi, &k) in order.iter().enumerate() {
         let e = &errors[k];
         if e.span.start < off {
             continue;
         }
         let at = effective[k];
-        if at < resume || at > stripped.len() || !starts_recovery(e) {
+        if at < resume || at > stripped.len() {
+            continue;
+        }
+        // A BOM diagnostic stands for beancount's `Invalid token` error when
+        // beancount's lexer reads that BOM into an invalid token, whose
+        // `YYerror` starts bison's recovery as any lexer error does (`\t<BOM>`
+        // is read as `\t$` is). Not when the BOM is read into an account, a
+        // string or a comment, nor on a line holding a stray `\r` (below),
+        // where the line's other errors decide, as before.
+        let starts = if matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody) {
+            let end = e.span.end.saturating_sub(off).min(stripped.len());
+            let ls = stripped[..at].rfind('\n').map_or(0, |i| i + 1);
+            let le = stripped[at..]
+                .find('\n')
+                .map_or(stripped.len(), |i| at + i + 1);
+            !super::convert::holds_a_stray_cr(&stripped[ls..le])
+                && stripped
+                    .get(at..end)
+                    .and_then(|s| s.find(crate::bom::BOM_CHAR))
+                    .is_some_and(|i| {
+                        bom_is_invalid_token(&mut probe, stripped, at + i, &line_start)
+                    })
+        } else {
+            starts_recovery(e)
+        };
+        if !starts {
             continue;
         }
         // The lexer restarts at the error's line unless it is still before
@@ -931,6 +1009,48 @@ pub(super) fn quiet_bison_recovery(
                     // these three tokens: reported. An entry bison starts
                     // mid-line is quiet up to its third token.
                     let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
+                    // An entry bison starts mid-line whose own line holds an
+                    // invalid token after these three (`<BOM>g 2024-01-02 *
+                    // "n" $x`): that token's `YYerror` drops the entry, after
+                    // any grammar failure before it, reported, and starts the
+                    // recovery over. So the line has the errors the entry's
+                    // line parsed on its own has (#2979), and the window goes
+                    // on from the line's end, past the entry's indented lines.
+                    let line_end = stripped[r.end..]
+                        .find('\n')
+                        .map_or(stripped.len(), |i| r.end + i + 1);
+                    let invalid_on_line = !aligned
+                        && depth == 0
+                        && t != Bc::Eol
+                        && prefix.first().is_some_and(|&(k, _)| k == Bc::Date)
+                        && line_holds_an_invalid_token(stripped, r.end)
+                        && !super::convert::holds_a_stray_cr(&stripped[stmt..line_end]);
+                    if let Some(errs) = invalid_on_line
+                        .then(|| phantom_errors(stripped, stmt..line_end, off, depth))
+                        .flatten()
+                    {
+                        if let Some((s, n)) = segment.take()
+                            && r.end > s
+                        {
+                            segments.push((s, r.end, n));
+                        }
+                        let first = if on_failure_line {
+                            oi + 1
+                        } else {
+                            order.partition_point(|&j| effective[j] < r.end)
+                        };
+                        phantoms.push((first, r.end, line_end, errs));
+                        status = 3;
+                        prefix.clear();
+                        resumed_at = None;
+                        tok = loop {
+                            let t = next(&mut peeked);
+                            if matches!(t.0, Bc::Eol | Bc::Eof) {
+                                break t;
+                            }
+                        };
+                        continue;
+                    }
                     let quiet_to = if aligned { stmt } else { r.end };
                     partial = !aligned && closed_here;
                     if let Some((s, n)) = segment.take()
@@ -1027,9 +1147,9 @@ pub(super) fn quiet_bison_recovery(
         // body is the indented lines right after its line.
         let mut body_end = end;
         let mut line_done = prefix.last().is_some_and(|&(k, _)| k == Bc::Eol);
-        // An invalid token on the entry's own line: where this parser's
-        // reading of such a line and beancount's part (a BOM, a lone capital
-        // glued to it), so the entry is not modeled.
+        // An invalid token on the entry's own line, where that line was not
+        // parsed on its own above (nested, or holding a stray `\r`, or a
+        // declaration bison shifts in it): the entry is not modeled.
         let mut header_invalid = false;
         loop {
             let t = next(&mut peeked);
@@ -1057,7 +1177,6 @@ pub(super) fn quiet_bison_recovery(
         // differently from beancount (#2980): rledger's errors stay there.
         if depth > 0
             || header_invalid
-            || stripped[stmt..body_end].contains(crate::bom::BOM_CHAR)
             || super::convert::holds_a_stray_cr(&stripped[stmt..body_end])
         {
             if partial {
@@ -1066,27 +1185,13 @@ pub(super) fn quiet_bison_recovery(
             resume = body_end;
             continue;
         }
-        PHANTOM_DEPTH.with(|d| d.set(depth + 1));
-        UNMODELED_PHANTOM.with(|u| u.set(false));
-        let sub = super::convert::parse_via_cst(&stripped[stmt..body_end]);
-        PHANTOM_DEPTH.with(|d| d.set(depth));
-        if UNMODELED_PHANTOM.with(|u| u.replace(false)) {
+        let Some(errs) = phantom_errors(stripped, stmt..body_end, off, depth) else {
             if partial {
                 segments.pop();
             }
             resume = body_end;
             continue;
-        }
-        let shift = stmt + off;
-        let errs = sub
-            .errors
-            .into_iter()
-            .filter(|x| !is_push_pop_state(x))
-            .map(|mut x| {
-                x.span = crate::Span::new(x.span.start + shift, x.span.end + shift);
-                x
-            })
-            .collect();
+        };
         // On the line that failed, rledger's errors after the failing one
         // are about the entry; on a later line, the quiet stretch before the
         // entry's third token is already counted (`segments`).
@@ -1131,7 +1236,7 @@ pub(super) fn quiet_bison_recovery(
                 lexer_errors.partition_point(|&(tok_start, _)| tok_start < line_to),
             );
             let mut keep = lb - la;
-            // The error that failed the line first, then rledger'seg_start
+            // The error that failed the line first, then rledger's
             // invalid-token errors, then the rest.
             for pass in 0..3 {
                 for &cand in &candidates {
@@ -1152,20 +1257,40 @@ pub(super) fn quiet_bison_recovery(
                     }
                 }
             }
-            // Fewer errors than beancount'seg_start lexer finds: an invalid token this
-            // parser reads as something else (line_from lone capital glued to line_from `\run`
-            // or to the end of the input, #3028) is reported as beancount does.
-            // Only beyond the line'seg_start real invalid tokens: the grammar error
-            // counted for its failure may stand where rledger has none.
-            // And only on line_from line with line_from few invalid tokens and no BOM: on line_from
-            // long run of them (line_from fuzz-corpus line of thirty), or with line_from BOM
-            // whose diagnostic this parser counts its own way (#2956), the
-            // two lexers' runs part, and the count with them.
-            let real = lexer_errors[la..lb]
-                .iter()
-                .filter(|&&(tok_start, tok_end)| tok_end > tok_start)
-                .count();
-            let simple = real <= 4 && !stripped[line_from..line_to].contains(crate::bom::BOM_CHAR);
+            // Fewer errors than beancount's lexer finds: an invalid token this
+            // parser reads as something else (a lone capital glued to a `\r`
+            // or to the end of the input, #3028), or a number beancount's lexer
+            // rejects (`1,50`, `ValueError: Invalid number format`), which
+            // this parser reads as a number and a comma, is reported as
+            // beancount does. Only beyond the line's real invalid tokens: the
+            // grammar error counted for its failure may stand where rledger
+            // has none. And only on a line with a few invalid tokens and no
+            // BOM: on a long run of them (a fuzz-corpus line of thirty), or
+            // with a BOM whose diagnostic this parser counts its own way
+            // (#2956), the two lexers' runs part, and the count with them.
+            // But for the BOM run whose diagnostic failed the line (the
+            // window's own start), and a BOM beancount reads as an invalid
+            // token of its own: each is one token on both sides.
+            let real_errors = || {
+                lexer_errors[la..lb]
+                    .iter()
+                    .filter(|&&(tok_start, tok_end)| tok_end > tok_start)
+            };
+            let real = real_errors().count();
+            let bom_trigger = trigger != usize::MAX
+                && matches!(
+                    errors[trigger].kind,
+                    crate::ParseErrorKind::BomInDirectiveBody
+                );
+            let trigger_run = real_errors().next().filter(|_| bom_trigger);
+            let simple = real <= 4
+                && stripped[line_from..line_to]
+                    .match_indices(crate::bom::BOM_CHAR)
+                    .all(|(i, _)| {
+                        let at = line_from + i;
+                        trigger_run.is_some_and(|&(s, e)| (s..e).contains(&at))
+                            || real_errors().any(|&(s, e)| s == at && e == at + crate::bom::BOM_LEN)
+                    });
             let mut keep = if simple {
                 keep.min(real.saturating_sub(candidates.len()))
             } else {
@@ -1176,8 +1301,18 @@ pub(super) fn quiet_bison_recovery(
                     break;
                 }
                 let at_or_after = order.partition_point(|&scan| effective[scan] < tok_start);
-                let lone_capital =
-                    tok_end == tok_start + 1 && stripped.as_bytes()[tok_start].is_ascii_uppercase();
+                // (A zero-width one is the failure of the line, no token.)
+                let text = &stripped[tok_start..tok_end];
+                let Some(&first) = text.as_bytes().first() else {
+                    continue;
+                };
+                let lone_capital = text.len() == 1 && first.is_ascii_uppercase();
+                // A lexer error that starts with a digit is an invalid date or
+                // a misgrouped number; only the date has a `-` or a `/`.
+                let misgrouped_number = first.is_ascii_digit()
+                    && text
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'.'));
                 // Not one rledger already reads into an invalid token of its
                 // own, or reports an error at.
                 let covered = order
@@ -1189,16 +1324,24 @@ pub(super) fn quiet_bison_recovery(
                             .checked_sub(1)
                             .is_some_and(|next_error| invalid[next_error].end > tok_start)
                     };
-                if lone_capital && !covered {
-                    added.push(crate::ParseError::new(
-                        crate::ParseErrorKind::SyntaxError(format!(
-                            "unexpected input: invalid token '{}'",
-                            super::convert::invalid_token_name(&stripped[tok_start..tok_end])
-                        )),
-                        crate::Span::new(tok_start + off, tok_end + off),
-                    ));
-                    keep -= 1;
+                if covered {
+                    continue;
                 }
+                let kind = if lone_capital {
+                    crate::ParseErrorKind::SyntaxError(format!(
+                        "unexpected input: invalid token '{}'",
+                        super::convert::invalid_token_name(text)
+                    ))
+                } else if misgrouped_number {
+                    crate::ParseErrorKind::InvalidNumber(text.to_string())
+                } else {
+                    continue;
+                };
+                added.push(crate::ParseError::new(
+                    kind,
+                    crate::Span::new(tok_start + off, tok_end + off),
+                ));
+                keep -= 1;
             }
             line_from = line_to;
         }
@@ -1206,6 +1349,11 @@ pub(super) fn quiet_bison_recovery(
     for (s, quiet_to, e, errs) in phantoms {
         let from = s;
         let to = order.partition_point(|&k| effective[k] < e).max(from);
+        // The errors replaced, by span: one the entry's own parse reports
+        // over the same span is rledger's own (an invalid token, named as
+        // the whole file's parse names it), kept instead.
+        let mut replaced: std::collections::HashMap<(usize, usize), Vec<usize>> =
+            std::collections::HashMap::new();
         for &k in &order[from..to] {
             // Before the entry's third token bison is still recovering: its
             // lexer's errors there are reported.
@@ -1214,10 +1362,24 @@ pub(super) fn quiet_bison_recovery(
             // Every error but the file's push/pop state: the entry's own parse
             // reports them (a deprecated pipe included).
             if errors[k].span.start >= off && !is_push_pop_state(&errors[k]) && !lexer_error {
+                if !dropped[k] {
+                    replaced
+                        .entry((errors[k].span.start, errors[k].span.end))
+                        .or_default()
+                        .push(k);
+                }
                 dropped[k] = true;
             }
         }
-        added.extend(errs);
+        for x in errs {
+            match replaced
+                .get_mut(&(x.span.start, x.span.end))
+                .and_then(Vec::pop)
+            {
+                Some(k) => dropped[k] = false,
+                None => added.push(x),
+            }
+        }
     }
     let mut index = 0;
     errors.retain(|_| {
@@ -1229,6 +1391,52 @@ pub(super) fn quiet_bison_recovery(
         errors.extend(added);
         errors.sort_by_key(|x| x.span.start);
     }
+}
+
+/// Whether the rest of the line from `pos` (a token's end, outside any
+/// string) holds an invalid token and no token that runs over its end (a
+/// string), which would leave the line no whole statement to parse alone.
+fn line_holds_an_invalid_token(src: &str, pos: usize) -> bool {
+    let mut invalid = false;
+    for (k, r) in BcLexer::mid_line(src, pos) {
+        match k {
+            Bc::Eol | Bc::Eof => break,
+            _ if src[r].contains('\n') => return false,
+            Bc::Error => invalid = true,
+            _ => {}
+        }
+    }
+    invalid
+}
+
+/// The errors of the entry bison builds at `stripped[text]` (#2979), parsed
+/// on its own, in the input's frame (`off`, the stripped BOM): `None` where
+/// that parse meets a declaration bison shifts mid-line, whose state change
+/// is not modeled. Never nested more than once (`PHANTOM_DEPTH`).
+fn phantom_errors(
+    stripped: &str,
+    text: Range<usize>,
+    off: usize,
+    depth: u8,
+) -> Option<Vec<crate::ParseError>> {
+    PHANTOM_DEPTH.with(|d| d.set(depth + 1));
+    UNMODELED_PHANTOM.with(|u| u.set(false));
+    let shift = text.start + off;
+    let sub = super::convert::parse_via_cst(&stripped[text]);
+    PHANTOM_DEPTH.with(|d| d.set(depth));
+    if UNMODELED_PHANTOM.with(|u| u.replace(false)) {
+        return None;
+    }
+    Some(
+        sub.errors
+            .into_iter()
+            .filter(|x| !is_push_pop_state(x))
+            .map(|mut x| {
+                x.span = crate::Span::new(x.span.start + shift, x.span.end + shift);
+                x
+            })
+            .collect(),
+    )
 }
 
 /// Whether `e` is about the push/pop state of the whole file, which an entry
@@ -1375,6 +1583,32 @@ mod tests {
         assert_eq!(kinds("pushtag"), [B::Kw(Kw::Pushtag), B::Eof]);
     }
 
+    /// A BOM is an invalid token unless beancount's lexer reads it into an
+    /// account, a string or a comment; the probe reads on over ascending
+    /// positions and restarts at a line start when asked about one behind it.
+    #[test]
+    fn test_bom_is_invalid_token_reads_beancount_tokens() {
+        let src = "\u{FEFF}g \u{FEFF}Assets:A \"\u{FEFF}\" ;\u{FEFF}\n\t\u{FEFF}\n";
+        let line_start = |at: usize| src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let boms: Vec<usize> = src.match_indices('\u{FEFF}').map(|(i, _)| i).collect();
+        let expected = [true, false, false, false, true];
+        let mut probe = None;
+        for (&at, &invalid) in boms.iter().zip(&expected) {
+            assert_eq!(
+                super::bom_is_invalid_token(&mut probe, src, at, &line_start),
+                invalid,
+                "BOM at {at}"
+            );
+        }
+        // Asked again about the first one, behind the probe.
+        assert!(super::bom_is_invalid_token(
+            &mut probe,
+            src,
+            boms[0],
+            &line_start
+        ));
+    }
+
     /// The first three tokens of a statement, as `grammar.y` takes them.
     #[test]
     fn test_accepts_reads_statement_starts() {
@@ -1426,6 +1660,17 @@ mod tests {
                 "lone capitals",
                 "2024-01-02 * \"n\"\r\n".to_string() + &"  h1 Z\r\n".repeat(N),
             ),
+            ("BOM-led lines", "\u{FEFF}g \u{FEFF}Assets:A\n".repeat(N)),
+            ("BOMs alone on indented lines", "\t\u{FEFF}\n".repeat(N)),
+            (
+                "BOMs on one line",
+                "$ ".to_string() + &"\u{FEFF}Assets:A \u{FEFF}x ".repeat(N) + "\n",
+            ),
+            (
+                "entries with an invalid token",
+                "$ 2024-01-02 * \"y\" $\n  Assets:A 1 USD\n".repeat(N),
+            ),
+            ("misgrouped numbers", "$\n  x 1,50\n".repeat(N)),
         ] {
             RECOVERY_SHIFT_SCANNED_BYTES.with(|c| c.set(0));
             let _ = crate::parse(&src);

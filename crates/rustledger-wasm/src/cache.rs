@@ -683,7 +683,17 @@ use crate::types::{Error, LedgerOptions};
 /// Every such source has a parse error, before and after, which the loader's
 /// cache is never saved for. Both payloads here archive parse errors, and an
 /// older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 132;
+/// v133: loader v76, unchanged; parse errors move (#3035's leftovers). A BOM
+/// beancount reads into an invalid token starts bison's recovery as `$`
+/// does; an entry bison builds mid-line whose line holds an invalid token is
+/// dropped at that token, its line counted as that line parsed alone and its
+/// indented lines quiet; a misgrouped number (`1,50`) inside the recovery is
+/// reported (`InvalidNumber`); a header failing past a string that runs over
+/// line ends fails on the line it fails at. Parsed directives do not move,
+/// and every such source has a parse error, before and after, which the
+/// loader's cache is never saved for. Both payloads here archive parse
+/// errors, and an older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 133;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

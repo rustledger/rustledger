@@ -318,6 +318,11 @@ pub struct CacheEntry {
     /// All files that were loaded (as strings, for serialization), each by
     /// the path it was opened by ([`crate::SourceFile::opened_path`]).
     pub files: Vec<String>,
+    /// The files each file of [`Self::files`] includes, by index into it
+    /// ([`crate::SourceMap::includes`]), so a hit ranks its files in
+    /// beancount's parse order as the load did (#2936). A list missing here
+    /// records no includes, and its files rank by their place in `files`.
+    pub includes: Vec<Vec<u16>>,
 }
 
 impl CacheEntry {
@@ -352,6 +357,9 @@ impl CacheEntry {
     #[must_use]
     pub fn into_load_result(self) -> crate::LoadResult {
         let mut source_map = crate::SourceMap::new();
+        // Each cached file's id in the rebuilt map: a file that can no longer
+        // be read is left out, and the includes to and from it with it.
+        let mut ids = Vec::with_capacity(self.files.len());
         for path in self.file_paths() {
             // Read bytes + lossy UTF-8 to match `DiskFileSystem::read`
             // (the uncached loader path). `read_to_string` would error
@@ -375,7 +383,23 @@ impl CacheEntry {
                 };
                 // Identity re-derived the way the loader derives it.
                 let canonical = crate::FileSystem::normalize(&crate::DiskFileSystem, &path);
-                source_map.add_opened_file(canonical, path, content.into());
+                ids.push(Some(source_map.add_opened_file(
+                    canonical,
+                    path,
+                    content.into(),
+                )));
+                continue;
+            }
+            ids.push(None);
+        }
+        for (from, includes) in self.includes.iter().enumerate() {
+            let Some(Some(from)) = ids.get(from).copied() else {
+                continue;
+            };
+            for &to in includes {
+                if let Some(Some(to)) = ids.get(usize::from(to)).copied() {
+                    source_map.add_include(from, to);
+                }
             }
         }
 
@@ -849,12 +873,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     cached before. A v75 blob would be read at the wrong offsets.
 ///     `rustledger-wasm` archives no `CachedOptions`, so only its pin moves.
 ///
+/// v77: ARCHIVED LAYOUT moved (#2936). `CacheEntry` gains `includes`, the
+///     files each cached file includes, so a hit ranks its files in
+///     beancount's breadth-first parse order (`SourceMap::parse_ranks`), as
+///     the load did; a v76 blob would be read at the wrong offsets.
+///     `rustledger-wasm` archives no `CacheEntry`, but the file ranks it
+///     archives per directive now come in that order, so it bumps its own
+///     version too.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 76;
+pub const CACHE_VERSION: u32 = 77;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1446,6 +1478,7 @@ mod tests {
                 force_python: false,
             }],
             files: vec![beancount_file.to_string_lossy().to_string()],
+            includes: Vec::new(),
         };
 
         // Save cache
@@ -1487,6 +1520,7 @@ mod tests {
             options: CachedOptions::from(&Options::new()),
             plugins: vec![],
             files: vec![beancount_file.to_string_lossy().to_string()],
+            includes: Vec::new(),
         };
 
         save_cache_entry_in(&beancount_file, &entry, &no_env()).expect("save failed");
@@ -1518,6 +1552,7 @@ mod tests {
             options: CachedOptions::from(&Options::new()),
             plugins: vec![],
             files: vec![beancount_file.to_string_lossy().to_string()],
+            includes: Vec::new(),
         };
         save_cache_entry_in(&beancount_file, &entry, &no_env()).unwrap();
 
@@ -1743,7 +1778,9 @@ mod tests {
         // archived encoding moves, so the arrays still hold.
         // v76 (#3002) adds option warnings to `CachedOptions`; no
         // `CostNumber` encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 76;
+        // v77 (#2936) adds `CacheEntry::includes`; no `CostNumber`
+        // encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 77;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1906,7 +1943,9 @@ mod tests {
         // archived layout moves, so the hash below is unchanged.
         // v76 (#3002) adds option warnings to `CachedOptions`; the
         // `MetaValue` layout does not move, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 76;
+        // v77 (#2936) adds `CacheEntry::includes`; the `MetaValue`
+        // layout does not move, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 77;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(
@@ -2241,6 +2280,7 @@ mod tests {
                 "/path/to/ledger.beancount".to_string(),
                 "/path/to/include.beancount".to_string(),
             ],
+            includes: Vec::new(),
         };
 
         let paths = entry.file_paths();
@@ -2268,6 +2308,7 @@ mod tests {
             options: CachedOptions::from(&Options::new()),
             plugins: vec![],
             files: vec![link.to_string_lossy().into_owned()],
+            includes: Vec::new(),
         };
         let result = entry.into_load_result();
         let file = &result.source_map.files()[0];

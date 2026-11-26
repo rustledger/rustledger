@@ -2554,6 +2554,61 @@ option "name_equity" "Капитал"
         );
     }
 
+    /// #2936: the editor's diagnostics break a tie between files in
+    /// beancount's breadth-first parse order, as `rledger check` does: the
+    /// ranks come from the loaded ledger's source map
+    /// (`rustledger_loader::source_lines_overlaid`). `main` includes `x`
+    /// then `y`, and `x` includes `z`; each opens an account on line 2.
+    /// bean-check 3.2.3 prints `(1 XXX, 1 YYY, 1 ZZZ, ...)`; the loader's
+    /// depth-first file ids would give `XXX, ZZZ, YYY`.
+    #[test]
+    fn test_all_diagnostics_pad_ties_across_files_go_breadth_first() {
+        let main_content = "include \"x.beancount\"\ninclude \"y.beancount\"\n\
+            2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+            2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+            2024-02-02 * \"g\"\n  Assets:A:X  1 XXX\n  Assets:A:Y  1 YYY\n  Assets:A:Z  1 ZZZ\n\
+            \x20 Equity:O  -1 XXX\n  Equity:O  -1 YYY\n  Equity:O  -1 ZZZ\n\
+            2024-02-03 pad Assets:A Equity:O\n2024-02-10 balance Assets:A 11 STK\n";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        for (name, text) in [
+            ("main.beancount", main_content),
+            (
+                "x.beancount",
+                "include \"z.beancount\"\n2024-01-01 open Assets:A:X\n",
+            ),
+            ("y.beancount", "; y\n2024-01-01 open Assets:A:Y\n"),
+            ("z.beancount", "; z\n2024-01-01 open Assets:A:Z\n"),
+        ] {
+            std::fs::write(tempdir.path().join(name), text).expect("write");
+        }
+        let mut ledger_state = LedgerState::new();
+        ledger_state
+            .load(&tempdir.path().join("main.beancount"))
+            .expect("LedgerState::load should succeed");
+
+        let main_result = parse(main_content);
+        let diagnostics = all_diagnostics(
+            &main_result,
+            main_content,
+            Some(&ledger_state),
+            Some(0),
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let messages: Vec<&str> = diagnostics
+            .iter()
+            .filter(|d| get_code(d) == "E2005")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            ["Attempt to pad an entry with cost for balance: \
+              (1 XXX, 1 YYY, 1 ZZZ, 10 STK {10 USD, 2024-02-01}) (2024-02-10)\n  \
+              context: account: Assets:A"]
+        );
+    }
+
     /// End-to-end regression test for #760 through `all_diagnostics`.
     ///
     /// The direct helper test `test_multi_buffer_overlay_replaces_multiple_files_issue_760`

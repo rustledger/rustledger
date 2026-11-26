@@ -693,7 +693,13 @@ use crate::types::{Error, LedgerOptions};
 /// and every such source has a parse error, before and after, which the
 /// loader's cache is never saved for. Both payloads here archive parse
 /// errors, and an older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 133;
+/// v134: loader v77 (#2936; 133 is taken by a parallel parser change). The
+/// `Ledger` payload's `directive_file_ranks` move: a file's rank is its place
+/// in beancount's breadth-first parse order (`SourceMap::parse_ranks`), not
+/// its depth-first file id, so the order of tied positions in an "Attempt to
+/// pad an entry with cost" matches bean-check when an included file includes
+/// another. An older blob would keep serving the depth-first ranks.
+pub const CACHE_VERSION: u32 = 134;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -725,7 +731,7 @@ pub const CACHE_VERSION: u32 = 133;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 76;
+const LOADER_CACHE_VERSION_PIN: u32 = 77;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

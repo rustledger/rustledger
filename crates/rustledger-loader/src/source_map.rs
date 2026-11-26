@@ -411,6 +411,12 @@ impl SourceFile {
 #[derive(Debug, Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
+    /// The files each file includes, by file id, parallel to
+    /// [`Self::files`]: every `include` (each match of a glob) that named a
+    /// loaded file, in the order the file names them, an include of a file
+    /// loaded earlier (a duplicate, or a cycle) included. Beancount's parse
+    /// order ([`Self::parse_ranks`]) is read off these.
+    includes: Vec<Vec<u16>>,
     /// The placeholder locations handed out by
     /// [`Self::placeholder_file_id`], in id order from
     /// [`rustledger_parser::FIRST_PLACEHOLDER_FILE_ID`]. Behind a lock
@@ -537,7 +543,85 @@ impl SourceMap {
         );
         self.files
             .push(SourceFile::new_opened(id, path, opened_path, source));
+        self.includes.push(Vec::new());
         id
+    }
+
+    /// Record that file `includer` includes file `included`, after the
+    /// includes recorded for it so far.
+    ///
+    /// The loader records every include that names a loaded file, in the
+    /// order the includer names them, an include of a file loaded already
+    /// (a duplicate, or a cycle) included: which include of a file comes
+    /// first breadth first decides its place in beancount's parse order
+    /// ([`Self::parse_ranks`]). Ignored unless both are files of the map.
+    pub fn add_include(&mut self, includer: usize, included: usize) {
+        let Ok(to) = u16::try_from(included) else {
+            return;
+        };
+        if included < self.files.len()
+            && let Some(list) = self.includes.get_mut(includer)
+        {
+            list.push(to);
+        }
+    }
+
+    /// The files file `file_id` includes, in order; see [`Self::add_include`].
+    #[must_use]
+    pub fn includes(&self, file_id: usize) -> &[u16] {
+        self.includes.get(file_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Each file's place in beancount's parse order, by file id.
+    ///
+    /// Beancount parses breadth first (`loader._parse_recursive` pops the
+    /// front of its source list and appends each file's includes), skipping
+    /// a file it has parsed already, and its stable entry sort keeps that
+    /// order for entries tied on `(date, SORT_ORDER, lineno)`. File ids
+    /// number the files depth first, the order the loader reads them, so
+    /// the two differ for a file an included file includes against a file
+    /// its parent includes later (#2936): `main` including `x` then `y`,
+    /// and `x` including `z`, is ids `main, x, z, y` and ranks
+    /// `main, x, y, z`. A file included twice takes its place from the
+    /// include breadth first meets first, as beancount parses it there and
+    /// reports the other as a duplicate.
+    ///
+    /// The one rank every surface breaks a cross-file tie by
+    /// ([`crate::source_lines`], which the validator and the WASM, FFI and
+    /// LSP surfaces all read). A file no include reaches from file 0 (a map
+    /// built without the loader) ranks after every file one does, by id, so
+    /// a map with no includes recorded ranks its files by id.
+    #[must_use]
+    pub fn parse_ranks(&self) -> Vec<usize> {
+        let mut rank = vec![usize::MAX; self.files.len()];
+        let mut next = 0;
+        let mut queue = std::collections::VecDeque::new();
+        if !self.files.is_empty() {
+            queue.push_back(0usize);
+        }
+        while let Some(id) = queue.pop_front() {
+            if rank[id] != usize::MAX {
+                // Parsed already: beancount's "Duplicate filename parsed".
+                continue;
+            }
+            rank[id] = next;
+            next += 1;
+            queue.extend(self.includes(id).iter().map(|&to| usize::from(to)));
+        }
+        for r in &mut rank {
+            if *r == usize::MAX {
+                *r = next;
+                next += 1;
+            }
+        }
+        rank
+    }
+
+    /// Every file's includes ([`Self::includes`]), by file id: what the
+    /// loader cache archives, so a hit ranks its files as the load did.
+    #[must_use]
+    pub fn include_lists(&self) -> Vec<Vec<u16>> {
+        self.includes.clone()
     }
 
     /// Get a file by ID.
@@ -941,5 +1025,84 @@ mod tests {
         let text = SourceText::from(original);
         assert_eq!(text.as_str(), original);
         assert_ne!(text.as_str().as_ptr(), original.as_ptr());
+    }
+
+    /// A map of files `names`, ids in order, each including the files at
+    /// the ids of its entry in `includes`.
+    fn map_with_includes(names: &[&str], includes: &[(usize, &[usize])]) -> SourceMap {
+        let mut map = SourceMap::new();
+        for name in names {
+            map.add_file(PathBuf::from(name), SourceText::from(""));
+        }
+        for (from, tos) in includes {
+            for to in *tos {
+                map.add_include(*from, *to);
+            }
+        }
+        map
+    }
+
+    /// #2936: files rank breadth first, as beancount parses them. `main`
+    /// includes `x` then `y`, and `x` includes `z`: the loader reads (and
+    /// numbers) them `main, x, z, y`, beancount `main, x, y, z`.
+    #[test]
+    fn test_parse_ranks_breadth_first_over_nested_includes() {
+        let map = map_with_includes(&["main", "x", "z", "y"], &[(0, &[1, 3]), (1, &[2])]);
+        // By file id: main, x, z, y.
+        assert_eq!(map.parse_ranks(), [0, 1, 3, 2]);
+        assert_eq!(map.includes(0), [1, 3]);
+        assert_eq!(map.includes(2), [] as [u16; 0]);
+    }
+
+    /// #2936: a three-level tree. `main` includes `a`, `b`; `a` includes
+    /// `c`, `d`; `c` includes `e`; `b` includes `f`. Read depth first as
+    /// `main, a, c, e, d, b, f`; beancount parses `main, a, b, c, d, f, e`.
+    #[test]
+    fn test_parse_ranks_three_levels() {
+        let map = map_with_includes(
+            &["main", "a", "c", "e", "d", "b", "f"],
+            &[(0, &[1, 5]), (1, &[2, 4]), (2, &[3]), (5, &[6])],
+        );
+        let ranks = map.parse_ranks();
+        let mut order: Vec<usize> = (0..ranks.len()).collect();
+        order.sort_by_key(|&id| ranks[id]);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|&id| map.get(id).unwrap().path.to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["main", "a", "b", "c", "d", "f", "e"]);
+    }
+
+    /// #2936: a file included twice takes its place from the include met
+    /// first breadth first, not from the one that loaded it. `main`
+    /// includes `a`, `b`; `a` includes `c`; `c` includes `b` (loaded there,
+    /// depth first) and `a` (a cycle). Beancount parses `main, a, b, c`.
+    #[test]
+    fn test_parse_ranks_duplicate_and_cyclic_includes() {
+        // Ids as the loader assigns them: main, a, c, b.
+        let map = map_with_includes(
+            &["main", "a", "c", "b"],
+            &[(0, &[1, 3]), (1, &[2]), (2, &[3, 1])],
+        );
+        assert_eq!(map.parse_ranks(), [0, 1, 3, 2]);
+    }
+
+    /// A map no include was recorded for ranks its files by id, and a file
+    /// no include reaches ranks after every file one does.
+    #[test]
+    fn test_parse_ranks_without_includes_and_unreached_files() {
+        assert_eq!(
+            map_with_includes(&["a", "b", "c"], &[]).parse_ranks(),
+            [0, 1, 2]
+        );
+        assert_eq!(
+            map_with_includes(&["a", "b", "c"], &[(0, &[2])]).parse_ranks(),
+            [0, 2, 1]
+        );
+        assert!(SourceMap::new().parse_ranks().is_empty());
+        // An include naming a file the map does not hold is not recorded.
+        let mut map = map_with_includes(&["a"], &[]);
+        map.add_include(0, 5);
+        assert_eq!(map.includes(0), [] as [u16; 0]);
     }
 }

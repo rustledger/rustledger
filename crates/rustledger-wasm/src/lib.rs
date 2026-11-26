@@ -738,6 +738,126 @@ include "accounts.beancount"
         );
     }
 
+    /// Drift guard (#2936): a tie between files breaks in beancount's
+    /// breadth-first parse order on every surface that loads includes:
+    /// `rledger check`, the multi-file `Ledger` (its errors and
+    /// `expandPads`, before and after a cache round trip) and ffi-wasi's
+    /// validating `load_file_with_fs` (the WIT component's `validate-file`).
+    /// `main` includes `x` then `y`, and `x` includes `z`; each opens an
+    /// account on line 2. bean-check 3.2.3 prints `(1 XXX, 1 YYY, 1 ZZZ,
+    /// ...)`; the loader's depth-first file ids would give `XXX, ZZZ, YYY`.
+    #[test]
+    fn test_pad_at_cost_cross_file_ties_agree_across_surfaces() {
+        use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+        use std::path::Path;
+
+        let main = "include \"x.beancount\"\ninclude \"y.beancount\"\n\
+            2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+            2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+            2024-02-02 * \"g\"\n  Assets:A:X  1 XXX\n  Assets:A:Y  1 YYY\n  Assets:A:Z  1 ZZZ\n\
+            \x20 Equity:O  -1 XXX\n  Equity:O  -1 YYY\n  Equity:O  -1 ZZZ\n\
+            2024-02-03 pad Assets:A Equity:O\n2024-02-10 balance Assets:A 11 STK\n";
+        let files = [
+            ("main.beancount", main),
+            (
+                "x.beancount",
+                "include \"z.beancount\"\n2024-01-01 open Assets:A:X\n",
+            ),
+            ("y.beancount", "; y\n2024-01-01 open Assets:A:Y\n"),
+            ("z.beancount", "; z\n2024-01-01 open Assets:A:Z\n"),
+        ];
+        let vfs = || {
+            let mut vfs = VirtualFileSystem::new();
+            for (name, text) in files {
+                vfs.add_file(name, text);
+            }
+            vfs
+        };
+        let expected = vec![
+            "Attempt to pad an entry with cost for balance: \
+             (1 XXX, 1 YYY, 1 ZZZ, 10 STK {10 USD, 2024-02-01})"
+                .to_string(),
+        ];
+        let at_cost = |messages: Vec<String>| -> Vec<String> {
+            messages
+                .into_iter()
+                .filter(|m| m.starts_with("Attempt to pad an entry with cost"))
+                .collect()
+        };
+
+        // `rledger check`.
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs()))
+            .load(Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = process(
+            raw,
+            &LoadOptions {
+                validate: true,
+                ..Default::default()
+            },
+        )
+        .expect("processes");
+        assert_eq!(
+            at_cost(ledger.errors.iter().map(|e| e.message.clone()).collect()),
+            expected,
+            "rledger check"
+        );
+
+        // The multi-file `Ledger`, before and after a cache round trip.
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let Ok(multi) = parsed_ledger::Ledger::from_file_map(map, "main.beancount") else {
+            panic!("the multi-file ledger loads");
+        };
+        let Ok(bytes) = multi.serialize() else {
+            panic!("the ledger serializes");
+        };
+        let Ok(restored) = parsed_ledger::Ledger::from_cache(&bytes) else {
+            panic!("the ledger restores");
+        };
+        for (name, ledger) in [("Ledger", &multi), ("restored Ledger", &restored)] {
+            assert_eq!(at_cost(ledger.error_messages()), expected, "{name} errors");
+            assert_eq!(
+                at_cost(
+                    ledger
+                        .pad_result()
+                        .errors
+                        .iter()
+                        .map(|e| e.message.clone())
+                        .collect()
+                ),
+                expected,
+                "{name} expandPads"
+            );
+        }
+
+        // ffi-wasi's validating file load, a native-only dependency.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(load) = rustledger_ffi_wasi::helpers::load_file_with_fs(
+                Path::new("main.beancount"),
+                false,
+                Some(Box::new(vfs())),
+                true,
+            ) else {
+                panic!("ffi-wasi loads the file");
+            };
+            assert_eq!(
+                at_cost(
+                    load.validation_errors
+                        .iter()
+                        .map(|e| e.message.clone())
+                        .collect()
+                ),
+                expected,
+                "ffi-wasi load_file_with_fs"
+            );
+        }
+    }
+
     /// Every surface that reports `source`'s "Attempt to pad an entry with
     /// cost" answers `expected`: `rledger check`, the WASM `ParsedLedger`'s
     /// validation and `expandPads`, and the multi-file `Ledger`'s errors and

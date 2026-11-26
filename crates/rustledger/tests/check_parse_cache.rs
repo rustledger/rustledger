@@ -156,3 +156,48 @@ fn test_check_load_error_is_not_cached() {
         "a load with errors must not write the cache"
     );
 }
+
+/// A cache hit ranks the files in beancount's breadth-first parse order as
+/// the cold run does (#2936): the cache archives which file includes which,
+/// so a tie between entries from different files breaks the same way.
+/// `main` includes `x` then `y`, and `x` includes `z`; each opens an account
+/// on line 2. bean-check 3.2.3 prints `(1 XXX, 1 YYY, 1 ZZZ, ...)`.
+#[test]
+fn test_check_cache_hit_keeps_the_breadth_first_file_order() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = "include \"x.beancount\"\ninclude \"y.beancount\"\n\
+        2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+        2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+        2024-02-02 * \"g\"\n  Assets:A:X  1 XXX\n  Assets:A:Y  1 YYY\n  Assets:A:Z  1 ZZZ\n\
+        \x20 Equity:O  -1 XXX\n  Equity:O  -1 YYY\n  Equity:O  -1 ZZZ\n\
+        2024-02-03 pad Assets:A Equity:O\n2024-02-10 balance Assets:A 11 STK\n";
+    for (name, text) in [
+        ("main.beancount", main),
+        (
+            "x.beancount",
+            "include \"z.beancount\"\n2024-01-01 open Assets:A:X\n",
+        ),
+        ("y.beancount", "; y\n2024-01-01 open Assets:A:Y\n"),
+        ("z.beancount", "; z\n2024-01-01 open Assets:A:Z\n"),
+    ] {
+        std::fs::write(dir.path().join(name), text).expect("write");
+    }
+    let path = dir.path().join("main.beancount");
+    let expected = "(1 XXX, 1 YYY, 1 ZZZ, 10 STK {10 USD, 2024-02-01})";
+
+    let cold = check(&bin, &path, &[]);
+    let warm = check(&bin, &path, &["--verbose"]);
+    let warm_out = String::from_utf8_lossy(&warm.stdout);
+    assert!(
+        warm_out.contains("(from cache)"),
+        "the second run must be a cache hit: {warm_out}"
+    );
+    for (run, out) in [("cold", &cold), ("warm", &warm)] {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(expected),
+            "{run} run lists the tied positions breadth first: {stdout}"
+        );
+    }
+}

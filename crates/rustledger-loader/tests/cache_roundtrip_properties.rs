@@ -129,6 +129,7 @@ fn cache_roundtrip_preserves_parsed_directives() {
             options: rustledger_loader::CachedOptions::from(&loaded.options),
             plugins: Vec::new(),
             files: vec![file.to_string_lossy().into_owned()],
+            includes: Vec::new(),
         };
         rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
         let back = rustledger_loader::load_cache_entry_in(&file, &no_env()).expect("load cache");
@@ -164,6 +165,7 @@ fn a_stale_version_is_refused_rather_than_reinterpreted() {
         options: rustledger_loader::CachedOptions::from(&loaded.options),
         plugins: Vec::new(),
         files: vec![file.to_string_lossy().into_owned()],
+        includes: Vec::new(),
     };
     rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
 
@@ -196,6 +198,7 @@ fn cache_round_trip(file: &std::path::Path) -> rustledger_loader::LoadResult {
             .iter()
             .map(|f| f.opened_path.to_string_lossy().into_owned())
             .collect(),
+        includes: loaded.source_map.include_lists(),
     };
     rustledger_loader::save_cache_entry_in(file, &entry, &no_env()).expect("save");
     let back = rustledger_loader::load_cache_entry_in(file, &no_env()).expect("load cache");
@@ -281,6 +284,7 @@ fn test_into_load_result_rederives_document_root_warning() {
         options: rustledger_loader::CachedOptions::from(&loaded.options),
         plugins: Vec::new(),
         files: vec![file.to_string_lossy().into_owned()],
+        includes: Vec::new(),
     };
     rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
 

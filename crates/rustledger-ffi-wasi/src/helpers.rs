@@ -39,6 +39,13 @@ pub struct LoadResult {
     /// ([`rustledger_loader::Ledger::booking_refused`]): a semantic validation
     /// of this load sets them aside, as `rledger check` does (#2937).
     pub booking_refused: Vec<usize>,
+    /// The stream the validating loader's Early phase runs on: sorted, synth
+    /// plugins applied, not yet booked
+    /// ([`rustledger_loader::Ledger::pre_booking_directives`]). A semantic
+    /// validation of this load runs Early over it, so a finding on an elided
+    /// posting that booking fills in is reported as `rledger check` reports
+    /// it (#3001). Empty when the source did not load.
+    pub pre_booking_directives: Vec<Spanned<Directive>>,
     /// The files `spanned_directives` index into: the source, named
     /// `<string>` as beancount's `load_string` names it, so a query's
     /// `filename` / `lineno` / `location` columns resolve (#2825).
@@ -135,12 +142,15 @@ pub fn load_source(source: &str) -> LoadResult {
     // date sort now run, and any future pipeline phase reaches the FFI for free.
     // `validate: false` preserves this surface's load-only error contract
     // (booking errors surface; semantic validation is `ledger.validate`'s job).
+    // The stream Early runs on is kept for that validation, so it gives each
+    // phase the stream the validating loader gives it (#3001).
     let mut vfs = rustledger_loader::VirtualFileSystem::new();
     // Named `<string>`, as beancount's `load_string` names an in-memory
     // source: the name a query's `filename` column reports (#2825).
     vfs.add_file("<string>", source);
     let load_opts = rustledger_loader::LoadOptions {
         validate: false,
+        retain_pre_booking_directives: true,
         ..Default::default()
     };
     // The parse errors are taken out before `process`, to be reported one by
@@ -170,6 +180,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
                 booking_refused: Vec::new(),
+                pre_booking_directives: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 directive_lines: Vec::new(),
                 line_lookup: lookup,
@@ -296,6 +307,7 @@ pub fn load_source(source: &str) -> LoadResult {
     LoadResult {
         directives,
         booking_refused: ledger.booking_refused,
+        pre_booking_directives: ledger.pre_booking_directives,
         spanned_directives: ledger.directives,
         source_map: ledger.source_map,
         directive_lines,

@@ -437,4 +437,47 @@ $x
         closes_nonempty: false,
         refused: &["two fully elided: the last one", "two in one currency: the first one"],
     },
+    SurfaceCase {
+        name: "an E3002 on a transaction that still books is reported from the postings as written",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+2024-01-01 open Assets:C
+2024-01-01 open Assets:D
+
+2024-01-02 * \"a cost-bearing posting beside an elided one\"
+  Assets:B  10 USD
+  Assets:C  HOOL {2 USD}
+  Assets:C
+
+2024-01-03 * \"two currencies and two fully elided postings\"
+  Assets:A  1 USD
+  Assets:B  2 EUR
+  Assets:C
+  Assets:D
+
+2024-01-04 * \"an elided amount in a currency beside a fully elided posting\"
+  Assets:A  1 USD
+  Assets:B  USD
+  Assets:C
+",
+        findings: &[
+            Finding {
+                code: "E3002",
+                line: 8,
+                message: "Transaction has 2 postings with missing amounts; at most one is allowed",
+            },
+            Finding {
+                code: "E3002",
+                line: 15,
+                message: "Transaction has 2 postings with missing amounts; at most one is allowed",
+            },
+            Finding {
+                code: "E3002",
+                line: 19,
+                message: "Transaction has 2 postings with missing amounts; at most one is allowed",
+            },
+        ],
+        closes_nonempty: false,
+        refused: &[],
+    },
 ];

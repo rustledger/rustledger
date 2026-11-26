@@ -254,7 +254,7 @@ option "display_precision" "USD:0.01"  ; 2dp
 
 If the same currency has `precision:` metadata on multiple `commodity` directives, the last one in load order wins.
 
-**Validation.** `precision:` metadata must be a non-negative integer (0 through 4_294_967_295). Invalid values — strings, negatives, fractions, out-of-range — produce an `E5003` warning during validation and the loader ignores that declaration. The currency's effective precision then falls back through the precedence stack: any other valid `precision:` metadata on the same currency, then `option "display_precision"` if set, then inference. Loading does not fail.
+**Validation.** `precision:` metadata must be a non-negative integer (0 through 4_294_967_295). Invalid values — strings, negatives, fractions, out-of-range — produce an `E5003` warning during validation and the loader ignores that declaration. The currency's effective precision then falls back through the precedence stack: any other valid `precision:` metadata on the same currency, then `option "display_precision"` if set, then inference. Loading does not fail. (A second `commodity` directive for one currency is itself an `E5004` error, as in beancount.)
 
 **Reserved key.** The `precision` key on `commodity` directives is reserved by the loader — pre-existing user-defined uses of this key on commodity directives will be reinterpreted as a precision override. Pick a different key (e.g. `display_precision`, `precision_note`) if you need to attach unrelated metadata.
 

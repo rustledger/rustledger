@@ -24,6 +24,7 @@
 //! | E2003 | Pad without subsequent balance |
 //! | E2004 | Retired in 0.25.0 (was: multiple pads for one balance) |
 //! | E2005 | Pad of a currency held at cost |
+//! | E2006 | Duplicate balance assertion with different amounts |
 //! | E3001 | Transaction does not balance |
 //! | E3002 | Multiple missing amounts in transaction |
 //! | E3003 | Transaction has no postings |
@@ -35,6 +36,7 @@
 //! | E5001 | Currency not declared |
 //! | E5002 | Currency not allowed in account |
 //! | E5003 | Invalid `precision` metadata on commodity directive (warning) |
+//! | E5004 | Duplicate commodity directive |
 //! | E7001 | Unknown option |
 //! | E7002 | Invalid option value |
 //! | E7003 | Duplicate option |
@@ -105,9 +107,9 @@ pub enum Phase {
 }
 
 use validators::{
-    validate_balance_account, validate_balance_late, validate_close, validate_close_late,
-    validate_document, validate_note, validate_open, validate_pad, validate_transaction_early,
-    validate_transaction_late,
+    validate_balance_account, validate_balance_duplicate, validate_balance_late, validate_close,
+    validate_close_late, validate_document, validate_note, validate_open, validate_pad,
+    validate_transaction_early, validate_transaction_late,
 };
 
 use rayon::prelude::*;
@@ -556,8 +558,13 @@ pub struct LedgerState {
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
-    /// Declared commodities.
+    /// Declared commodities. A `commodity` whose currency is already here is
+    /// a duplicate (E5004).
     commodities: FxHashSet<rustledger_core::Currency>,
+    /// The first `balance` assertion's number for each `(account, currency,
+    /// date)`, as the late walk reached them. A later assertion on the same
+    /// key with a different number is a duplicate (E2006).
+    balance_assertions: FxHashMap<(Account, Currency, NaiveDate), Decimal>,
     /// The padding the late walk applies, and the unused pads it reached.
     pads: PadState,
     /// Validation options.
@@ -878,7 +885,20 @@ fn validate_phase_inner<D: ValidatableDirective>(
             (Phase::Late, Directive::Open(open)) => validate_open(state, open, &mut errors),
             (Phase::Late, Directive::Close(close)) => validate_close(state, close, &mut errors),
             (Phase::Late, Directive::Commodity(comm)) => {
-                state.commodities.insert(comm.currency.clone());
+                // Every declaration after the first is a duplicate, whatever
+                // its date or metadata, as in beancount
+                // (`validate_duplicate_commodities`). The walk is in
+                // booking order, beancount's entry order, so the first is the
+                // one beancount keeps. Checked here, on the stream the
+                // regular plugins produced, as beancount checks after its
+                // plugins.
+                if !state.commodities.insert(comm.currency.clone()) {
+                    errors.push(ValidationError::new(
+                        ErrorCode::DuplicateCommodity,
+                        format!("Duplicate commodity directives for '{}'", comm.currency),
+                        comm.date,
+                    ));
+                }
                 validate_commodity_precision_meta(comm, &mut errors);
             }
             _ => continue,
@@ -1004,6 +1024,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
             (Phase::Late, Directive::Balance(bal)) => {
                 validate_balance_account(state, bal, &mut errors);
                 validate_balance_late(state, bal, index, &mut errors);
+                validate_balance_duplicate(state, bal, &mut errors);
             }
             // ── Everything else: skipped in this phase ──
             _ => {}
@@ -4951,6 +4972,157 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.code, ErrorCode::AccountNotOpen | ErrorCode::AccountClosed)),
             "same-date use must be clean: {errors:?}"
+        );
+    }
+
+    // ----- E5004: duplicate commodity directives (issue #3045) -----
+
+    /// The dates of the E5004 errors in `errors`, in order.
+    fn duplicate_commodity_dates(errors: &[ValidationError]) -> Vec<NaiveDate> {
+        errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::DuplicateCommodity)
+            .map(|e| e.date)
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_duplicate_commodity_reports_every_later_declaration() {
+        // As beancount's `validate_duplicate_commodities`: every declaration
+        // after the first in entry order, whatever its date. USD, declared
+        // once, is fine.
+        let directives = vec![
+            Directive::Commodity(Commodity::new(date(2020, 3, 1), "EUR")),
+            Directive::Commodity(Commodity::new(date(2020, 1, 1), "EUR")),
+            Directive::Commodity(Commodity::new(date(2020, 2, 1), "EUR")),
+            Directive::Commodity(Commodity::new(date(2020, 1, 1), "USD")),
+        ];
+        let errors = validate(&directives);
+        assert_eq!(
+            duplicate_commodity_dates(&errors),
+            [date(2020, 2, 1), date(2020, 3, 1)],
+            "{errors:?}"
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(
+            errors[0].message,
+            "Duplicate commodity directives for 'EUR'"
+        );
+        assert_eq!(ErrorCode::DuplicateCommodity.code(), "E5004");
+        assert_eq!(ErrorCode::DuplicateCommodity.severity(), Severity::Error);
+    }
+
+    #[test]
+    fn test_validate_duplicate_commodity_same_date_different_metadata() {
+        // Same date, the first carrying metadata: the second is the duplicate.
+        let mut meta = rustledger_core::Metadata::default();
+        meta.insert("name", MetaValue::String("Euro".into()));
+        let first = Commodity::new(date(2020, 1, 1), "EUR").with_meta(meta);
+        let directives = vec![
+            Directive::Commodity(first),
+            Directive::Commodity(Commodity::new(date(2020, 1, 1), "EUR")),
+        ];
+        let errors = validate(&directives);
+        assert_eq!(
+            duplicate_commodity_dates(&errors),
+            [date(2020, 1, 1)],
+            "{errors:?}"
+        );
+    }
+
+    // ----- E2006: duplicate balance assertions (issue #3044) -----
+
+    /// The ledger of #3044: 0.005 EUR in `Assets:A`, then `balances`.
+    fn duplicate_balance_ledger(balances: Vec<Balance>) -> Vec<Directive> {
+        let mut directives = vec![
+            Directive::Open(Open::new(date(2020, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2020, 1, 1), "Equity:O")),
+            Directive::Transaction(
+                Transaction::new(date(2020, 1, 2), "x")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:A",
+                        Amount::new(dec!(0.005), "EUR"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:O",
+                        Amount::new(dec!(-0.005), "EUR"),
+                    )),
+            ),
+        ];
+        directives.extend(balances.into_iter().map(Directive::Balance));
+        directives
+    }
+
+    fn balance(day: u32, number: Decimal, tolerance: Decimal) -> Balance {
+        Balance::new(date(2020, 1, day), "Assets:A", Amount::new(number, "EUR"))
+            .with_tolerance(tolerance)
+    }
+
+    #[test]
+    fn test_validate_duplicate_balance_with_different_amounts() {
+        // Both assertions pass within their tolerance; the second still
+        // contradicts the first (beancount's `validate_duplicate_balances`).
+        let directives = duplicate_balance_ledger(vec![
+            balance(3, dec!(0.00), dec!(0.01)),
+            balance(3, dec!(0.01), dec!(0.01)),
+        ]);
+        let errors = validate(&directives);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, ErrorCode::DuplicateBalanceAssertion);
+        assert_eq!(
+            errors[0].message,
+            "Duplicate balance assertion with different amounts"
+        );
+        assert_eq!(ErrorCode::DuplicateBalanceAssertion.code(), "E2006");
+    }
+
+    #[test]
+    fn test_validate_duplicate_balance_compares_numbers_not_tolerances() {
+        // `0.0 ~ 0.02` repeats `0.00 ~ 0.01` (numerically equal amounts,
+        // tolerance ignored): allowed. Each later different amount is
+        // compared with the FIRST and reported; another date, or another
+        // currency, is another key.
+        let mut directives = duplicate_balance_ledger(vec![
+            balance(3, dec!(0.00), dec!(0.01)),
+            balance(3, dec!(0.0), dec!(0.02)),
+            balance(3, dec!(0.01), dec!(0.01)),
+            balance(3, dec!(0.02), dec!(0.03)),
+            balance(4, dec!(0.01), dec!(0.01)),
+        ]);
+        directives.push(Directive::Balance(Balance::new(
+            date(2020, 1, 3),
+            "Assets:A",
+            Amount::new(dec!(0), "USD"),
+        )));
+        let errors = validate(&directives);
+        let duplicates = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::DuplicateBalanceAssertion)
+            .count();
+        assert_eq!(duplicates, 2, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn test_validate_duplicate_balance_still_checks_the_assertion() {
+        // A duplicate that also fails is reported as both, as beancount
+        // reports both.
+        let directives = duplicate_balance_ledger(vec![
+            balance(3, dec!(0.005), dec!(0)),
+            balance(3, dec!(0.006), dec!(0)),
+        ]);
+        let errors = validate(&directives);
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert!(
+            codes.contains(&ErrorCode::DuplicateBalanceAssertion),
+            "{errors:?}"
+        );
+        assert!(
+            codes.iter().any(|c| matches!(
+                c,
+                ErrorCode::BalanceAssertionFailed | ErrorCode::BalanceToleranceExceeded
+            )),
+            "{errors:?}"
         );
     }
 }

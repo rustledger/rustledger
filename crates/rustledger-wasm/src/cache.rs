@@ -740,7 +740,14 @@ use crate::types::{Error, LedgerOptions};
 /// (`7 USD`, #3047) where it kept a bare number. Parsed directives do not
 /// move, so the loader's cache does not; both payloads here archive booked
 /// directives, and an older blob would keep serving the bare price.
-pub const CACHE_VERSION: u32 = 140;
+/// v141: loader v79, unchanged (after #3049's v140);
+/// both payloads' validation findings move. A second `commodity` for one
+/// currency is `E5004` (#3045), and a second `balance` for one account,
+/// currency and date asserting a different amount is `E2006` (#3044), as
+/// beancount reports both. Parsed and booked directives do not move, so the
+/// loader's cache does not; both payloads here archive validation findings,
+/// and an older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 141;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

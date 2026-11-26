@@ -3902,3 +3902,61 @@ fn test_ambiguous_elision_is_one_error_and_booking_failure_only_without_validati
         ledger.errors
     );
 }
+
+/// #3045: E5004 (duplicate `commodity`) is checked after the regular
+/// plugins, as beancount checks it, so a plugin that synthesizes a
+/// `commodity` must not trip it. `valuation` is the one native plugin that
+/// inserts `commodity` directives: it declares its synthetic currency only
+/// when the ledger does not, so a ledger that declares `FUND_USD` itself
+/// still has exactly one declaration, and one that does not gets exactly
+/// the plugin's.
+#[test]
+fn test_valuation_plugin_commodity_is_not_a_duplicate_commodity() {
+    let body = r#"
+1970-01-01 open Assets:Fund:Total "FIFO"
+1970-01-01 open Income:Fund:PnL
+1970-01-01 open Assets:Cash
+
+1970-01-01 custom "valuation" "config"
+  account: "Assets:Fund:Total"
+  currency: "FUND_USD"
+  pnlAccount: "Income:Fund:PnL"
+
+2024-01-01 * "buy"
+  Assets:Fund:Total  1000 USD
+  Assets:Cash
+
+2024-01-05 custom "valuation" Assets:Fund:Total 1100 USD
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    for declared in [true, false] {
+        let path = dir.path().join(format!("valuation_{declared}.beancount"));
+        let declaration = if declared {
+            "1970-01-01 commodity FUND_USD\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &path,
+            format!("plugin \"beancount.plugins.valuation\"\n{declaration}{body}"),
+        )
+        .unwrap();
+        let ledger = load(&path, &LoadOptions::default()).expect("load");
+        let declarations = ledger
+            .directives
+            .iter()
+            .filter(|d| {
+                matches!(&d.value, rustledger_core::Directive::Commodity(c) if c.currency == "FUND_USD")
+            })
+            .count();
+        assert_eq!(
+            declarations, 1,
+            "declared={declared}: exactly one FUND_USD commodity after the plugin"
+        );
+        let duplicates: Vec<_> = ledger.errors.iter().filter(|e| e.code == "E5004").collect();
+        assert!(
+            duplicates.is_empty(),
+            "declared={declared}: no E5004 expected, got {duplicates:?}"
+        );
+    }
+}

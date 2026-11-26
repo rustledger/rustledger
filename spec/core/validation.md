@@ -147,6 +147,16 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Severity:** Error
 
+### DUPLICATE_BALANCE_ASSERTION
+
+**Code:** `E2006`
+
+**Condition:** A `balance` on the same account, currency and date as an earlier one (in entry order) asserts a different amount. Only the amounts (number and currency) are compared, numerically, not the tolerances, so an identical repeat is allowed. Each later assertion is compared with the first on its key. Checked on the stream the plugins produced (beancount's `validate_duplicate_balances`). The assertion is still checked against the balance.
+
+**Message:** `Duplicate balance assertion with different amounts`
+
+**Severity:** Error
+
 ## Transaction Errors
 
 ### TXN_NOT_BALANCED
@@ -351,6 +361,16 @@ cost basis.
 **Message:** `invalid precision metadata on commodity {currency}: {reason}; this declaration is ignored — display precision falls back to option "display_precision" if set, otherwise to inference`
 
 **Severity:** Warning
+
+### DUPLICATE_COMMODITY
+
+**Code:** `E5004`
+
+**Condition:** A `commodity` directive for a currency that an earlier `commodity` directive (in entry order) already declares, whatever their dates or metadata. Reported at every declaration after the first. Checked on the stream the plugins produced (beancount's `validate_duplicate_commodities`).
+
+**Message:** `Duplicate commodity directives for '{currency}'`
+
+**Severity:** Error
 
 ## Budget Errors
 

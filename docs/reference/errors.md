@@ -136,6 +136,19 @@ Formerly "Multiple Pads for Same Balance". It is no longer reported: as in beanc
 
 **Fix**: Record the purchase or sale that explains the difference, with its cost, instead of padding it.
 
+### E2006: Duplicate Balance Assertion With Different Amounts
+
+**Cause**: Two `balance` assertions for the same account and currency on the same date assert different amounts. Beancount has no time of day, so the two cannot both describe the account. As in beancount (`Duplicate balance assertion with different amounts`), the error is reported at the later assertion, and only the amounts are compared, not the tolerances: an identical repeat, as importers often emit, is allowed. Each assertion is still checked against the balance.
+
+**Example**:
+
+```beancount
+2020-01-03 balance Assets:A  0.00 ~ 0.01 EUR
+2020-01-03 balance Assets:A  0.01 ~ 0.01 EUR   ; E2006, even if both pass
+```
+
+**Fix**: Delete the wrong assertion, or move it to the date it belongs to.
+
 ## Transaction Errors (E3xxx)
 
 ### E3001: Transaction Does Not Balance
@@ -372,6 +385,19 @@ there are fewer of them.
 **Cause**: A `commodity` directive has invalid `precision` metadata.
 
 **Fix**: Correct the `precision` metadata value on the commodity directive.
+
+### E5004: Duplicate Commodity Directive
+
+**Cause**: A currency has more than one `commodity` directive, whatever their dates or metadata. As in beancount (`Duplicate commodity directives for '<CUR>'`), the error is reported at every declaration after the first.
+
+**Example**:
+
+```beancount
+2020-01-01 commodity EUR
+2020-02-01 commodity EUR   ; E5004
+```
+
+**Fix**: Keep one `commodity` directive per currency, merging the metadata into it.
 
 
 ## Budget Errors (E11xxx)

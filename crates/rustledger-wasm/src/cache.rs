@@ -726,7 +726,15 @@ use crate::types::{Error, LedgerOptions};
 /// files included from an included file run in that order. The loader's
 /// cache now archives each plugin's file (its v79); the `Ledger` payload
 /// archives the plugins' output, and an older blob would keep serving it.
-pub const CACHE_VERSION: u32 = 138;
+/// v139: loader v79, unchanged (after #3042's v138);
+/// parse errors move. An invalid account (P0006) starts bison's recovery as
+/// any line error does, so the lines beancount keeps quiet after it drop
+/// their errors; an undated declaration bison starts mid-line and that then
+/// fails (`popmeta pushmeta kk: @`) reports that failure; an indented line
+/// after an `option` in a transaction's body reports its indent. Parsed
+/// directives do not move, and every such source has a parse error, before
+/// and after, which the loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 139;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

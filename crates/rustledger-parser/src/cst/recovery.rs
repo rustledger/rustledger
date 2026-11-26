@@ -45,6 +45,16 @@
 //! `YYerror` drops the entry and starts the recovery over: the line gets the
 //! errors it has parsed on its own, and the window goes on from its end.
 //!
+//! An invalid account (P0006) is rledger's line error for a line it cannot
+//! read, named for the account on it; beancount's lexer reads that account
+//! into an `ACCOUNT` (or, glued to more, an invalid token), so it starts the
+//! recovery as any other line error does.
+//!
+//! An undated declaration bison's recovery starts mid-line (`popmeta pushmeta
+//! kk: @`) and that then fails past its first three tokens builds nothing:
+//! bison reports that failure and starts its recovery over at it, so the
+//! window goes on from there, with an error added where rledger has none.
+//!
 //! A BOM diagnostic starts the recovery where beancount's lexer reads that
 //! BOM into an invalid token (`<BOM>g`, a BOM alone after an indent), as the
 //! `$` it then stands for would. Inside the window, a lexer error rledger has
@@ -762,9 +772,18 @@ pub(super) fn quiet_bison_recovery(
     let mut declarations_at: Option<usize> = None;
     // The line the last recovery window started at.
     let mut window_line: Option<usize> = None;
-    // Where each error is that started no window (an invalid account, which
-    // beancount may read as an invalid token), in order.
+    // Where each error is that started no window (a BOM beancount does not
+    // read into an invalid token, an invalid account on a line holding a
+    // stray `\r`, a builder's error), in order.
     let mut unstarted: Vec<usize> = Vec::new();
+    // Where each grammar failure counted in `lexer_errors` is that is known
+    // to be bison's own (a column-0 statement failing among its first three
+    // tokens, a body line failing at its first), not one only rledger's
+    // grammar has.
+    let mut certain_failures: Vec<usize> = Vec::new();
+    // The last dated header looked up, and the token after its date (a
+    // keyword, or a transaction's flag).
+    let mut header_kind: Option<(usize, Option<Bc>)> = None;
     // The last indented line bison fails at, back at a `declarations` after
     // a statement it built whole in an entry's body, that rledger reads as
     // part of the entry and does not report.
@@ -773,6 +792,9 @@ pub(super) fn quiet_bison_recovery(
     // replace rledger's after the error that failed its line (`order[first..]`)
     // up to the end of its body.
     let mut phantoms: Vec<(usize, usize, usize, Vec<crate::ParseError>)> = Vec::new();
+    // The failures bison reports where rledger has no error
+    // (`undated_declaration_failure`).
+    let mut synthetic: Vec<crate::ParseError> = Vec::new();
     let mut lexer: Option<BcLexer<'_>> = None;
     let mut peeked: Option<(Bc, Range<usize>)> = None;
     let mut resume = 0usize;
@@ -856,6 +878,19 @@ pub(super) fn quiet_bison_recovery(
                     .is_some_and(|i| {
                         bom_is_invalid_token(&mut probe, stripped, at + i, &line_start)
                     })
+        } else if matches!(e.kind, crate::ParseErrorKind::InvalidAccount(_)) {
+            // An invalid account is rledger's line error for a line it cannot
+            // read, named for the account on it: bison fails on that line as
+            // on any other (where its lexer reads the account into an
+            // `ACCOUNT`, the grammar fails there or later; where into an
+            // invalid token, its `YYerror` starts the recovery). Not on a line
+            // holding a stray `\r` (#2980), where no recovery is modeled and
+            // the lines after keep their errors, as before.
+            let ls = stripped[..at].rfind('\n').map_or(0, |i| i + 1);
+            let le = stripped[at..]
+                .find('\n')
+                .map_or(stripped.len(), |i| at + i + 1);
+            !super::convert::holds_a_stray_cr(&stripped[ls..le])
         } else {
             starts_recovery(e)
         };
@@ -922,10 +957,14 @@ pub(super) fn quiet_bison_recovery(
             let ps = stripped[..ls - 1].rfind('\n').map_or(0, |i| i + 1);
             stripped[ps..].starts_with(|c: char| c.is_ascii_digit())
         };
+        // So does one bison meets back at a `declarations`, after a statement
+        // it built whole in an entry's body, though rledger reads that line as
+        // part of the entry (`  option "a" "b"` then `  $x`).
+        let after_declarations = declarations_at == Some(ls);
         let orphan_indent = content > ls
             && at == content
-            && item_starts.binary_search(&content).is_ok()
-            && !after_dated_header;
+            && (after_declarations
+                || item_starts.binary_search(&content).is_ok() && !after_dated_header);
         // Whether bison reports that indent: not in a dated entry's body
         // past its header's line either (after a metadata line or an
         // indented comment there), unless a statement it built in the body
@@ -937,8 +976,54 @@ pub(super) fn quiet_bison_recovery(
         // line has its lexer errors only. After a line with a stray `\r` or a
         // BOM, where no recovery is modeled, rledger's errors decide, as
         // before.
-        let before_indent = if orphan_indent {
+        //
+        // An indented line in a dated entry's body (`2024-01-01 open
+        // Assets:A` then `  open $`): after the indent, bison takes a key or a
+        // line end there, and in a transaction's body also a tag, a link, a
+        // flag or an account, and fails at anything else.
+        let body_of = if !orphan_indent && content > ls && in_dated_entry(ls) {
+            let i = blocks.partition_point(|&(start, _)| start < ls);
+            let header = i.checked_sub(1).map_or(0, |i| blocks[i].0);
+            match header_kind {
+                Some((looked_up, kind)) if looked_up == header => kind,
+                _ => {
+                    let mut l = BcLexer::at_line_start(stripped, header);
+                    let kind = if l.next().is_some_and(|(t, _)| t == Bc::Date) {
+                        l.next().map(|(t, _)| t)
+                    } else {
+                        None
+                    };
+                    header_kind = Some((header, kind));
+                    kind
+                }
+            }
+        } else {
+            None
+        };
+        let body_takes = |t: Bc| match body_of {
+            Some(Bc::Kw(_)) => t == Bc::Key,
+            Some(Bc::Txn | Bc::Flag | Bc::Asterisk | Bc::Hash | Bc::Capital) => matches!(
+                t,
+                Bc::Key
+                    | Bc::Tag
+                    | Bc::Link
+                    | Bc::Account
+                    | Bc::Flag
+                    | Bc::Asterisk
+                    | Bc::Hash
+                    | Bc::Capital
+            ),
+            _ => true,
+        };
+        // (Read for a column-0 line and a body line too, whose failure
+        // counts as bison's own only where bison is reporting there.)
+        let before_line = if orphan_indent || content == ls || body_of.is_some() {
             before_orphan_indent(stripped, ls, window_line, unreported_indent, &unstarted)
+        } else {
+            Before::Reporting
+        };
+        let before_indent = if orphan_indent {
+            before_line
         } else {
             Before::Reporting
         };
@@ -1006,6 +1091,30 @@ pub(super) fn quiet_bison_recovery(
             // On the line bison reports it: where the error is (a string that
             // runs over line ends is reported where it ends).
             lexer_errors.push((at, at));
+            // Known to be bison's own failure: a column-0 statement that fails
+            // at a token among its first three, which the recovery's grammar
+            // knows whole, where nothing before keeps bison recovering.
+            if content == ls
+                && before_line == Before::Reporting
+                && before.len() < 3
+                && !matches!(tok.0, Bc::Error | Bc::Eol | Bc::Eof)
+            {
+                let kinds: Vec<Bc> = before.iter().map(|&(t, _)| t).collect();
+                if (0..kinds.len()).all(|i| accepts(&kinds[..i], kinds[i]))
+                    && !accepts(&kinds, tok.0)
+                {
+                    certain_failures.push(at);
+                }
+            }
+            // So is a body line's that fails at its first token.
+            if body_of.is_some()
+                && before_line == Before::Reporting
+                && matches!(before.as_slice(), [(Bc::Indent, _)])
+                && !matches!(tok.0, Bc::Error | Bc::Eol | Bc::Eof)
+                && !body_takes(tok.0)
+            {
+                certain_failures.push(at);
+            }
         }
         let mut segment: Option<(usize, usize)> = Some((from, k));
         let mut first = true;
@@ -1084,6 +1193,58 @@ pub(super) fn quiet_bison_recovery(
                     // these three tokens: reported. An entry bison starts
                     // mid-line is quiet up to its third token.
                     let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
+                    // An undated declaration bison starts mid-line that fails
+                    // past these three tokens (`popmeta pushmeta kk: @`): it
+                    // builds nothing, so changes no state; bison reports that
+                    // failure (an invalid token there is its lexer's error
+                    // only) and starts its recovery over at it, at status
+                    // three. The failure is rledger's next error on the line
+                    // if it has one there, else one is added.
+                    let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
+                    if !aligned
+                        && depth == 0
+                        && let Some((failed, at_token)) =
+                            undated_declaration_failure(stripped, &kinds, r.end)
+                    {
+                        if let Some((s, n)) = segment.take()
+                            && r.end > s
+                        {
+                            segments.push((s, r.end, n));
+                        }
+                        tok = loop {
+                            let t = next(&mut peeked);
+                            if t.1.start >= at_token.start || matches!(t.0, Bc::Eol | Bc::Eof) {
+                                break t;
+                            }
+                        };
+                        let mut trigger = usize::MAX;
+                        if failed != Bc::Error {
+                            // (One of rledger's at that very token, not one
+                            // standing for a later invalid token or date.)
+                            let j = order.partition_point(|&j| effective[j] < at_token.start);
+                            if let Some(&j) = order.get(j).filter(|&&j| {
+                                effective[j] < at_token.end
+                                    && is_droppable(&errors[j])
+                                    && !is_lexer_kind(&errors[j], effective[j], &invalid)
+                            }) {
+                                trigger = j;
+                                lexer_errors.push((at_token.start, at_token.start));
+                            } else {
+                                synthetic.push(undated_failure_error(
+                                    stripped,
+                                    kinds[0],
+                                    at_token.clone(),
+                                    off,
+                                ));
+                            }
+                        }
+                        segment = Some((at_token.start, trigger));
+                        status = 3;
+                        prefix.clear();
+                        resumed_at = None;
+                        first = true;
+                        continue;
+                    }
                     // An entry bison starts mid-line whose own line holds an
                     // invalid token after these three (`<BOM>g 2024-01-02 *
                     // "n" $x`): that token's `YYerror` drops the entry, after
@@ -1290,7 +1451,8 @@ pub(super) fn quiet_bison_recovery(
     // is on), each quiet line keeps as many of rledger's errors as beancount's
     // lexer finds there, its invalid-token errors first.
     lexer_errors.sort_unstable();
-    let mut added = Vec::new();
+    certain_failures.sort_unstable();
+    let mut added = synthetic;
     let mut next_error = 0;
     for &(seg_start, seg_end, trigger) in &segments {
         let mut line_from = seg_start;
@@ -1385,8 +1547,34 @@ pub(super) fn quiet_bison_recovery(
             } else if indent_line {
                 keep
             } else {
-                keep.min(real.saturating_sub(candidates.len()))
+                // Each of rledger's errors there stands for one of those
+                // tokens, but for the one that failed the line, when it is
+                // counted for the line's grammar failure.
+                let failure_counted = trigger != usize::MAX
+                    && candidates.contains(&trigger)
+                    && lexer_errors[la..lb]
+                        .iter()
+                        .any(|&(s, e)| s == e && certain_failures.binary_search(&s).is_ok());
+                keep.min(real.saturating_sub(candidates.len() - usize::from(failure_counted)))
             };
+            // Where the error that failed the line is rledger's own report of
+            // the line's first invalid token (a line it reads as part of the
+            // entry before, `  option "a" "b"` then `  $x`), that token is
+            // named already: what is missing is the indent's error.
+            let trigger_names_a_token = indent_line && names_an_invalid_token(&errors[trigger]);
+            if trigger_names_a_token && keep > 0 {
+                let indent = stripped[line_from..line_to].len()
+                    - stripped[line_from..line_to]
+                        .trim_start_matches([' ', '\t'])
+                        .len();
+                added.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(
+                        "unexpected indent: no entry continues on this line".to_string(),
+                    ),
+                    crate::Span::new(line_from + off, line_from + indent + off),
+                ));
+                keep -= 1;
+            }
             for &(tok_start, tok_end) in &lexer_errors[la..lb] {
                 if keep == 0 {
                     break;
@@ -1414,7 +1602,7 @@ pub(super) fn quiet_bison_recovery(
                         || order[at_or_after..]
                             .iter()
                             .take_while(|&&scan| effective[scan] < tok_end)
-                            .any(|&scan| scan != trigger)
+                            .any(|&scan| scan != trigger || trigger_names_a_token)
                 } else {
                     order
                         .get(at_or_after)
@@ -1502,6 +1690,13 @@ pub(super) fn quiet_bison_recovery(
     }
 }
 
+/// Whether `e` is a line error renamed for the line's first invalid token
+/// (`unexpected input: invalid token '$x'`, by
+/// `convert::drop_errors_inside_a_line_error`), so it names that token.
+fn names_an_invalid_token(e: &crate::ParseError) -> bool {
+    matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m.starts_with("unexpected input: invalid token '"))
+}
+
 /// What the lines before an orphan indented line say about bison's state at
 /// its indent ([`before_orphan_indent`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1522,7 +1717,8 @@ enum Before {
 }
 
 /// Whether bison may still be recovering at the indent of the orphan
-/// indented line starting at `ls`, read back from it over the lines after
+/// indented line starting at `ls` (or at the start of the column-0 line
+/// there), read back from it over the lines after
 /// `floor`, the line the last recovery window started at (from there on the
 /// window decided).
 ///
@@ -1530,8 +1726,9 @@ enum Before {
 /// it is not recovering), and its line end one shift; a gap line (a blank
 /// line, a line beancount's lexer skips at column 0) is a shift. So from the
 /// last indented line before `ls`, two gap lines end a recovery, and an
-/// indented line in between starts the count over, unless bison can start a
-/// statement on it (a date or a keyword), which may end the recovery. Read
+/// indented line in between starts the count over, unless bison shifts three
+/// tokens on it (`recovery_ends_on_line`: a statement that starts there),
+/// which ends the recovery. Read
 /// back that way, the run of lines `ls` is in starts at:
 ///
 /// - an indented `;` comment after a gap or at the top of the file, which
@@ -1542,14 +1739,13 @@ enum Before {
 ///   on the `$x` line; with two blank lines between, two);
 /// - `unreported`, an indented line bison fails at that rledger does not
 ///   report: the same;
-/// - anything else (a column-0 statement, an indented line with a date or a
-///   keyword, two gap lines, the top of the file, `floor`), where rledger's
+/// - anything else (a column-0 statement, an indented line that ends the
+///   recovery, two gap lines, the top of the file, `floor`), where rledger's
 ///   own errors decide, as before.
 ///
 /// Unless one of the four lines before `ls` holds a stray `\r`, a BOM or an
-/// error of rledger's that started no window (`unstarted`: an invalid
-/// account, which beancount may read as an invalid token), whose own failure
-/// may still keep bison recovering at `ls`, unmodeled.
+/// error of rledger's that started no window (`unstarted`), whose own
+/// failure may still keep bison recovering at `ls`, unmodeled.
 ///
 /// Calls come in ascending order, each with the last one's line as its
 /// `floor`, so each line is read about once.
@@ -1623,19 +1819,112 @@ fn before_orphan_indent(
                 return Before::AcceptedComment;
             }
             gaps = 0;
-        } else if line.starts_with([' ', '\t'])
-            && !BcLexer::at_line_start(src, ps)
-                .take_while(|(t, r)| r.start < end && *t != Bc::Eol)
-                .any(|(t, _)| matches!(t, Bc::Date | Bc::Kw(_)))
-        {
-            // An indented line on which bison can start no statement: inside
-            // a recovery, its indent starts the count over too.
+        } else if line.starts_with([' ', '\t']) && !recovery_ends_on_line(src, ps, end) {
+            // An indented line on which bison's recovery shifts no three
+            // tokens: inside a recovery, its indent starts the count over too.
             gaps = 0;
         } else {
             return Before::Reporting;
         }
         end = ps;
     }
+}
+
+/// Whether bison, recovering at the indent of the indented line
+/// `src[ls..end]`, shifts three tokens on it and so reports again: a
+/// statement that starts there (`  2024-01-02 open Assets:A`), not a date
+/// or a keyword that starts none (`  date: 2024-01-02`, whose `DATE` is
+/// shifted and whose line end is not, so the count is back at three). The
+/// recovery machine of [`quiet_bison_recovery`], over the line's tokens.
+fn recovery_ends_on_line(src: &str, ls: usize, end: usize) -> bool {
+    let mut status = 3u8;
+    let mut prefix: Vec<Bc> = Vec::new();
+    for (t, r) in BcLexer::at_line_start(src, ls) {
+        if r.start >= end || t == Bc::Eof {
+            break;
+        }
+        let shift = if t == Bc::Error || t == Bc::Indent {
+            false
+        } else if accepts(&prefix, t) {
+            true
+        } else {
+            // Not taken: the count starts over, and the token is tried again
+            // from a `declarations`.
+            status = 3;
+            prefix.clear();
+            accepts(&[], t)
+        };
+        if !shift {
+            status = 3;
+            prefix.clear();
+            continue;
+        }
+        if !(t == Bc::Eol && prefix.is_empty()) {
+            prefix.push(t);
+        }
+        status -= 1;
+        if status == 0 {
+            return true;
+        }
+        if t == Bc::Eol {
+            break;
+        }
+    }
+    false
+}
+
+/// Where an undated declaration bison has shifted three tokens of, mid-line
+/// (`kinds`, ending at `pos`), fails: the token it does not take and that
+/// token's class, or `None` where it ends its line (it is built) or where its
+/// rest is not modeled (a metadata value that is a number or an expression, a
+/// string that runs over line ends).
+/// `option` and `plugin` with two strings and `popmeta` with its key take
+/// only the line end; `pushmeta` with its key takes a value first.
+fn undated_declaration_failure(src: &str, kinds: &[Bc], pos: usize) -> Option<(Bc, Range<usize>)> {
+    let mut lexer = BcLexer::mid_line(src, pos);
+    let mut next = || lexer.next().unwrap_or((Bc::Eof, src.len()..src.len()));
+    let t = next();
+    let t = match kinds {
+        [Bc::Kw(Kw::Option | Kw::Plugin), Bc::Str, Bc::Str]
+        | [Bc::Kw(Kw::Popmeta), Bc::Key, Bc::Colon] => t,
+        [Bc::Kw(Kw::Pushmeta), Bc::Key, Bc::Colon] => {
+            let text = &src[t.1.clone()];
+            match t.0 {
+                Bc::Number => return None,
+                Bc::Other if matches!(text, "(" | "-" | "+") => return None,
+                Bc::Str | Bc::Account | Bc::Date | Bc::Currency | Bc::Capital | Bc::Tag => next(),
+                Bc::Other if matches!(text, "TRUE" | "FALSE" | "NULL") => next(),
+                _ => t,
+            }
+        }
+        _ => return None,
+    };
+    // (A string that runs over line ends is reported where it ends: not
+    // modeled.)
+    (!matches!(t.0, Bc::Eol | Bc::Eof) && !src[t.1.clone()].contains('\n')).then_some(t)
+}
+
+/// The error for the token `at` that an undated declaration bison started
+/// mid-line fails at ([`undated_declaration_failure`]), in the input's frame.
+fn undated_failure_error(
+    src: &str,
+    keyword: Bc,
+    at: Range<usize>,
+    off: usize,
+) -> crate::ParseError {
+    let name = match keyword {
+        Bc::Kw(Kw::Option) => "option",
+        Bc::Kw(Kw::Plugin) => "plugin",
+        Bc::Kw(Kw::Popmeta) => "popmeta",
+        _ => "pushmeta",
+    };
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(format!(
+            "unexpected {:?} in the {name} directive: expected the end of the line",
+            &src[at.clone()]
+        )),
+        crate::Span::new(at.start + off, at.end + off),
+    )
 }
 
 /// Whether the rest of the line from `pos` (a token's end, outside any
@@ -1920,6 +2209,25 @@ mod tests {
             (
                 "orphan lines after indented comments",
                 "\n".to_string() + &"  ; c\n  ; d\n\n  $x\n\n\n".repeat(N),
+            ),
+            (
+                "invalid accounts",
+                "    Assets:Café 1 BRL\n    Assets:B\n\n".repeat(N),
+            ),
+            (
+                "lines after options in a body",
+                "2024-01-02 * \"n\"\n".to_string()
+                    + &"  option \"title\" \"x\"\n  $x\n  Assets:B 1 USD\n".repeat(N),
+            ),
+            (
+                "undated declarations failing mid-line",
+                "~ popmeta kk: @ x\n~ pushmeta kk: \"v\" @\n".repeat(N),
+            ),
+            (
+                "date lines in a recovery",
+                "2024-01-02 * \"n\"\n  option \"title\" \"x\"\n".to_string()
+                    + &"    date: 2024-01-02\n".repeat(N)
+                    + "\n  Assets:a 1 USD\n",
             ),
             (
                 "orphan lines in a long body",

@@ -951,6 +951,138 @@ include "accounts.beancount"
         }
     }
 
+    /// Drift guard: a plugin declared in more than one file runs once, at
+    /// its first place in beancount's breadth-first file order
+    /// (`rustledger_loader::plugins_in_run_order`), on every surface that
+    /// loads includes: `rledger check`, the multi-file `Ledger` (before and
+    /// after a cache round trip) and ffi-wasi's file load (the WIT
+    /// component's `load-file`), which also reports the plugins it ran.
+    /// `main` and two nested includes declare `implicit_prices` (a `price`
+    /// per run) and `check_commodity` (an error per run); `z` declares
+    /// `implicit_prices` again with another config, which is another
+    /// plugin and runs. So two `price`s and one error, where each plugin
+    /// running once per declaration gave four and three.
+    #[test]
+    fn test_repeated_plugins_run_once_across_surfaces() {
+        use rustledger_core::Directive;
+        use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+        use std::path::Path;
+
+        const IP: &str = "plugin \"beancount.plugins.implicit_prices\"\n";
+        const CC: &str = "plugin \"beancount.plugins.check_commodity\"\n";
+        let main = format!(
+            "{IP}{CC}include \"x.beancount\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+             2024-01-01 commodity USD\n\
+             2024-02-01 * \"buy\"\n  Assets:Stock  1 HOOL @ 10 USD\n  Assets:Cash\n"
+        );
+        let x = format!("include \"z.beancount\"\n{CC}{IP}");
+        let z = format!("{IP}plugin \"beancount.plugins.implicit_prices\" \"other\"\n{CC}");
+        let files = [
+            ("main.beancount", main.as_str()),
+            ("x.beancount", x.as_str()),
+            ("z.beancount", z.as_str()),
+        ];
+        let vfs = || {
+            let mut vfs = VirtualFileSystem::new();
+            for (name, text) in files {
+                vfs.add_file(name, text);
+            }
+            vfs
+        };
+        let prices = |directives: &[Directive]| {
+            directives
+                .iter()
+                .filter(|d| matches!(d, Directive::Price(_)))
+                .count()
+        };
+        let missing = |messages: Vec<String>| {
+            messages
+                .iter()
+                .filter(|m| m.starts_with("Missing Commodity directive for 'HOOL'"))
+                .count()
+        };
+
+        // `rledger check`.
+        let raw = Loader::new()
+            .with_filesystem(Box::new(vfs()))
+            .load(Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = process(
+            raw,
+            &LoadOptions {
+                validate: true,
+                ..Default::default()
+            },
+        )
+        .expect("processes");
+        let booked: Vec<Directive> = ledger.directives.iter().map(|d| d.value.clone()).collect();
+        assert_eq!(prices(&booked), 2, "rledger check prices");
+        assert_eq!(
+            missing(ledger.errors.iter().map(|e| e.message.clone()).collect()),
+            1,
+            "rledger check errors"
+        );
+
+        // The multi-file `Ledger`, before and after a cache round trip.
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let Ok(multi) = parsed_ledger::Ledger::from_file_map(map, "main.beancount") else {
+            panic!("the multi-file ledger loads");
+        };
+        let Ok(bytes) = multi.serialize() else {
+            panic!("the ledger serializes");
+        };
+        let Ok(restored) = parsed_ledger::Ledger::from_cache(&bytes) else {
+            panic!("the ledger restores");
+        };
+        for (name, ledger) in [("Ledger", &multi), ("restored Ledger", &restored)] {
+            assert_eq!(prices(ledger.directives()), 2, "{name} prices");
+            assert_eq!(missing(ledger.error_messages()), 1, "{name} errors");
+        }
+
+        // ffi-wasi's file load, a native-only dependency.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(load) = rustledger_ffi_wasi::helpers::load_file_with_fs(
+                Path::new("main.beancount"),
+                false,
+                Some(Box::new(vfs())),
+                true,
+            ) else {
+                panic!("ffi-wasi loads the file");
+            };
+            assert_eq!(prices(&load.directives), 2, "ffi-wasi prices");
+            assert_eq!(
+                missing(
+                    load.errors
+                        .iter()
+                        .chain(&load.validation_errors)
+                        .map(|e| e.message.clone())
+                        .collect()
+                ),
+                1,
+                "ffi-wasi errors"
+            );
+            let plugins: Vec<(&str, Option<&str>)> = load
+                .plugins
+                .iter()
+                .map(|p| (p.name.as_str(), p.config.as_deref()))
+                .collect();
+            assert_eq!(
+                plugins,
+                [
+                    ("beancount.plugins.implicit_prices", None),
+                    ("beancount.plugins.check_commodity", None),
+                    ("beancount.plugins.implicit_prices", Some("other")),
+                ],
+                "ffi-wasi reports the plugins it ran"
+            );
+        }
+    }
+
     /// Every surface that reports `source`'s "Attempt to pad an entry with
     /// cost" answers `expected`: `rledger check`, the WASM `ParsedLedger`'s
     /// validation and `expandPads`, and the multi-file `Ledger`'s errors and

@@ -293,3 +293,50 @@ fn test_cache_hit_keeps_the_options_merged_across_files() {
         );
     }
 }
+
+/// A plugin declared in the main file and again in an included file runs
+/// once, cold and from the cache, as every surface runs it
+/// (`rustledger_loader::plugins_in_run_order`): `check_commodity` reports
+/// the undeclared `HOOL` once, where running each declaration reported it
+/// twice. The cache archives the declarations, all of them, so a hit
+/// decides the same.
+#[test]
+fn test_check_repeated_plugin_across_includes_runs_once() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plugin = "plugin \"beancount.plugins.check_commodity\"\n";
+    std::fs::write(
+        dir.path().join("main.beancount"),
+        format!(
+            "{plugin}include \"sub.beancount\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+             2024-01-01 commodity USD\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  1 HOOL @ 10 USD\n  Assets:Cash\n"
+        ),
+    )
+    .expect("write main");
+    std::fs::write(dir.path().join("sub.beancount"), plugin).expect("write sub");
+    let path = dir.path().join("main.beancount");
+
+    let cold = check(&bin, &path, &[]);
+    let warm = check(&bin, &path, &["--verbose"]);
+    let warm_out = String::from_utf8_lossy(&warm.stdout);
+    assert!(
+        warm_out.contains("(from cache)"),
+        "the second run must be a cache hit: {warm_out}"
+    );
+    for (run, out) in [("cold", &cold), ("warm", &warm)] {
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            output
+                .matches("Missing Commodity directive for 'HOOL'")
+                .count(),
+            1,
+            "{run} run reports the missing commodity once: {output}"
+        );
+    }
+}

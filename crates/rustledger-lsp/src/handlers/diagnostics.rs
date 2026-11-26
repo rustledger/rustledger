@@ -1346,6 +1346,13 @@ pub(crate) struct FileDiagTarget<'a> {
 /// sort by `file_id`, which depends on the view's contents alone, not on the
 /// order its files are listed in (#2949).
 ///
+/// These are declarations, every one kept: `run_plugins` runs them as
+/// `check` does, each distinct (name, config) from the first file declaring
+/// it, in beancount's breadth-first file order
+/// (`rustledger_loader::plugins_in_run_order`).
+/// The list is kept whole because a buffer can remove the first of two
+/// declarations, and the other must then run in its own place.
+///
 /// The `file_id`s are the stored load's, so the set and order of the files
 /// are those of the last load: this is the order `check` runs the view's
 /// plugins in for the files that load found, in the order it found them. A
@@ -4285,6 +4292,86 @@ plugin "auto_accounts"
             PositionEncoding::Utf16,
         );
         assert_eq!(late_prices(), 1, "ledger_diagnostics_multi");
+    }
+
+    /// Drift guard: a plugin declared in more than one file runs once, as
+    /// `check` runs it (`rustledger_loader::plugins_in_run_order`, which
+    /// `run_plugins` applies to the view's declarations). `main` and `sub`
+    /// declare `implicit_prices`, and `deep` (included from `sub`) declares
+    /// it with another config, which is another plugin: two prices, where
+    /// running each declaration gave three. Whichever files are open, as a
+    /// buffer re-declares its plugins in the view.
+    #[test]
+    fn repeated_plugins_across_files_run_once_like_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "plugin \"beancount.plugins.implicit_prices\"\n\
+             include \"sub.beancount\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL @ 100 USD\n  Assets:Cash\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sub.beancount"),
+            "include \"deep.beancount\"\nplugin \"beancount.plugins.implicit_prices\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("deep.beancount"),
+            "plugin \"beancount.plugins.implicit_prices\" \"other\"\n\
+             plugin \"beancount.plugins.implicit_prices\"\n",
+        )
+        .unwrap();
+        let count_prices = |directives: &[Spanned<Directive>]| {
+            directives
+                .iter()
+                .filter(|d| matches!(d.value, Directive::Price(_)))
+                .count()
+        };
+        let ledger = rustledger_loader::load(&main, &lsp_load_options()).expect("load");
+        assert_eq!(count_prices(&ledger.directives), 2, "{:?}", ledger.errors);
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let ledger = state.ledger().unwrap();
+        let sources: Vec<SourceText> = ledger
+            .source_map
+            .files()
+            .iter()
+            .map(|f| f.source.clone())
+            .collect();
+        let parses: Vec<ParseResult> = sources.iter().map(|s| parse(s)).collect();
+        let late_prices = || LAST_LATE_DIRECTIVES.with(|c| count_prices(&c.borrow()));
+
+        // The current-file path, each file open in turn.
+        for (fid, (source, parsed)) in sources.iter().zip(&parses).enumerate() {
+            let _ = all_diagnostics(
+                parsed,
+                source,
+                Some(&state),
+                Some(u16::try_from(fid).unwrap()),
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            assert_eq!(late_prices(), 2, "all_diagnostics, file {fid} open");
+        }
+
+        // The multi-file path, every file open.
+        let view: Vec<(u16, &ParseResult)> = parses
+            .iter()
+            .enumerate()
+            .map(|(fid, parsed)| (u16::try_from(fid).unwrap(), parsed))
+            .collect();
+        let targets = [FileDiagTarget {
+            file_id: 0,
+            source: &sources[0],
+            parse: &parses[0],
+        }];
+        let _ = ledger_diagnostics_multi(&state, &view, &targets, PositionEncoding::Utf16);
+        assert_eq!(late_prices(), 2, "ledger_diagnostics_multi");
     }
 
     /// A BOM-led invalid token where a directive's argument belongs is one

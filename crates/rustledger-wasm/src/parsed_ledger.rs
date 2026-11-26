@@ -755,6 +755,12 @@ impl Ledger {
         &self.errors
     }
 
+    /// The booked directives, plugins applied, that queries run on.
+    #[cfg(test)]
+    pub(crate) fn directives(&self) -> &[Directive] {
+        &self.directives
+    }
+
     /// [`Ledger::from_files`] once the files are a map: the load, as the CLI
     /// runs it. Plain Rust, so native tests build a `Ledger` too.
     pub(crate) fn from_file_map(

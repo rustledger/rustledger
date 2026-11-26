@@ -88,9 +88,11 @@ fn fingerprint(ledger: &Ledger) -> Fingerprint {
             _ => None,
         })
         .collect();
-    let plugins = ledger
-        .plugins
-        .iter()
+    // The plugins as they run (each from the first file declaring it, in
+    // beancount's breadth-first file order), not as declared: a tree that declares a
+    // plugin in two files runs what the merged file declaring it once runs.
+    let plugins = rustledger_loader::plugins_in_run_order(&ledger.plugins, &ledger.source_map)
+        .into_iter()
         .map(|p| (p.name.clone(), p.config.clone(), p.force_python))
         .collect();
     let anchors = Anchors::new(ledger);

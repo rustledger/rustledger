@@ -242,7 +242,8 @@ pub struct Ledger {
     pub directives: Vec<Spanned<Directive>>,
     /// Options parsed from the file.
     pub options: Options,
-    /// Plugins declared in the file.
+    /// Every plugin declaration of every file, in `file_id` order; the ones
+    /// run are [`crate::plugins_in_run_order`]'s.
     pub plugins: Vec<Plugin>,
     /// Source map for error reporting.
     pub source_map: SourceMap,
@@ -1582,6 +1583,10 @@ struct PluginInvocation {
 /// whether or not a plugin ran, so Late validation and everything after it
 /// see the ledger as before. That includes a mark a plugin set itself
 /// (`split_expenses` marks the postings it adds, as beancount's does).
+///
+/// `file_plugins` are a load's declarations, every one of them; the run
+/// runs each distinct plugin from the first file declaring it, in
+/// beancount's breadth-first file order, as [`crate::plugins_in_run_order`] gives them.
 #[cfg(feature = "plugins")]
 pub fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
@@ -1683,9 +1688,13 @@ fn dispatch_plugins(
     // PostBooking pass.
     let want_synth = matches!(pass, PluginPass::PreBookingSynth);
 
-    // File-declared plugins.
+    // File-declared plugins, in beancount's breadth-first file order, each
+    // distinct (name, config) run from the first file declaring it only.
+    // Deliberately unlike beancount 3.2.3, which runs the top-level file's
+    // plugins only (repeats included) and ignores an included file's: see
+    // `crate::plugins_in_run_order`, the one place this is decided.
     if options.run_plugins {
-        for plugin in file_plugins {
+        for plugin in crate::plugins_in_run_order(file_plugins, source_map) {
             if registry.find_synth(&plugin.name).is_some() == want_synth {
                 entries.push(PluginInvocation {
                     name: plugin.name.clone(),

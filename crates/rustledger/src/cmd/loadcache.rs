@@ -118,6 +118,8 @@ pub fn load_result_cached(
                     name: p.name.clone(),
                     config: p.config.clone(),
                     force_python: p.force_python,
+                    // Loader file ids are below the placeholder ids, a u16.
+                    file_id: u16::try_from(p.file_id).unwrap_or(u16::MAX),
                 })
                 .collect(),
             files,

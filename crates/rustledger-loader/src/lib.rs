@@ -384,7 +384,8 @@ pub struct LoadResult {
     pub directives: Vec<Spanned<Directive>>,
     /// Parsed options.
     pub options: Options,
-    /// Plugins to load.
+    /// Every plugin declaration of every file, in `file_id` order; the ones
+    /// run are [`plugins_in_run_order`]'s.
     pub plugins: Vec<Plugin>,
     /// Source map for error reporting.
     pub source_map: SourceMap,
@@ -429,6 +430,61 @@ pub struct Plugin {
     pub file_id: usize,
     /// Whether the `python:` prefix was used to force Python execution.
     pub force_python: bool,
+}
+
+/// The file-declared plugins a ledger runs, in the order it runs them.
+///
+/// That is `plugins` (a load's declarations, [`LoadResult::plugins`]) in
+/// beancount's breadth-first parse order of their files
+/// ([`SourceMap::parse_ranks`], each file's in declaration order), each
+/// distinct plugin run only from the first file that declares it.
+///
+/// A plugin is the pair beancount runs: its name as written (so
+/// `python:x` and `x` differ, as do two spellings of one native plugin)
+/// and its config string. The same name with another config is another
+/// plugin and runs as well.
+///
+/// Deliberate deviations from beancount 3.2.3, which runs the plugins of
+/// the top-level file only (`options_map["plugin"]`, every declaration,
+/// repeats included) and ignores a `plugin` in an included file:
+///
+/// * rledger runs an included file's plugins too, so a sub-ledger that
+///   declares `auto_accounts` for itself still works when included;
+/// * and so a plugin declared in more than one file runs from the first of
+///   them only. Otherwise a plugin declared in the main file and again in
+///   an include (the include written to be checked on its own too) ran
+///   twice, and a plugin that adds entries (`implicit_prices`, `forecast`,
+///   ...) added them twice.
+///
+/// A repeat within the one file that runs a plugin is kept, as beancount
+/// keeps a repeat in the top-level file (it runs the plugin again), so a
+/// single-file ledger runs exactly what bean-check runs.
+///
+/// The one place this is decided: `run_plugins` runs what this returns,
+/// for `rledger check` and every surface that runs `process` (the WASM
+/// `Ledger`, the FFI) and for the LSP, which calls `run_plugins` itself
+/// over a view's declarations; the FFI reports it as the ledger's plugins.
+/// [`LoadResult::plugins`] and `Ledger::plugins` keep every declaration,
+/// in `file_id` order, as the LSP's view rebuilding needs them.
+#[must_use]
+pub fn plugins_in_run_order<'a>(plugins: &'a [Plugin], source_map: &SourceMap) -> Vec<&'a Plugin> {
+    let ranks = source_map.parse_ranks();
+    let mut ordered: Vec<&Plugin> = plugins.iter().collect();
+    // Stable: a file's plugins keep their declaration order. A file the map
+    // does not know (none from the loader does) goes last, by id.
+    ordered.sort_by_key(|p| {
+        (
+            ranks.get(p.file_id).copied().unwrap_or(usize::MAX),
+            p.file_id,
+        )
+    });
+    // Each pair's first file, the one it runs from.
+    let mut first_file: HashMap<(&str, bool, Option<&str>), usize> = HashMap::new();
+    ordered.retain(|p| {
+        let pair = (p.name.as_str(), p.force_python, p.config.as_deref());
+        *first_file.entry(pair).or_insert(p.file_id) == p.file_id
+    });
+    ordered
 }
 
 /// Decrypt a GPG-encrypted file using the system `gpg` command.
@@ -1485,6 +1541,62 @@ include "level2.beancount"
             ["main", "a", "b", "c"].map(|n| format!("{n}.beancount"))
         );
         assert_eq!(repeated.errors.len(), 2, "{:?}", repeated.errors);
+    }
+
+    /// [`plugins_in_run_order`]: the files' plugins in beancount's
+    /// breadth-first file order (`main` includes `a` then `c`, `a` includes
+    /// `a_child`, so `c` before `a_child`), each distinct `(name, config)` run
+    /// from the first file declaring it, that file's repeat included. Another
+    /// config, or the `python:` prefix, is another plugin.
+    #[test]
+    fn test_plugins_in_run_order_breadth_first_from_first_file() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "plugin \"p\"\ninclude \"a.beancount\"\nplugin \"q\" \"1\"\nplugin \"p\"\ninclude \"c.beancount\"\n",
+        );
+        vfs.add_file(
+            "a.beancount",
+            "plugin \"a\"\ninclude \"a_child.beancount\"\nplugin \"p\"\n",
+        );
+        vfs.add_file(
+            "a_child.beancount",
+            "plugin \"ac\"\nplugin \"q\" \"2\"\nplugin \"python:p\"\nplugin \"q\" \"1\"\n",
+        );
+        vfs.add_file("c.beancount", "plugin \"c\"\nplugin \"a\"\nplugin \"p\"\n");
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.plugins.len(), 12, "every declaration is kept");
+
+        let got: Vec<(&str, Option<&str>, bool, usize)> =
+            plugins_in_run_order(&result.plugins, &result.source_map)
+                .into_iter()
+                .map(|p| {
+                    (
+                        p.name.as_str(),
+                        p.config.as_deref(),
+                        p.force_python,
+                        p.file_id,
+                    )
+                })
+                .collect();
+        assert_eq!(
+            got,
+            [
+                ("p", None, false, 0),
+                ("q", Some("1"), false, 0),
+                ("p", None, false, 0),
+                ("a", None, false, 1),
+                ("c", None, false, 3),
+                ("ac", None, false, 2),
+                ("q", Some("2"), false, 2),
+                ("p", None, true, 2),
+            ]
+        );
     }
 
     /// Plugins are collected in `file_id` order, each file's in declaration

@@ -47,6 +47,10 @@ pub struct CachedPlugin {
     pub config: Option<String>,
     /// Whether the `python:` prefix was used to force Python execution.
     pub force_python: bool,
+    /// The file that declares it, by index into [`CacheEntry::files`], so a
+    /// hit runs each plugin from the file a load runs it from, in the same
+    /// order ([`crate::plugins_in_run_order`]).
+    pub file_id: u16,
 }
 
 /// Cached options - a serializable subset of Options.
@@ -410,7 +414,13 @@ impl CacheEntry {
                 name: p.name.clone(),
                 config: p.config.clone(),
                 span: rustledger_parser::Span::ZERO,
-                file_id: 0,
+                // Its file's id in the rebuilt map; a file left out (no
+                // longer readable) leaves it at 0.
+                file_id: ids
+                    .get(usize::from(p.file_id))
+                    .copied()
+                    .flatten()
+                    .unwrap_or(0),
                 force_python: p.force_python,
             })
             .collect();
@@ -888,13 +898,22 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     holds the depth-first, repeated, last-wins values. The layout is
 ///     unchanged. `rustledger-wasm` archives the options it reports, so it
 ///     bumps its own version too.
+/// v79: ARCHIVED LAYOUT moved.
+///     `CachedPlugin` gains `file_id`, the file that declares the plugin: a
+///     plugin declared in more than one file runs from the first of them
+///     only, in beancount's breadth-first file order
+///     (`crate::plugins_in_run_order`), and a hit, which restored every
+///     plugin as file 0, ran a repeat twice and the files' plugins in
+///     depth-first order. A v78 blob would be read at the wrong offsets.
+///     `rustledger-wasm` archives no `CachedPlugin`, so only its pin moves
+///     (its own version moves for the plugins' output).
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 78;
+pub const CACHE_VERSION: u32 = 79;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1484,6 +1503,7 @@ mod tests {
                 name: "test_plugin".to_string(),
                 config: Some("config".to_string()),
                 force_python: false,
+                file_id: 0,
             }],
             files: vec![beancount_file.to_string_lossy().to_string()],
             includes: Vec::new(),
@@ -1790,7 +1810,9 @@ mod tests {
         // encoding moves, so the arrays still hold.
         // v78 (#3038) merges cached option values in beancount's order; no
         // archived encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 78;
+        // v79 adds `CachedPlugin::file_id`; no `CostNumber` encoding moves,
+        // so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 79;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1957,7 +1979,9 @@ mod tests {
         // layout does not move, so the hash below is unchanged.
         // v78 (#3038) merges cached option values in beancount's order; no
         // archived layout moves, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 78;
+        // v79 adds `CachedPlugin::file_id`; the `MetaValue` layout does not
+        // move, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 79;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

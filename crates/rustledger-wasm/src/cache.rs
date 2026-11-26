@@ -656,8 +656,9 @@ use crate::types::{Error, LedgerOptions};
 /// error, before and after, which the loader's cache is never saved for.
 /// Both payloads here archive parse errors, and an older blob would keep
 /// serving the old ones.
-/// v130 (v129 is #3027's): loader v76, unchanged; parse errors and the
-/// directives of a source with a parse error move (#2995). A `pushtag`,
+/// v130 (v129 was skipped: #3027 landed as v131): loader v76, unchanged;
+/// parse errors and the directives of a source with a parse error move
+/// (#2995). A `pushtag`,
 /// `poptag`, `pushmeta` or `popmeta` whose line has any error (an invalid
 /// date, a token the statement does not take) pushes or pops nothing, as in
 /// beancount, so the tags and metadata after it can change; a pop error and
@@ -673,7 +674,16 @@ use crate::types::{Error, LedgerOptions};
 /// currency) is reported, as `rledger check` reports it; it was missing.
 /// Parsed directives do not move, and the `Ledger` payload, validated by the
 /// loader, already had it. An older blob would keep serving the old findings.
-pub const CACHE_VERSION: u32 = 131;
+/// v132: loader v76, unchanged; parse errors move (#2993, #2979). After a
+/// failed line rledger stays as quiet as bison's recovery keeps beancount, on
+/// every kind of line, and the indented lines under an entry bison builds
+/// mid-line (`2024-01-02 2024-01-03 * "n"`) report that entry's errors; the
+/// entry itself is not built, so parsed directives do not move. A lone
+/// capital glued to a `\r` or the end of the input is one more invalid token.
+/// Every such source has a parse error, before and after, which the loader's
+/// cache is never saved for. Both payloads here archive parse errors, and an
+/// older blob would keep serving the old ones.
+pub const CACHE_VERSION: u32 = 132;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

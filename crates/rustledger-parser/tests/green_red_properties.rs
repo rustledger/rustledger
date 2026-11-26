@@ -408,7 +408,10 @@ fn the_generator_reaches_well_formed_transactions() {
 ///
 /// Ordering is part of the contract: all cost errors, then all link-metadata
 /// errors, then all custom/pushmeta errors, each in document order. The last
-/// fixture puts all three in one file to pin the sequence, not just the set.
+/// fixture puts all three in one file to pin the sequence, not just the set;
+/// the unclosed cost spec is in a transaction of its own, after a blank line,
+/// since a posting right after the failed metadata line is inside bison's
+/// recovery and reports nothing there, as in beancount (#2993).
 #[test]
 fn green_equals_red_on_the_node_shape_rules() {
     let fixtures: &[(&str, &str)] = &[
@@ -452,7 +455,8 @@ fn green_equals_red_on_the_node_shape_rules() {
             "all three rules in one file",
             "2024-01-01 custom \"budget\" #atag ^alink\n\
              pushmeta key: ^blink\n\
-             2024-01-03 * \"t\"\n  key: ^clink\n  Assets:B 1 AAPL {100 USD\n",
+             2024-01-03 * \"t\"\n  key: ^clink\n  Assets:B 1 USD\n\n\
+             2024-01-04 * \"t\"\n  Assets:B 1 AAPL {100 USD\n",
         ),
         // BOM: every span in these rules is BOM-adjusted, and the green walker
         // derives its offsets differently from red (a running counter vs

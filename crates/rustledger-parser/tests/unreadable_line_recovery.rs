@@ -139,9 +139,11 @@ fn test_parse_stray_cr_lines_keep_their_errors() {
             "\r;c\n\r;c\n  Assets:A 1 USD\n".to_string(),
             vec![(1, 1), (2, 1), (3, 1)],
         ),
+        // beancount: the `!x` line is a comment, and the indented line after
+        // it is reported (#2993's model, which reads beancount's own tokens).
         (
             "#tag\n \r;c\n!x\n  #tag\n".to_string(),
-            vec![(1, 1), (2, 1), (4, 1)],
+            vec![(1, 1), (4, 1)],
         ),
         // Unchanged neighbors.
         ("\r\n02\n".to_string(), vec![(2, 1)]),
@@ -177,19 +179,20 @@ fn test_parse_stray_cr_lines_keep_their_errors() {
             "2024-01-02 open Assets:A\r;c\n-\n".to_string(),
             vec![(1, 1), (2, 1)],
         ),
-        // No stray `\r`: unchanged, or the window as usual (`\r\n` ends a line).
-        ("option \r\n#\n".to_string(), vec![(1, 1), (2, 1)]),
-        ("option ;c\n#\n".to_string(), vec![(1, 1), (2, 1)]),
-        ("option\n#\n".to_string(), vec![(1, 1), (2, 1)]),
+        // No stray `\r` (`\r\n` ends a line): the `#` line is inside bison's
+        // recovery from the `option` line's end, as in beancount (#2993).
+        ("option \r\n#\n".to_string(), vec![(1, 1)]),
+        ("option ;c\n#\n".to_string(), vec![(1, 1)]),
+        ("option\n#\n".to_string(), vec![(1, 1)]),
         ("x\r\n-\n".to_string(), vec![(1, 1)]),
     ]);
 }
 
-/// Shapes the window does not model keep main's count: a line holding a date
-/// or an undated keyword (bison may end its recovery there), a line right
-/// after another failed line, a line a BOM or a date starts (their own
-/// windows), and an indented line after a failed header with a blank line
-/// between (#2993's part B).
+/// Shapes #2993 part A left at main's count, which the token-level model of
+/// part B (`cst/recovery.rs`) reads as beancount does: a line holding a date
+/// or an undated keyword (where bison may end its recovery), a line right
+/// after another failed line, a line a BOM or a date starts, and an indented
+/// line after a failed header with a blank line between.
 #[test]
 fn test_parse_unmodeled_recovery_shapes_keep_their_errors() {
     assert_counts(&[
@@ -212,25 +215,26 @@ fn test_parse_unmodeled_recovery_shapes_keep_their_errors() {
             vec![(3, 1), (4, 1)],
         ),
         (format!("{P}pushtag #a $\nx\n"), vec![(2, 1), (3, 1)]),
-        // beancount differs (1 error fewer, or its count elsewhere); kept as
-        // main has them, not modeled.
+        // Modeled since #2993's general model (`cst/recovery.rs`), each as
+        // beancount counts it: the date bison shifts mid-line, the pipe it
+        // reports once its recovery is over, the entry it builds there.
         (
             "AB-C\nkey:2024/01/03  P | 1\n".to_string(),
-            vec![(1, 1), (2, 1)],
+            vec![(1, 1), (2, 2)],
         ),
         (
             format!("{O2}$ 2024-01-02 * \"y\"\n  Assets:A 1 USD\n"),
-            vec![(3, 1), (4, 1)],
+            vec![(3, 1)],
         ),
         (
             format!("{O2}$\n  Assets:A 1 USD 2024-01-02\n"),
-            vec![(3, 1), (4, 1)],
+            vec![(3, 1)],
         ),
         (
             format!("{O2}$\n2024-01-02 123\n  Assets:A 1 USD\n"),
-            vec![(3, 1), (4, 1)],
+            vec![(3, 1)],
         ),
-        (format!("{P}pushtag #a $\n\n{S}"), vec![(2, 1), (4, 2)]),
+        (format!("{P}pushtag #a $\n\n{S}"), vec![(2, 1), (4, 1)]),
     ]);
 }
 

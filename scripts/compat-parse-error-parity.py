@@ -46,6 +46,14 @@ Normalization, applied identically to both sides:
     `pushmeta` at line 0 of `<string>` (`<load>:0` in bean-check). rledger
     reports the same errors at the push. Both map to line 0, "end of file":
     the difference is where each prints a file-level error, not recovery.
+  * End-of-line errors: a syntax error at an end of line
+    (`syntax error, unexpected EOL, ...`) is reported by beancount on the
+    line after it (bison's location for the `EOL` token is the lexer's line
+    once it has read the `\n`; `option "a"` on line 2 is an error on line
+    3), and by rledger on the line whose statement fails there, the line the
+    mistake is on: a deliberate difference (#2993). Each such beancount error
+    is moved back one line. An error at the end of the input (`unexpected
+    end of file`) is already on the statement's line and is not moved.
   * Not syntax: beancount's parser also rejects option names, option values
     and account names, which rledger checks when it loads the file, and cost
     merging (`{*}`), which rledger implements deliberately. Those errors are
@@ -264,6 +272,13 @@ NOT_PARSE_ERRORS = (
 )
 
 
+# A syntax error whose lookahead is an end of line: beancount reports it on the
+# line AFTER the one it is on (bison takes the line from the lexer, which has
+# already counted the `\n`). rledger reports it on the line whose statement
+# ends there, where the mistake is, on purpose. See the module docstring.
+EOL_SYNTAX_ERROR = "syntax error, unexpected EOL"
+
+
 def beancount_errors(parser, is_not_syntax, text):
     """beancount's parse errors for `text` as `[line, type, message]`."""
     _, errors, _ = parser.parse_string(strip_bom(text))
@@ -276,8 +291,10 @@ def keep_parse_errors(errors, is_not_syntax):
     for e in errors:
         if is_not_syntax(e) or any(m in str(e.message) for m in NOT_PARSE_ERRORS):
             continue
-        line = (e.source or {}).get("lineno") or 0
-        out.append([int(line), type(e).__name__, str(e.message)])
+        line = int((e.source or {}).get("lineno") or 0)
+        if str(e.message).startswith(EOL_SYNTAX_ERROR) and line > 1:
+            line -= 1
+        out.append([line, type(e).__name__, str(e.message)])
     return out
 
 
@@ -814,6 +831,21 @@ def self_test():
     for bc, rl, want in cases:
         got = categorize(bc, rl, text)
         assert got == want, f"categorize({bc}, {rl}) = {got}, want {want}"
+    # beancount's end-of-line error is moved back to the line it is on; an
+    # end-of-file error and any other error keep their line.
+    class ParserSyntaxError:
+        def __init__(self, line, message):
+            self.source, self.message = {"lineno": line}, message
+
+    kept = keep_parse_errors(
+        [
+            ParserSyntaxError(3, "syntax error, unexpected EOL, expecting STRING"),
+            ParserSyntaxError(2, "syntax error, unexpected end of file"),
+            ParserSyntaxError(4, "syntax error, unexpected NUMBER"),
+        ],
+        lambda e: False,
+    )
+    assert [e[0] for e in kept] == [2, 2, 4], kept
     assert bucket("more-on-line", [[1, syn, ""]], [[1, "P0012", ""]] * 2) == "count"
     assert bucket("off-by-one", [[3, syn, ""]], [[2, "P0012", ""]]) == "lines"
     assert set(CATEGORIES) == {w for _, _, w in cases} | {"crash"}

@@ -1,0 +1,7 @@
+2020-01-01 open Assets:A EUR
+2020-01-01 note Assets:A "multi
+note" ; c1
+2020-01-01 event "type" "multi
+event" ; c2
+2020-01-01 document Assets:A "multi
+doc.pdf" ; c3

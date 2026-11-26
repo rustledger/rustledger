@@ -592,6 +592,45 @@ mod tests {
         assert!(!edits.is_empty(), "got {edits:?}");
     }
 
+    /// #3046: range formatting rebuilds the selected directives with the
+    /// same emitter as `rledger format`, so a trailing comment after a
+    /// multi-line string must stay outside the string here too.
+    #[test]
+    fn test_handle_range_formatting_trailing_comment_after_multiline_string() {
+        let source = "2020-01-01 open Assets:A EUR\n2020-01-01 query \"q\" \"SELECT\n  account\"  ; note\n2020-01-02 * \"multi\nline\"  ; note2\n  Assets:A  1 EUR\n  Assets:A  -1 EUR\n";
+        let result = parse(source);
+        let p = params(Range {
+            start: Position::new(1, 0),
+            end: Position::new(7, 0),
+        });
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
+        let line_index = LineIndex::new(source, PositionEncoding::Utf16);
+        let mut out = source.to_string();
+        let mut sorted = edits.clone();
+        sorted.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
+        for edit in &sorted {
+            let s = line_index
+                .position_to_offset(edit.range.start.line, edit.range.start.character)
+                .expect("edit start in bounds");
+            let e = line_index
+                .position_to_offset(edit.range.end.line, edit.range.end.character)
+                .expect("edit end in bounds");
+            out.replace_range(s..e, &edit.new_text);
+        }
+        assert_eq!(
+            out,
+            "2020-01-01 open Assets:A EUR\n2020-01-01 query \"q\" \"SELECT\n  account\" ; note\n2020-01-02 * \"multi\nline\" ; note2\n  Assets:A   1 EUR\n  Assets:A  -1 EUR\n",
+            "edits: {edits:?}"
+        );
+    }
+
     /// Parse-error file + selection covers ONLY broken content:
     /// no valid Directive in the selection → no fallback fires →
     /// None. The bail-on-broken behavior is preserved for the

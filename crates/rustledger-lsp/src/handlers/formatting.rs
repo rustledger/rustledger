@@ -587,6 +587,31 @@ mod tests {
         assert!(after.contains("; my comment"), "got {after:?}");
     }
 
+    /// #3046: the LSP formatter shares the CLI's directive emitter, which
+    /// spliced a trailing comment before the first `\n` of the directive,
+    /// inside a multi-line narration. The comment must stay after the
+    /// closing quote, with LF and with CRLF line endings.
+    #[test]
+    fn test_handle_formatting_trailing_comment_after_multiline_string() {
+        for nl in ["\n", "\r\n"] {
+            let source = "2020-01-01 open Assets:A EUR\n2020-01-02 * \"multi\nline narration\"  ; note\n  Assets:A  1 EUR\n  Assets:A  -1 EUR\n"
+                .replace('\n', nl);
+            let expected = "2020-01-01 open Assets:A EUR\n2020-01-02 * \"multi\nline narration\" ; note\n  Assets:A   1 EUR\n  Assets:A  -1 EUR\n"
+                .replace('\n', nl);
+            let result = parse(&source);
+            let edits = handle_formatting(
+                &params(),
+                &source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .expect("expected edits");
+            assert_well_formed(&edits);
+            assert_eq!(apply(&source, &edits), expected, "line ending {nl:?}");
+        }
+    }
+
     #[test]
     fn lsp_matches_format_source() {
         let source = "\

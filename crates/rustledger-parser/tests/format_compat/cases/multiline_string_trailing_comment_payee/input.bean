@@ -1,0 +1,9 @@
+2020-01-01 open Assets:A EUR
+2020-01-02 ! "multi
+line payee" "narration"  ; on narration
+  Assets:A  1 EUR
+  Assets:A  -1 EUR
+2020-01-03 * "payee" "multi
+line" #tag ^link  ; after tags
+  Assets:A  1 EUR
+  Assets:A  -1 EUR

@@ -99,6 +99,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     // Unicode column-alignment correctness for non-Latin account
     // names.
     "non_latin_account_names",
+    // A trailing comment after a multi-line string stays outside the
+    // string (#3046): splicing it before the first `\n` put it inside.
+    "multiline_string_trailing_comment_narration",
 ];
 
 /// Cross-side coverage pairs between the file-pair fixture set

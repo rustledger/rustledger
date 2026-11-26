@@ -1,0 +1,5 @@
+2020-01-01 open Assets:A EUR
+2020-01-02 * "multi
+line narration"  ; note
+  Assets:A  1 EUR
+  Assets:A  -1 EUR

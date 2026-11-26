@@ -1,0 +1,6 @@
+option "title" "a
+b" ; c1
+plugin "p" "a
+b" ; c2
+include "a
+b.beancount" ; c3

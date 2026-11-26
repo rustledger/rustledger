@@ -718,7 +718,15 @@ use crate::types::{Error, LedgerOptions};
 /// beancount's breadth-first parse order, and a currency named twice listed
 /// once (`Options::merge_across_files`). An older blob would keep serving
 /// the depth-first, repeated list.
-pub const CACHE_VERSION: u32 = 137;
+/// v138: loader v79.
+/// Processed directives move: a plugin declared in more than one file runs
+/// from the first of them only, in beancount's breadth-first file order
+/// (`rustledger_loader::plugins_in_run_order`), so a plugin that adds
+/// entries no longer adds them twice, and the plugins of
+/// files included from an included file run in that order. The loader's
+/// cache now archives each plugin's file (its v79); the `Ledger` payload
+/// archives the plugins' output, and an older blob would keep serving it.
+pub const CACHE_VERSION: u32 = 138;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -750,7 +758,7 @@ pub const CACHE_VERSION: u32 = 137;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 78;
+const LOADER_CACHE_VERSION_PIN: u32 = 79;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

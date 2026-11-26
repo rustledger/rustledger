@@ -292,14 +292,17 @@ pub fn load_source(source: &str) -> LoadResult {
     commodity_list.sort();
     options.commodities = commodity_list;
 
-    let plugins: Vec<Plugin> = ledger
-        .plugins
-        .iter()
-        .map(|p| Plugin {
-            name: p.name.clone(),
-            config: p.config.clone(),
-        })
-        .collect();
+    // The ledger's plugins as it ran them: each distinct (name, config) from
+    // the first file declaring it, in beancount's breadth-first file order (the canonical
+    // `plugins_in_run_order`, the list `process` ran).
+    let plugins: Vec<Plugin> =
+        rustledger_loader::plugins_in_run_order(&ledger.plugins, &ledger.source_map)
+            .into_iter()
+            .map(|p| Plugin {
+                name: p.name.clone(),
+                config: p.config.clone(),
+            })
+            .collect();
 
     let validation_options = rustledger_loader::validation_options_from_options(&ledger.options)
         .with_source_lines(rustledger_loader::source_lines(&ledger.source_map));
@@ -612,14 +615,17 @@ pub fn load_file_with_fs(
     let option_errors = option_errors(&ledger);
     let query_option_errors = query_option_errors(&ledger);
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
-    let plugins: Vec<Plugin> = ledger
-        .plugins
-        .iter()
-        .map(|p| Plugin {
-            name: p.name.clone(),
-            config: p.config.clone(),
-        })
-        .collect();
+    // The ledger's plugins as it ran them: each distinct (name, config) from
+    // the first file declaring it, in beancount's breadth-first file order (the canonical
+    // `plugins_in_run_order`, the list `process` ran).
+    let plugins: Vec<Plugin> =
+        rustledger_loader::plugins_in_run_order(&ledger.plugins, &ledger.source_map)
+            .into_iter()
+            .map(|p| Plugin {
+                name: p.name.clone(),
+                config: p.config.clone(),
+            })
+            .collect();
     let loaded_files: Vec<String> = ledger
         .source_map
         .files()

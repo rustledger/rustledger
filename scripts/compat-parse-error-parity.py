@@ -24,7 +24,22 @@ Inputs (each one keyed by a content hash, so a duplicate counts once):
     (`--compat-dir`, fetched by `scripts/fetch-compat-test-files.sh`);
   * `fuzz`: the `fuzz_parse` and `fuzz_green_eq_red` corpora of the
     `fuzz-corpus` branch, at the commit pinned in the baseline
-    (`--fuzz-dir`, extracted by the caller with `git archive`).
+    (`--fuzz-dir`, extracted by the caller with `git archive`);
+  * `gen`: a sample of pta-standards' seeded beancount generators
+    (`GENERATOR_SAMPLE`: G1-G3 and their BOM / carriage-return variants),
+    the same inputs on every run for a given ptadiff revision.
+
+Both sides run through pta-standards' differential package, `ptadiff`
+(`tooling/differential` there), at the revision the baseline pins
+(`#@ptadiff-rev`; install it with the `pip install` line in
+`tests/baselines/README.md`, or pass a checkout with `--ptadiff`): rledger
+through its JSON-lines protocol (`parse_error_lines --jsonl`), beancount in
+`ptadiff.run_forked` workers. ptadiff also names every mismatch with a
+CATEGORY KEY (its beancount `shape` key: which side reports more on the first
+line they disagree on, the error kinds of that side there, the line's kind,
+and the token shape of that line from beancount's black-box lexer,
+`lex_iter_string`), which is finer than the symptom categories below: two
+inputs with one key are, as far as the key can tell, one difference.
 
 Only UTF-8 inputs are compared (both fuzz targets skip the rest too); the
 report counts the ones excluded.
@@ -84,10 +99,15 @@ verdict, so rledger is not compared on it; the report counts them apart.
 
 Baseline (`tests/baselines/parse-error-parity.manifest`): every mismatching
 or crashing input with its category, plus every `tracked` and `compat` file
-with its status, matches included. A `fuzz` or `matrix` input that is absent
-from the manifest is pinned as matching: the fuzz inputs come from the commit
-the manifest pins (`#@fuzz-commit`), and the matrix from this checkout, so
-both sets are fixed, and `#@inputs <source> <n>` records how many each has.
+with its status, matches included. A `fuzz`, `matrix` or `gen` input that is
+absent from the manifest is pinned as matching: the fuzz inputs come from the
+commit the manifest pins (`#@fuzz-commit`), the matrix from this checkout,
+and the generator sample from the pinned ptadiff revision (`#@generators`
+records the sample), so all three sets are fixed, and `#@inputs <source> <n>`
+records how many each has. Under `@ categories`, `<count><TAB><key>` rows pin
+how many of those fixed inputs fall in each category key (the `tracked` and
+`compat` ledgers are left out: a downloaded corpus differs between machines,
+and a new tracked ledger only warns).
 
 With `--check`, the run FAILS when:
 
@@ -95,9 +115,12 @@ With `--check`, the run FAILS when:
   * a pinned mismatch now matches or changes category (a stale pin: run
     `--update` and commit the manifest, so a later PR cannot regress it
     unnoticed);
-  * a `fuzz` or `matrix` input count differs from `#@inputs`, or a pinned
-    `fuzz` / `matrix` id is not among the inputs (the run did not compare
-    what the pin covers, e.g. an empty fuzz directory).
+  * a category key's count differs from its pin (a stale pin too: the same
+    inputs mismatch, but differently);
+  * a `fuzz`, `matrix` or `gen` input count differs from `#@inputs`, a pinned
+    id of theirs is not among the inputs, or the generator sample or ptadiff
+    revision is not the pinned one (the run did not compare what the pin
+    covers, e.g. an empty fuzz directory).
 
 A `tracked` or `compat` input with no row is new content (a test ledger was
 added or edited, or upstream changed a downloaded file). It only warns, and
@@ -109,8 +132,12 @@ rustledger-loader --no-default-features --example parse_error_lines`):
     python3 -I scripts/compat-parse-error-parity.py \\
         --rledger target/release/examples/parse_error_lines \\
         --fuzz-dir DIR --fuzz-commit SHA --compat-dir tests/compatibility/files \\
-        [--check | --update] [--report FILE] [--results FILE]
-    python3 -I scripts/compat-parse-error-parity.py --self-test
+        [--check | --update] [--report FILE] [--results FILE] \\
+        [--categories-json FILE] [--minimize N] [--ptadiff DIR]
+    python3 -I scripts/compat-parse-error-parity.py --self-test [--ptadiff DIR]
+
+`--minimize N` shrinks the shortest input of each of the N largest category
+keys with ptadiff's key-preserving minimizer, for the report.
 """
 
 import argparse
@@ -119,9 +146,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import resource
-import selectors
-import signal
 import subprocess
 import sys
 import tempfile
@@ -140,8 +164,22 @@ FUZZ_REGRESSIONS = [
 # unlisted one is new, not a pinned match.
 LEDGER_SOURCES = ("tracked", "compat")
 # Sources whose input set the manifest fixes: the fuzz corpus at the pinned
-# commit, and the matrix this checkout generates. Their counts are pinned.
-FIXED_SOURCES = ("fuzz", "matrix")
+# commit, the matrix this checkout generates, and the generator sample of the
+# pinned ptadiff revision. Their counts, and their category-key counts, are
+# pinned.
+FIXED_SOURCES = ("fuzz", "matrix", "gen")
+# The generator sample: `name:seed:n` for each of ptadiff's beancount
+# generators. Changing it is a manifest update (`#@generators` pins it).
+GENERATOR_SAMPLE = (
+    "g1:1:2000",
+    "g1b:1:2000",
+    "g2:1:2000",
+    "g2b:1:2000",
+    "g3:1:2000",
+    "g3b:1:2000",
+)
+# The ptadiff category key the manifest's `@ categories` counts are under.
+CATEGORY_KEY = "shape"
 # Where `fetch-compat-test-files.sh` puts the downloaded corpus: the prefix of
 # every compat label, whatever `--compat-dir` is.
 COMPAT_LABEL_ROOT = Path("tests/compatibility/files")
@@ -173,6 +211,49 @@ CATEGORIES = {
 
 def log(message):
     print(message, file=sys.stderr, flush=True)
+
+
+# pta-standards' differential package, loaded by `load_ptadiff`.
+ptadiff = None
+
+
+def load_ptadiff(path=None):
+    """Import `ptadiff`: from the checkout of pta-standards' tooling
+    directory at `path` when given, else the installed package."""
+    global ptadiff
+    if path:
+        sys.path.insert(0, str(Path(path).resolve()))
+    import ptadiff as module
+    import ptadiff.formats.beancount  # noqa: F401
+
+    ptadiff = module
+    return module
+
+
+def ptadiff_revision(path=None):
+    """The pta-standards commit the loaded ptadiff comes from, or None when
+    it cannot be told. From a checkout (`path`), its HEAD, with `-dirty`
+    appended when `tooling/differential` has uncommitted changes; from a pip
+    install of the git URL, the commit pip recorded (PEP 610)."""
+    if path:
+        def git(*a):
+            return subprocess.run(
+                ["git", "-C", str(path), *a], capture_output=True, text=True, check=False
+            )
+
+        head = git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return None
+        dirty = git("status", "--porcelain", "--", ".").stdout.strip()
+        return head.stdout.strip() + ("-dirty" if dirty else "")
+    import importlib.metadata
+
+    try:
+        raw = importlib.metadata.distribution("ptadiff").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    info = json.loads(raw or "{}")
+    return info.get("vcs_info", {}).get("commit_id")
 
 
 def load_matrix_module():
@@ -260,6 +341,11 @@ def collect(args):
                 sys.exit(f"error: {d} is missing; extract the fuzz-corpus commit there")
             for p in sorted(d.iterdir()):
                 inputs.add("fuzz", f"{target}/{p.name}", p.read_bytes())
+    generators = ptadiff.get_format("beancount").generators
+    for spec in GENERATOR_SAMPLE:
+        name, seed, n = spec.split(":")
+        for i, text in enumerate(generators[name](int(seed), int(n))):
+            inputs.add("gen", f"gen:{name}:{seed}#{i}", text.encode("utf-8"))
     return inputs
 
 
@@ -404,115 +490,42 @@ def keep_parse_errors(errors, is_not_syntax, text=None):
     return out
 
 
-def _worker(items, wfd):
+def run_beancount(items, jobs):
+    """beancount's result for every `(id, text)`: `{"errors": [...]}` (kept
+    and moved by `beancount_errors`), or `{"crash": why}`.
+
+    Each parse runs in a `ptadiff.run_forked` worker: a worker that dies (a
+    segfault, the timeout's SIGALRM) or a parse that raises loses only that
+    input, recorded as a crash, and a new worker takes the rest of its share.
+    """
+    # Imported here, before the workers fork, so each one inherits them.
     from beancount.parser import parser
 
     is_not_syntax = load_matrix_module().is_not_syntax
-    with os.fdopen(wfd, "w") as w:
-        for cid, text in items:
-            signal.alarm(BEANCOUNT_TIMEOUT_S)
-            try:
-                result = {"errors": beancount_errors(parser, is_not_syntax, text)}
-            except Exception as exc:  # the parser raised: no verdict
-                result = {"crash": f"raised {type(exc).__name__}: {exc}"}
-            signal.alarm(0)
-            w.write(cid + "\t" + json.dumps(result) + "\n")
-            w.flush()
 
+    def one(text):
+        return beancount_errors(parser, is_not_syntax, text)
 
-def _spawn(items):
-    r, w = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(r)
-        # Exit 3 unless the worker finishes; `finally` runs on any exception,
-        # so the child never returns into the parent's code.
-        code = 3
-        try:
-            # No core file. beancount segfaults on some inputs (see the module
-            # doc), and the harness records those as `crash`, so a core is pure
-            # waste: 50-70 MB each, and fuzz runs wrote thousands of them.
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            _worker(items, w)
-            code = 0
-        finally:
-            os._exit(code)
-    os.close(w)
-    return pid, os.fdopen(r, "r")
-
-
-def run_beancount(items, jobs):
-    """beancount's result for every `(id, text)`, in forked workers.
-
-    A worker that dies (a segfault, the timeout's SIGALRM) loses only the
-    input it was on: that one is recorded as a crash, and a new worker takes
-    the rest of its share.
-    """
-    results = {}
-    shares = [items[i::jobs] for i in range(jobs)]
-    sel = selectors.DefaultSelector()
-    for share in shares:
-        if share:
-            pid, f = _spawn(share)
-            sel.register(f, selectors.EVENT_READ, [pid, share, 0, ""])
-    while sel.get_map():
-        for key, _ in sel.select():
-            f, state = key.fileobj, key.data
-            chunk = os.read(f.fileno(), 1 << 16).decode("utf-8")
-            if chunk:
-                state[3] += chunk
-                *lines, state[3] = state[3].split("\n")
-                for line in lines:
-                    cid, payload = line.split("\t", 1)
-                    if cid != state[1][state[2]][0]:
-                        sys.exit(f"error: worker out of order at {cid}")
-                    results[cid] = json.loads(payload)
-                    state[2] += 1
-                continue
-            sel.unregister(f)
-            f.close()
-            _, status = os.waitpid(state[0], 0)
-            done, share = state[2], state[1]
-            if done < len(share):
-                if os.WIFSIGNALED(status):
-                    why = f"killed by {signal.Signals(os.WTERMSIG(status)).name}"
-                else:
-                    why = f"exited {os.WEXITSTATUS(status)}"
-                results[share[done][0]] = {"crash": why}
-                rest = share[done + 1 :]
-                if rest:
-                    pid, nf = _spawn(rest)
-                    sel.register(nf, selectors.EVENT_READ, [pid, rest, 0, ""])
-            elif not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
-                sys.exit(f"error: a beancount worker failed after its share: {status}")
-    return results
+    raw = ptadiff.run_forked(items, one, jobs=jobs, timeout=BEANCOUNT_TIMEOUT_S)
+    return {
+        cid: {"crash": r.why} if isinstance(r, ptadiff.Crash) else {"errors": r}
+        for cid, r in raw.items()
+    }
 
 
 # --------------------------------------------------------------------------
 # rledger side
 
 
-def run_rledger(binary, items, workdir):
-    frames = Path(workdir) / "frames"
-    with open(frames, "wb") as f:
-        for cid, text in items:
-            data = text.encode("utf-8")
-            f.write(f"{cid}\n{len(data)}\n".encode())
-            f.write(data)
-    with open(frames, "rb") as f:
-        proc = subprocess.run([binary], stdin=f, capture_output=True, check=False)
-    if proc.returncode != 0:
-        sys.exit(
-            f"error: {binary} exited {proc.returncode}:\n"
-            + proc.stderr.decode("utf-8", "replace")
-        )
-    results = {}
-    for line in proc.stdout.decode("utf-8").splitlines():
-        obj = json.loads(line)
-        results[obj["id"]] = obj["errors"]
-    if len(results) != len(items):
-        sys.exit(f"error: rledger answered {len(results)} of {len(items)} inputs")
-    return results
+def run_rledger(binary, items):
+    """rledger's `[line, code, message]` errors for every `(id, text)`,
+    through `parse_error_lines --jsonl` (ptadiff's JSON-lines protocol)."""
+    impl = ptadiff.JsonlImplementation([binary, "--jsonl"], name="rledger")
+    try:
+        results = impl.run(items)
+    except ptadiff.ProtocolError as exc:
+        sys.exit(f"error: {exc}")
+    return {cid: [[e.line, e.code, e.msg] for e in errors] for cid, errors in results.items()}
 
 
 # --------------------------------------------------------------------------
@@ -616,6 +629,82 @@ def compare(inputs, bc_results, rl_results):
 
 
 # --------------------------------------------------------------------------
+# Category keys (ptadiff)
+
+
+def category_key(fmt, text, bc, rl, tokens):
+    """ptadiff's category key for one mismatching input.
+
+    `text` is the input, `bc` and `rl` both sides' errors as this harness
+    normalized them, `tokens` beancount's tokens for `text` without a byte-0
+    BOM (what beancount parsed), a `ptadiff.Crash` where its lexer died. The
+    key is computed on these errors, not ptadiff's own beancount
+    normalizers: rledger's deliberate differences are this harness's to
+    state (see the module docstring)."""
+    oracle = [ptadiff.Error(int(e[0]), e[1], e[2]) for e in bc]
+    impl = [ptadiff.Error(line, e[1], e[2]) for line, e in zip(rl_lines(rl), rl, strict=True)]
+    toks = None if isinstance(tokens, ptadiff.Crash) else tokens
+    _, key = ptadiff.categorize(fmt, CATEGORY_KEY, strip_bom(text), oracle, impl, toks)
+    return key
+
+
+def category_keys(texts, results, jobs):
+    """`{id: key}` for every input of `texts` (`{id: text}`) that
+    mismatches in `results` (`compare`'s)."""
+    fmt = ptadiff.get_format("beancount")
+    oracle = fmt.oracle(version="3.2.3")
+    todo = sorted(cid for cid, (c, _, _) in results.items() if c not in ("match", "crash"))
+    tokens = oracle.lex([(cid, strip_bom(texts[cid])) for cid in todo], jobs=jobs)
+    keys = {}
+    for cid in todo:
+        _, bc, rl = results[cid]
+        key = category_key(fmt, texts[cid], bc, rl, tokens[cid])
+        if key is None:
+            sys.exit(f"error: ptadiff finds no divergence in mismatching input {cid}")
+        keys[cid] = key
+    return keys
+
+
+def category_counts(inputs, keys):
+    """How many inputs of the fixed sources fall in each key: what the
+    manifest's `@ categories` rows pin."""
+    return collections.Counter(
+        key for cid, key in keys.items() if inputs.items[cid][0] in FIXED_SOURCES
+    )
+
+
+def make_keys_of(binary, jobs):
+    """The minimizer's test: texts -> their category keys (`None` where a
+    text matches or crashes beancount), both sides run as for the inputs."""
+
+    def keys_of(texts):
+        items = [(f"m{i}", t) for i, t in enumerate(texts)]
+        rl = run_rledger(binary, items)
+        bc = run_beancount(items, jobs)
+        results = {
+            cid: (
+                ("crash", bc[cid]["crash"], rl[cid])
+                if "crash" in bc[cid]
+                else (categorize(bc[cid]["errors"], rl[cid], t), bc[cid]["errors"], rl[cid])
+            )
+            for cid, t in items
+        }
+        keys = category_keys(dict(items), results, jobs)
+        return [keys.get(cid) for cid, _ in items]
+
+    return keys_of
+
+
+def category_clusters(inputs, results, keys):
+    """ptadiff clusters of every mismatch (all sources), each member
+    labelled with its symptom category."""
+    return ptadiff.cluster(
+        ptadiff.Member(cid, key, inputs.items[cid][2], inputs.items[cid][0], results[cid][0])
+        for cid, key in sorted(keys.items())
+    )
+
+
+# --------------------------------------------------------------------------
 # Baseline
 
 
@@ -623,7 +712,8 @@ def read_baseline(path):
     """`(meta, pins)` from a manifest `write_baseline` wrote.
 
     `pins` maps a content id to `(source, category, label)`; the label is
-    empty for the bare ids of a `fuzz` or `matrix` section.
+    empty for the bare ids of a `fuzz`, `matrix` or `gen` section. The
+    `@ categories` rows are `meta["categories"]`, `{key: count}`.
     """
     meta, pins = {}, {}
     if not path.exists():
@@ -640,12 +730,15 @@ def read_baseline(path):
             continue
         elif line.startswith("@ "):
             section = line[2:].split(" ")
-        elif "\t" in line:
+        elif line.count("\t") == 3:
             # A ledger row; accepted in any section, so rows appended at the
             # end (copied `pin-row` lines) read as pins until --update sorts
             # them into place.
             source, cid, category, label = line.split("\t")
             pins[cid] = (source, category, label)
+        elif section == ["categories"] and line.count("\t") == 1:
+            count, key = line.split("\t")
+            meta.setdefault("categories", {})[key] = int(count)
         elif section and len(section) == 2:
             pins[line] = (section[0], section[1], "")
         else:
@@ -653,7 +746,9 @@ def read_baseline(path):
     return meta, pins
 
 
-def write_baseline(path, inputs, results, fuzz_commit, previous=None):
+def write_baseline(
+    path, inputs, results, fuzz_commit, previous=None, counts=None, revision=None
+):
     """Write the manifest: every ledger in full, then mismatches by section.
 
     `tracked` and `compat` files get one row each, matches included, with
@@ -666,6 +761,9 @@ def write_baseline(path, inputs, results, fuzz_commit, previous=None):
     did not see. The downloaded corpus is not the same everywhere (CI replays
     a cached copy, a local fetch is fresher), so a pin written on one machine
     must not drop the rows another machine's corpus needs.
+
+    `counts` (`category_counts`) become the `@ categories` rows, largest
+    first; `revision` is the ptadiff revision they were computed with.
     """
     ledgers, sections = [], collections.defaultdict(list)
     for cid, (source, category, label) in (previous or {}).items():
@@ -686,11 +784,18 @@ def write_baseline(path, inputs, results, fuzz_commit, previous=None):
             "# Ids are content hashes (sha256, first 12 hex digits).\n"
             "# `@ ledgers`: source<TAB>id<TAB>category<TAB>path, one row per\n"
             "# tracked or downloaded ledger, matches included.\n"
-            "# `@ <source> <category>`: the fuzz or matrix inputs that do not\n"
-            "# match, one id per line. An unlisted fuzz or matrix input is pinned\n"
-            "# as matching.\n"
+            "# `@ <source> <category>`: the fuzz, matrix or gen inputs that do not\n"
+            "# match, one id per line. An unlisted fuzz, matrix or gen input is\n"
+            "# pinned as matching.\n"
+            "# `@ categories`: count<TAB>key, how many fuzz, matrix and gen inputs\n"
+            "# fall in each ptadiff category key (`#@category-key`), computed with\n"
+            "# pta-standards' tooling/differential at `#@ptadiff-rev`.\n"
         )
         f.write(f"#@fuzz-commit {fuzz_commit}\n")
+        if revision:
+            f.write(f"#@ptadiff-rev {revision}\n")
+        f.write(f"#@category-key {CATEGORY_KEY}\n")
+        f.write(f"#@generators {' '.join(GENERATOR_SAMPLE)}\n")
         for source in FIXED_SOURCES:
             f.write(f"#@inputs {source} {inputs.seen[source]}\n")
         f.write("@ ledgers\n")
@@ -700,6 +805,10 @@ def write_baseline(path, inputs, results, fuzz_commit, previous=None):
             f.write(f"@ {source} {category}\n")
             for cid in sorted(sections[(source, category)]):
                 f.write(f"{cid}\n")
+        if counts:
+            f.write("@ categories\n")
+            for key, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                f.write(f"{n}\t{key}\n")
 
 
 def check_against_baseline(inputs, results, pins):
@@ -732,15 +841,30 @@ def check_against_baseline(inputs, results, pins):
     return regressions, improvements, changed, unpinned
 
 
-def coverage_errors(inputs, meta, pins):
+def coverage_errors(inputs, meta, pins, revision=None):
     """Why this run does not cover what the manifest pins, if it does not.
 
     The fuzz and matrix sets are fixed by the manifest, so a different count,
     or a pinned id that is not among the inputs, means the run compared
     something else (an empty or partial fuzz directory, a changed matrix):
-    its "no regressions" would not be about the pinned inputs.
+    its "no regressions" would not be about the pinned inputs. So does a
+    different generator sample, category key, or ptadiff revision (given as
+    `revision`): the category counts would be about other inputs or keys.
     """
     errors = []
+    if meta.get("generators") != " ".join(GENERATOR_SAMPLE):
+        errors.append(
+            f"the generator sample is {' '.join(GENERATOR_SAMPLE)!r}, the manifest pins "
+            f"{meta.get('generators')!r}"
+        )
+    if meta.get("category-key") != CATEGORY_KEY:
+        errors.append(
+            f"the category key is {CATEGORY_KEY!r}, the manifest pins {meta.get('category-key')!r}"
+        )
+    if revision is not None and meta.get("ptadiff-rev") != revision:
+        errors.append(
+            f"ptadiff is at {revision!r}, the manifest pins {meta.get('ptadiff-rev')!r}"
+        )
     pinned = meta.get("inputs", {})
     for source in FIXED_SOURCES:
         if source not in pinned:
@@ -760,15 +884,28 @@ def coverage_errors(inputs, meta, pins):
     return errors
 
 
-def run_check(inputs, results, meta, pins, out=print):
+def category_changes(pinned, counts):
+    """`(key, pinned, now)` for every category key whose count is not its
+    pin, in key order."""
+    return [
+        (key, pinned.get(key, 0), counts.get(key, 0))
+        for key in sorted(set(pinned) | set(counts))
+        if pinned.get(key, 0) != counts.get(key, 0)
+    ]
+
+
+def run_check(inputs, results, meta, pins, out=print, counts=None, revision=None):
     """`--check`: print every finding, return the exit code.
 
-    Fails on a regression, a stale pin (an improvement or a changed
-    category: `--update` and commit, as the corpus baselines force
-    `BASELINE_UPDATE`), and a run that does not cover the pinned inputs.
-    An unpinned tracked or downloaded ledger only warns, with its pin row.
+    Fails on a regression, a stale pin (an improvement, a changed category,
+    or, given `counts`, a category key's count that is not its pin:
+    `--update` and commit, as the corpus baselines force `BASELINE_UPDATE`),
+    and a run that does not cover the pinned inputs (`revision`, the ptadiff
+    revision, is checked against its pin when given). An unpinned tracked or
+    downloaded ledger only warns, with its pin row.
     """
-    coverage = coverage_errors(inputs, meta, pins)
+    coverage = coverage_errors(inputs, meta, pins, revision)
+    moved = [] if counts is None else category_changes(meta.get("categories", {}), counts)
     regressions, improvements, changed, unpinned = check_against_baseline(
         inputs, results, pins
     )
@@ -786,7 +923,9 @@ def run_check(inputs, results, meta, pins, out=print):
         out(f"::error::stale pin, mismatch changed {pinned} -> {category}: {label}")
     for label, category in regressions:
         out(f"::error::regression, matched beancount and now {category}: {label}")
-    stale = len(improvements) + len(changed)
+    for key, pinned, now in moved:
+        out(f"::error::stale pin, category count {pinned} -> {now}: {key}")
+    stale = len(improvements) + len(changed) + len(moved)
     if coverage or regressions or stale:
         out(
             f"FAILED: {len(regressions)} regression(s), {stale} stale pin(s), "
@@ -1002,9 +1141,16 @@ def self_test():
     }
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "m"
-        write_baseline(path, inputs, results, "abc")
+        write_baseline(path, inputs, results, "abc", counts={"k|a b": 2, "k|c": 1}, revision="r1")
         meta, pins = read_baseline(path)
-    assert meta == {"fuzz-commit": "abc", "inputs": {"fuzz": 3, "matrix": 0}}, meta
+    assert meta == {
+        "fuzz-commit": "abc",
+        "ptadiff-rev": "r1",
+        "category-key": CATEGORY_KEY,
+        "generators": " ".join(GENERATOR_SAMPLE),
+        "inputs": {"fuzz": 3, "matrix": 0, "gen": 0},
+        "categories": {"k|a b": 2, "k|c": 1},
+    }, meta
     assert set(pins) == {ids["f1"], ids["tests/x.beancount"]}, pins
     assert check_against_baseline(inputs, results, pins) == ([], [], [], [])
     # f2 regresses, f1 starts matching, the ledger changes category.
@@ -1067,11 +1213,20 @@ def self_test():
 
     # --check's exit code. `inputs` holds 3 fuzz inputs (f1 pinned rl-only,
     # f2 a pinned match) and a pinned tracked ledger.
-    meta = {"fuzz-commit": "abc", "inputs": {"fuzz": 3, "matrix": 0}}
+    meta = {
+        "fuzz-commit": "abc",
+        "ptadiff-rev": "r1",
+        "category-key": CATEGORY_KEY,
+        "generators": " ".join(GENERATOR_SAMPLE),
+        "inputs": {"fuzz": 3, "matrix": 0, "gen": 0},
+        "categories": {"k|a": 1},
+    }
     pins = {ids["f1"]: ("fuzz", "rl-only", ""), ids["tests/x.beancount"]: ("tracked", "match", "x")}
 
-    def code(results, meta=meta, pins=pins):
-        return run_check(inputs, results, meta, pins, out=lambda _: None)
+    def code(results, meta=meta, pins=pins, counts=None, revision=None):
+        return run_check(
+            inputs, results, meta, pins, out=lambda _: None, counts=counts, revision=revision
+        )
 
     assert code(results) == 0
     assert code({**results, ids["f2"]: ("off-by-one", [], [])}) == 1  # regression
@@ -1079,12 +1234,59 @@ def self_test():
     assert code({**results, ids["f1"]: ("off-by-one", [], [])}) == 1  # stale: shape
     no_row = {ids["f1"]: ("fuzz", "rl-only", "")}
     assert code(results, pins=no_row) == 0  # unpinned tracked ledger: warns
-    assert code(results, meta={"inputs": {"fuzz": 9, "matrix": 0}}) == 1  # count
+    assert code(results, meta={**meta, "inputs": {"fuzz": 9, "matrix": 0, "gen": 0}}) == 1
     # A coverage failure (a matrix base added, say) says how to fix it.
     said = []
-    run_check(inputs, results, {"inputs": {"fuzz": 3, "matrix": 7}}, pins, out=said.append)
+    seven = {**meta, "inputs": {"fuzz": 3, "matrix": 7, "gen": 0}}
+    run_check(inputs, results, seven, pins, out=said.append)
     assert any("--update" in line for line in said), said
-    assert code(results, meta={"inputs": {"matrix": 0}}) == 1  # no count pinned
+    assert code(results, meta={**meta, "inputs": {"matrix": 0, "gen": 0}}) == 1  # no count
+    # The category counts: equal passes, any difference (a count, a new key,
+    # a vanished key) is a stale pin, and the pinned ptadiff revision, key and
+    # generator sample are coverage.
+    assert code(results, counts={"k|a": 1}, revision="r1") == 0
+    assert code(results, counts={"k|a": 2}) == 1
+    assert code(results, counts={"k|a": 1, "k|b": 1}) == 1
+    assert code(results, counts={}) == 1
+    assert category_changes({"k|a": 1, "k|b": 2}, {"k|b": 3, "k|c": 1}) == [
+        ("k|a", 1, 0),
+        ("k|b", 2, 3),
+        ("k|c", 0, 1),
+    ]
+    assert code(results, revision="r2") == 1
+    assert code(results, meta={**meta, "generators": "g1:1:5"}) == 1
+    assert code(results, meta={**meta, "category-key": "coarse"}) == 1
+    # A category row after a fuzz section stays a category; a copied
+    # `pin-row` after the categories stays a pin.
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "m"
+        path.write_text(
+            "@ categories\n3\timpl-more|impl:P0012|top|^ error\n"
+            "compat\tcccccccccccc\tmatch\tz\n"
+        )
+        cmeta, cpins = read_baseline(path)
+    assert cmeta["categories"] == {"impl-more|impl:P0012|top|^ error": 3}, cmeta
+    assert cpins == {"cccccccccccc": ("compat", "match", "z")}, cpins
+
+    # The category key of a mismatch, from both sides' errors and
+    # beancount's tokens: rledger reports an indented line twice that
+    # beancount reports once, as an invalid token.
+    fmt = ptadiff.get_format("beancount")
+    toks = [ptadiff.Token("INDENT", 2, "  "), ptadiff.Token("error", 2, "$")]
+    key = category_key(
+        fmt,
+        "\ufeffx\n  $\n",
+        [[2, "LexerError", "Invalid token: '$'"]],
+        [[2, "P0012", "a"], [2, "P0012", "b"], [1, "P0021", "c"]],
+        toks,
+    )
+    assert key == "impl-more|impl:P0012|indented|INDENT error", key
+    # rledger's unclosed push is beancount's line 0, so it diverges there.
+    key = category_key(fmt, "pushtag #a\n", [], [[1, "P0021", "u"]], [])
+    assert key == "eof|impl:P0021|eof|-", key
+    # A lexer crash leaves the shape unknown, not the input uncategorized.
+    key = category_key(fmt, "x\n", [], [[1, "P0012", "a"]], ptadiff.Crash("killed"))
+    assert key == "impl-more|impl:P0012|top|?", key
     ghost = {**pins, "dddddddddddd": ("fuzz", "rl-only", "")}
     assert code(results, pins=ghost) == 1  # a pinned id that did not run
     assert rl_lines([[5, "P0021", ""], [5, "P0003", ""]]) == [0, 5]
@@ -1102,22 +1304,34 @@ def main():
     ap.add_argument("--compat-dir", help="downloaded compat corpus")
     ap.add_argument("--min-compat", type=int, default=100)
     ap.add_argument("--baseline", type=Path, default=BASELINE)
+    ap.add_argument(
+        "--ptadiff",
+        help="pta-standards' tooling/differential checkout (default: the installed ptadiff)",
+    )
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="fail on regressions")
     mode.add_argument("--update", action="store_true", help="rewrite the baseline")
     ap.add_argument("--report", type=Path, help="write the markdown report here")
     ap.add_argument("--results", type=Path, help="write per-input JSONL here")
+    ap.add_argument("--categories-json", type=Path, help="write ptadiff's category report here")
+    ap.add_argument("--categories", type=int, default=30, help="category rows in the report")
+    ap.add_argument(
+        "--minimize", type=int, default=0, metavar="N", help="minimize the N largest categories"
+    )
     ap.add_argument("--examples", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
+    load_ptadiff(args.ptadiff)
     if args.self_test:
         self_test()
         return 0
     if not args.rledger:
         ap.error("--rledger is required")
     meta, pins = read_baseline(args.baseline)
+    revision = ptadiff_revision(args.ptadiff)
+    log(f"ptadiff {ptadiff.__version__} at {revision}")
     if args.check:
         if not args.baseline.exists():
             sys.exit(f"error: {args.baseline} is missing")
@@ -1132,6 +1346,13 @@ def main():
         sys.exit("error: --check and --update need --fuzz-dir and --compat-dir")
     if args.update and not args.fuzz_commit:
         sys.exit("error: --update needs --fuzz-commit (the commit --fuzz-dir holds)")
+    if args.update and (not revision or revision.endswith("-dirty")):
+        # The category counts depend on ptadiff's generators and keys, so a
+        # pin is only reproducible from a committed revision.
+        sys.exit(
+            f"error: --update needs ptadiff at a committed revision (got {revision!r}): "
+            "install it from git, or commit the --ptadiff checkout"
+        )
 
     import beancount
 
@@ -1147,17 +1368,54 @@ def main():
         # Pinning `#@inputs fuzz 0` would make every later run "cover" an
         # empty corpus and drop every fuzz pin.
         sys.exit(f"error: no fuzz inputs under {args.fuzz_dir}; extract the commit there")
-    with tempfile.TemporaryDirectory(prefix="parse-error-parity-") as work:
-        rl_results = run_rledger(args.rledger, items, work)
+    jobs = max(1, args.jobs)
+    rl_results = run_rledger(args.rledger, items)
     log(f"rledger done at {time.monotonic() - started:.1f}s")
-    bc_results = run_beancount(items, max(1, args.jobs))
+    bc_results = run_beancount(items, jobs)
     log(f"beancount done at {time.monotonic() - started:.1f}s")
     results = compare(inputs, bc_results, rl_results)
+    texts = {cid: text for cid, (_, _, text) in inputs.items.items()}
+    keys = category_keys(texts, results, jobs)
+    counts = category_counts(inputs, keys)
+    log(f"{len(set(keys.values()))} category keys at {time.monotonic() - started:.1f}s")
 
+    clusters = category_clusters(inputs, results, keys)
+    if args.minimize:
+        keys_of = make_keys_of(args.rledger, jobs)
+
+        def minimize_one(text, key):
+            found = ptadiff.minimize(text, key, keys_of, ptadiff.get_format("beancount").shrink_units)
+            return found.text, found.complete
+
+        ptadiff.minimize_clusters(clusters, minimize_one, top=args.minimize)
+        log(f"minimized at {time.monotonic() - started:.1f}s")
+    statuses = collections.Counter(
+        "match" if c == "match" else "crash" if c == "crash" else "mismatch"
+        for c, _, _ in results.values()
+    )
+    categories = ptadiff.build_report(
+        clusters,
+        statuses,
+        meta={
+            "format": "beancount",
+            "key": CATEGORY_KEY,
+            "oracle": {"name": "beancount", "version": beancount.__version__},
+            "implementation": "rledger (parse_error_lines --jsonl)",
+            "ptadiff": {"version": ptadiff.__version__, "revision": revision},
+        },
+    )
     report = render_report(inputs, results, args.examples)
+    report += "\n" + ptadiff.render_markdown(
+        categories,
+        limit=args.categories,
+        title=f"Category keys (ptadiff `{CATEGORY_KEY}` key, all sources)",
+        level=2,
+    )
     if args.report:
         args.report.write_text(report)
     print(report)
+    if args.categories_json:
+        args.categories_json.write_text(json.dumps(categories, indent=1) + "\n")
     if args.results:
         with open(args.results, "w") as f:
             for cid, (cat, bc, rl) in sorted(results.items()):
@@ -1169,6 +1427,7 @@ def main():
                             "source": source,
                             "label": label,
                             "category": cat,
+                            "key": keys.get(cid),
                             "text": text,
                             "beancount": bc,
                             "rledger": rl,
@@ -1178,13 +1437,13 @@ def main():
                 )
 
     if args.update:
-        write_baseline(args.baseline, inputs, results, args.fuzz_commit, pins)
+        write_baseline(args.baseline, inputs, results, args.fuzz_commit, pins, counts, revision)
         print(f"wrote {args.baseline}")
         return 0
     if not args.check:
         return 0
 
-    return run_check(inputs, results, meta, pins)
+    return run_check(inputs, results, meta, pins, counts=counts, revision=revision)
 
 
 if __name__ == "__main__":

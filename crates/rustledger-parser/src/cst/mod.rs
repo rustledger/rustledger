@@ -49,6 +49,8 @@
 //! and recursive-application notes for phase 2.1's grammar.
 
 pub mod ast;
+#[cfg(test)]
+mod bc_lexer_drift;
 mod convert;
 mod cost_spec_shape;
 mod directive_header;

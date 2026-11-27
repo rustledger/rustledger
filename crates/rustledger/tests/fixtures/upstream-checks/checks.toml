@@ -608,11 +608,13 @@ note = "bean-check 3.2.3 records this error and then crashes in validate_check_t
 
 [[check]]
 id = "site:beancount.parser.booking_full.interpolate_group:Cannot infer price for postings with units held at cost"
-status = "missing"
+status = "covered"
+rledger = "BOOK: rustledger_booking::interpolate (InterpolationError::PriceBesideCost)"
 case = "booking-price-at-cost"
+code = "BOOK"
 python_crash = true
-rledger_lines = []
-note = "rledger accepts `1 HOOL {10 USD} @ USD`: beside a cost, a bare price sigil is deliberately inert there (`a_bare_price_beside_a_cost_is_inert` in rustledger-booking, #1919), though compatibility.md does not say so. Whether to refuse it as beancount does is open (a maintainer decision). bean-check 3.2.3 records the error and then crashes in validate_missing_eliminated (AttributeError on CostSpec.number)."
+rledger_lines = [4]
+note = "bean-check 3.2.3 records this error and then crashes in validate_missing_eliminated (AttributeError on CostSpec.number), so its run shows only a traceback. A price NUMBER beside a cost (`@ 12`) is not this check: it takes the cost currency (#3047)."
 
 [[check]]
 id = "site:beancount.parser.booking_full.interpolate_group:Cost is negative: \"{}\""
@@ -889,11 +891,12 @@ note = "beancount reports it on the transaction's first line; rledger on the lin
 [[check]]
 id = "site:beancount.parser.lexer.LexBuilder.build_lexer_error:<dynamic>"
 status = "covered"
-rledger = "P0012: parser (lexer)"
+rledger = "P0012: parser (lexer); invalid UTF-8 in rustledger_loader::invalid_utf8"
 case = "lexer-invalid-token"
 code = "P0012"
 lines = [2]
-note = "The C lexer's errors. Full parity is the parse-error-parity CI job. Not covered: bytes that are not UTF-8 (beancount's lexer refuses them in tokens and strings; rledger decodes them lossily and accepts them), an open question listed for the maintainer."
+test = ["crates/rustledger-loader/src/invalid_utf8.rs::test_invalid_utf8_errors_match_beancount_placement"]
+note = "The C lexer's errors. Full parity is the parse-error-parity CI job (which compares UTF-8 inputs only). Bytes that are not UTF-8 are reported as beancount places them: an invalid token outside strings, one error per string on its last line, nothing in a comment (the named test)."
 
 [[check]]
 id = "site:beancount.plugins.check_average_cost.validate_average_cost:Cost basis on reducing posting is too far from the average cost ({} vs. {})"

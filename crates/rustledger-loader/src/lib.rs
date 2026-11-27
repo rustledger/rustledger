@@ -40,6 +40,7 @@
 pub mod cache;
 mod dedup;
 pub mod discover;
+mod invalid_utf8;
 mod options;
 mod phase;
 mod process;
@@ -525,6 +526,15 @@ pub fn plugins_in_run_order<'a>(plugins: &'a [Plugin], source_map: &SourceMap) -
     ordered
 }
 
+/// Parse a file's text as the load path does: without the LSP-only
+/// occurrences, and with its invalid UTF-8 reported (`invalid_utf8`).
+fn parse_source(source: &SourceText) -> rustledger_parser::ParseResult {
+    let mut parsed = rustledger_parser::parse_without_occurrences(source);
+    let invalid = invalid_utf8::invalid_utf8_errors(source);
+    parsed.errors.extend(invalid);
+    parsed
+}
+
 /// Decrypt a GPG-encrypted file using the system `gpg` command.
 ///
 /// This uses `gpg --batch --decrypt` which will use the user's
@@ -811,7 +821,7 @@ impl Loader {
             };
             // The processing pipeline never reads currency/account occurrences
             // (LSP-only); skip collecting them — see `parse_without_occurrences`.
-            let parsed = rustledger_parser::parse_without_occurrences(&src);
+            let parsed = parse_source(&src);
             (src, parsed)
         };
 
@@ -1013,7 +1023,7 @@ impl Loader {
                             // through one code path (UTF-8 handling, error types, etc.)
                             let source = fs.read(p).ok()?;
                             // Occurrences are LSP-only; skip them on the load path.
-                            let parsed = rustledger_parser::parse_without_occurrences(&source);
+                            let parsed = parse_source(&source);
                             Some((source, parsed))
                         })
                         .collect();

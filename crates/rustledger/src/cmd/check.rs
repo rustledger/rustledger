@@ -124,7 +124,8 @@ pub struct Args {
     #[arg(long, value_name = "CACHE_FILE", hide = true)]
     pub cache_filename: Option<PathBuf>,
 
-    /// Implicitly enable auto-plugins (`auto_accounts`, etc.)
+    /// Implicitly enable beancount's auto plugins (`auto_accounts`, then
+    /// `implicit_prices`), as `bean-check --auto` does
     #[arg(short = 'a', long)]
     pub auto: bool,
 
@@ -331,7 +332,13 @@ pub fn run_with_writer<W: Write>(
             continue;
         };
         {
-            let source = std::fs::read_to_string(path).unwrap_or_default();
+            // Decoded as the loader decoded it, so a file with bytes that are
+            // not UTF-8 (whose parse errors say so) still has the text its
+            // spans point into; `read_to_string` gave an empty text.
+            let source = std::fs::read(path)
+                .map(rustledger_loader::SourceText::from_utf8_lossy)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let path_str = path.display().to_string();
 
             // Filter for DISPLAY only, and keep the original count. The

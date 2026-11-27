@@ -30,7 +30,9 @@ pub struct LoadOptions {
     pub booking_method: BookingMethod,
     /// Run plugins declared in the file (default: true).
     pub run_plugins: bool,
-    /// Run `auto_accounts` plugin (default: false).
+    /// Run beancount's `auto` plugin, as `bean-check --auto` does:
+    /// `auto_accounts` before booking, then `implicit_prices` after it
+    /// (default: false). It ran `auto_accounts` alone.
     pub auto_accounts: bool,
     /// Additional plugins to run (CLI `--plugin` or programmatic API),
     /// each with an optional config string.
@@ -1721,7 +1723,8 @@ fn dispatch_plugins(
     //   1. document_discovery, via non-empty `file_options.documents`.
     //   2. File-declared plugins from `plugin "..."` directives.
     //   3. CLI `--plugin` extras.
-    //   4. auto_accounts, via `options.auto_accounts`.
+    //   4. beancount's `auto` (auto_accounts, implicit_prices), via
+    //      `options.auto_accounts`.
     // Pass classification happens here — once — via `registry.find_synth`.
     // A plugin enters the list iff its pass matches the requested `pass`.
     let mut entries: Vec<PluginInvocation> = Vec::new();
@@ -1792,18 +1795,24 @@ fn dispatch_plugins(
         }
     }
 
-    // Implicit synth: API-level auto_accounts flag (`check --auto`). It goes
-    // LAST, where beancount puts its `--auto` plugins (`PLUGINS_AUTO`, after
-    // the file's plugins), and in any case after document discovery, which
-    // beancount runs first (`PLUGINS_PRE`): a discovered document can name an
-    // account first, and `auto_accounts` must see it to open the account on
-    // that date (#2649).
-    if matches!(pass, PluginPass::PreBookingSynth) && options.auto_accounts {
-        entries.push(PluginInvocation {
-            name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
-            config: None,
-            force_python: false,
-        });
+    // The API-level `auto` flag (`check --auto`): beancount's `--auto` adds
+    // `beancount.plugins.auto` (`DEFAULT_PLUGINS_AUTO`), which is
+    // `auto_accounts` then `implicit_prices`, each part in its own pass here.
+    // It goes LAST, where beancount puts its `--auto` plugins (`PLUGINS_AUTO`,
+    // after the file's plugins), and in any case after document discovery,
+    // which beancount runs first (`PLUGINS_PRE`): a discovered document can
+    // name an account first, and `auto_accounts` must see it to open the
+    // account on that date (#2649).
+    if options.auto_accounts {
+        for name in rustledger_plugin::plugin_parts("beancount.plugins.auto", false) {
+            if registry.find_synth(name).is_some() == want_synth {
+                entries.push(PluginInvocation {
+                    name: name.to_string(),
+                    config: None,
+                    force_python: false,
+                });
+            }
+        }
     }
 
     if entries.is_empty() {

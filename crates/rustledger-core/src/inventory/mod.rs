@@ -1407,6 +1407,12 @@ pub(super) enum LotOrder {
     DateDescending,
     /// Most expensive lot first, which is what HIFO takes.
     CostDescending,
+    /// The order the lots were added in (slot order: a new lot takes the
+    /// next slot, and removal leaves a tombstone, so slots never reorder).
+    /// No method consumes lots in it; it is the order a STRICT reduction
+    /// that takes every matching lot lists them in, as beancount lists the
+    /// positions of its insertion-ordered inventory.
+    Slot,
 }
 
 /// The sort key `order_key` produces for a slot.
@@ -1422,6 +1428,8 @@ pub(super) enum OrderKey {
     DateDescending(Reverse<Option<crate::NaiveDate>>),
     /// Most expensive first.
     CostDescending(Decimal),
+    /// Every lot alike, so the slot tiebreak alone orders them.
+    Slot,
 }
 
 /// Lots per units-currency, in the order some booking method consumes them.
@@ -3029,6 +3037,7 @@ impl Inventory {
             LotOrder::CostDescending => {
                 OrderKey::CostDescending(-cost.map_or(Decimal::ZERO, |c| c.number))
             }
+            LotOrder::Slot => OrderKey::Slot,
         }
     }
 

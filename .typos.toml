@@ -51,4 +51,7 @@ extend-exclude = [
   "tests/baselines/parse-error-parity.manifest",
   # Hex hashes of matrix inputs (#2928), which read as misspellings.
   "crates/rustledger-parser/tests/data/bom_combination_matrix_matching.tsv",
+  # Vendored byte for byte from pta-standards (British spelling); the table
+  # generator checks its hash, so it is not edited here.
+  "crates/rustledger-parser/grammar/beancount.y",
 ]

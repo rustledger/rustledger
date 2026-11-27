@@ -1631,14 +1631,15 @@ jobs:
           # --help is the probe bean_price_compat.rs itself uses.
           bean-price --help > /dev/null
           python -c "import beancount_options.check_option_expiry, beancount_options.check_option_assignment"
-      # The BcLexer drift test (rustledger-parser, `cst::bc_lexer_drift`)
-      # compares the recovery model's port of beancount 3.2.3's lexer with
-      # beancount's own lexer, over the corpora the parse-error parity
+      # The lexer drift test (rustledger-parser, `cst::bc_lexer_drift`)
+      # compares the error oracle's reference lexer (written from
+      # pta-standards' clean-room LEXICAL.md) with beancount 3.2.3's own
+      # lexer, over the corpora the parse-error parity
       # manifest pins: its own venv, so the beancount it reads is exactly
       # 3.2.3 whatever the suites above install, with ptadiff at the
       # manifest's revision (the generator sample and crash-safe workers),
       # and the fuzz corpus at the manifest's commit.
-      - name: Set up the BcLexer drift test
+      - name: Set up the lexer drift test
         run: |
           set -euo pipefail
           manifest=tests/baselines/parse-error-parity.manifest
@@ -1839,7 +1840,19 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_LTO: 'false'
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-        run: cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines
+        run: cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines --example beancount_reference
+      # The parser's model of beancount's parser (its error oracle: a lexer
+      # from pta-standards' clean-room LEXICAL.md, an LR driver over the
+      # tables of its clean-room grammar) must give beancount's own tokens
+      # and syntax errors on every input below, before rledger's deliberate
+      # differences. A drift here is a wrong line or count waiting for an
+      # input to reach it, so it fails the job.
+      - name: Reference oracle against beancount (tokens and errors)
+        run: |
+          python -I scripts/compat-beancount-oracle-drift.py \
+            --reference target/release/examples/beancount_reference \
+            --fuzz-dir "$RUNNER_TEMP/fuzz" \
+            --compat-dir tests/compatibility/files
       - name: Compare against beancount and the pinned baseline
         run: |
           python -I scripts/compat-parse-error-parity.py \

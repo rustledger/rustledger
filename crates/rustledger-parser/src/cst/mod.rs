@@ -57,6 +57,7 @@ mod directive_header;
 pub(crate) mod format;
 mod green;
 mod lossless_tokens;
+mod oracle;
 mod parser;
 mod recovery;
 mod syntax_kind;
@@ -79,5 +80,14 @@ pub use convert::{
 // `cst::format` path so there is exactly one import shape per
 // formatter symbol from outside the crate.
 pub use lossless_tokens::lossless_kind_tokens;
+#[doc(hidden)]
+pub use oracle::beancount::{
+    deviation_overlays as __beancount_deviation_overlays,
+    gate_skips_grammar as __beancount_gate_skips_grammar,
+    overlaid_slots as __beancount_overlaid_slots, reference_errors as __beancount_reference_errors,
+    reference_tokens as __beancount_reference_tokens,
+};
+#[doc(hidden)]
+pub use oracle::set_enabled_on_this_thread as set_error_oracle_on_this_thread;
 pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

@@ -87,6 +87,9 @@ pub fn parse_red_only(source: &str) -> ParseResult {
 }
 
 fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool) -> ParseResult {
+    // Only the outermost parse consults the reference oracle: the recovery
+    // model's own sub-parses are inputs to the errors it reconciles.
+    let nesting = super::oracle::NestingGuard::enter();
     // BOM detection mirrors the legacy parser's behavior: strip a
     // leading 3-byte BOM from the source before tokenizing and
     // record its presence in the result. Spans index the original
@@ -549,6 +552,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         bom_offset,
         use_green,
     );
+    // Behind a switch while the hand-modeled passes above are retired: make
+    // the errors agree with beancount's, computed from its grammar.
+    if nesting.is_outermost() && super::oracle::enabled() {
+        errors = super::oracle::beancount::reconcile_errors(source, errors);
+    }
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -11715,7 +11723,7 @@ fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bo
 /// posting's cost or price (`posting_builder_error`), a tag line after the
 /// first posting, a repeated metadata key. Such an entry is built, so its
 /// grammar does not fail there and no recovery starts (#2993).
-fn is_a_builder_message(m: &str) -> bool {
+pub(super) fn is_a_builder_message(m: &str) -> bool {
     m.contains("as beancount reports")
         || m.contains("as in beancount")
         || m.starts_with(crate::COST_PRICE_CURRENCY_MISMATCH)
@@ -11724,7 +11732,7 @@ fn is_a_builder_message(m: &str) -> bool {
         || m.starts_with("duplicate posting metadata field")
 }
 
-fn is_a_builder_error(e: &crate::ParseError) -> bool {
+pub(super) fn is_a_builder_error(e: &crate::ParseError) -> bool {
     match &e.kind {
         crate::ParseErrorKind::InvalidBookingMethod(_) => true,
         crate::ParseErrorKind::SyntaxError(m) => m.starts_with(super::txn_header::TOO_MANY_STRINGS),

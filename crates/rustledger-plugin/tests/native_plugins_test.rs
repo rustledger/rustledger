@@ -4152,6 +4152,69 @@ fn test_close_tree_no_duplicate_close() {
     );
 }
 
+fn closed_accounts(output: &ProcessedOutput) -> Vec<String> {
+    output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Close(c) => Some(c.account.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Closing a parent that was never opened closes its opened descendants and
+/// drops its own `close`, as beancount's `close_tree` does: that is how a
+/// whole tree is closed, and a kept `close` was reported as closing an
+/// account that was never opened (`E1001`), where `bean-check` is clean.
+#[test]
+fn test_close_tree_drops_the_close_of_an_unopened_parent() {
+    let output = process_and_materialize(
+        &CloseTreePlugin,
+        make_input(vec![
+            make_open("2024-01-01", "Assets:Bank:Checking"),
+            make_close("2024-12-31", "Assets:Bank"),
+        ]),
+    );
+    assert!(output.errors.is_empty());
+    assert_eq!(closed_accounts(&output), vec!["Assets:Bank:Checking"]);
+}
+
+/// A `close` of an account nothing opens, with no descendants, is dropped
+/// with nothing in its place.
+#[test]
+fn test_close_tree_drops_the_close_of_a_never_opened_account() {
+    let output = process_and_materialize(
+        &CloseTreePlugin,
+        make_input(vec![make_close("2024-12-31", "Expenses:Rent")]),
+    );
+    assert!(output.errors.is_empty());
+    assert!(output.directives.is_empty(), "{:?}", output.directives);
+}
+
+/// Only opened descendants are closed: a posting to an account never opened
+/// is the validator's error, and closing it too would report it twice.
+#[test]
+fn test_close_tree_closes_only_opened_descendants() {
+    let output = process_and_materialize(
+        &CloseTreePlugin,
+        make_input(vec![
+            make_open("2024-01-01", "Assets:Bank"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_transaction(
+                "2024-01-15",
+                "to an account never opened",
+                vec![
+                    ("Assets:Bank:Unopened", "100.00", "USD"),
+                    ("Assets:Cash", "-100.00", "USD"),
+                ],
+            ),
+            make_close("2024-12-31", "Assets:Bank"),
+        ]),
+    );
+    assert_eq!(closed_accounts(&output), vec!["Assets:Bank"]);
+}
+
 // ============================================================================
 // CoherentCostPlugin Tests
 // ============================================================================

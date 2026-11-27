@@ -2528,6 +2528,33 @@ fn test_close_tree_inserted_close_is_validated() {
     );
 }
 
+/// `close_tree` closing a tree by a parent that was never opened: the
+/// opened sub-account is closed and the parent's own `close` dropped, so
+/// the ledger is clean, as `bean-check` finds it. The kept `close` was
+/// reported as closing an account that was never opened (`E1001`). A
+/// posting to the closed sub-account afterwards is still caught.
+#[test]
+fn test_close_tree_closes_a_tree_by_an_unopened_parent() {
+    let errors = load_codes(
+        "plugin \"close_tree\"\n\
+         2020-01-01 open Assets:Bank:Checking\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-02 * \"in\"\n  Assets:Bank:Checking 5 USD\n  Equity:Opening\n\
+         2020-01-03 * \"out\"\n  Assets:Bank:Checking -5 USD\n  Equity:Opening\n\
+         2020-02-01 close Assets:Bank\n",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    let after = load_codes(
+        "plugin \"close_tree\"\n\
+         2020-01-01 open Assets:Bank:Checking\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-02-01 close Assets:Bank\n\
+         2020-03-01 * \"after close\"\n  Assets:Bank:Checking 5 USD\n  Equity:Opening\n",
+    );
+    let codes: Vec<&str> = after.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes, ["E1003"], "{after:?}");
+}
+
 /// #2651: a `balance` a plugin inserted (`check_drained`) gets the open's
 /// currency-constraint check a written one gets. beancount reports the
 /// transaction's currency, the inserted balance's currency, and its failure.

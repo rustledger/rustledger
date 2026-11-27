@@ -222,23 +222,25 @@ fn test_parse_tag_before_a_header_defect_keeps_its_own_error() {
     }
 }
 
-/// Known, documented in the PR: where our lexer already reads the line with
-/// one error fewer than beancount (`~$`, beancount's `TILDE` and `$`; `% $x`,
-/// its `FLAG` and `$x`), a BOM-led account's error made the count match by
-/// chance. It is gone now, and the line counts what it counts with a plain
-/// account in the BOM-led one's place.
+/// Where our lexer reads the line with one error fewer than beancount (`~$`,
+/// beancount's `TILDE` and `$`; `% $x`, its `FLAG` and `$x`), a BOM-led
+/// account's error once made the count match by chance. It does not stand in
+/// for anything now: the error oracle, which replays beancount's grammar,
+/// adds the error beancount reports there, and the line counts what it
+/// counts with a plain account in the BOM-led one's place (bean-check 3.2.3:
+/// 3 and 2).
 #[test]
 fn test_parse_bom_account_no_longer_stands_in_for_a_missed_error() {
     let cases = [
         (
             txn(&format!("  Assets:A  ~$ {BOM}{BOM}Assets:B  -$")),
             txn("  Assets:A  ~$ Assets:Z  -$"),
-            vec![(4, 2)], // beancount: 3
+            vec![(4, 3)],
         ),
         (
             txn(&format!("  Assets:A  % $x  {BOM}Assets:A,  ^a-b")),
             txn("  Assets:A  % $x  Assets:Z,  ^a-b"),
-            vec![(4, 1)], // beancount: 2
+            vec![(4, 2)],
         ),
     ];
     for (src, plain, want) in cases {

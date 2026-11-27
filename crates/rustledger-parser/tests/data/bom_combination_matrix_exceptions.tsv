@@ -9,4 +9,3 @@
 # are no longer those is unexplained, so a stale reason cannot keep it. A
 # listed line that a rule explains, or that now matches, is stale and fails
 # the test.
-, 2024-01-02  #+x <BOM>"s"  !\npopmeta kk:  <BOM>Ü:A  , A @@\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  ^l  <BOM>Assets:A x<BOM>y  , x<BOM>y\n<BOM>  Assets:A  1 USD A<BOM>b \t#!d  -2.5 USD \topen\n	5	rledger counts 1 where beancount counts 2 (main 1); one `P0026` stands for the line's two `x<BOM>y` runs after a failed line, as after any (`foo` then `  x<BOM>y x<BOM>y` is also 1 where beancount counts 2). The bom-account rule no longer explains it: with the BOM-led accounts written `Assets:X`, the `popmeta` line is a grammar error, which since #2995 pops nothing and swallows this indented line as in beancount, so the rewrite counts 1; it counted 2 before only through a `popmeta` takes-no-metadata error beancount does not report. A shape left for a change of its own

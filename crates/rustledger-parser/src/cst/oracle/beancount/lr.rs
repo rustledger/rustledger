@@ -65,6 +65,8 @@ pub struct Statement {
     pub start: u32,
     pub end: u32,
     pub built: bool,
+    /// An undated directive (`option`, `pushtag`, ...), not a dated entry.
+    pub directive: bool,
 }
 
 /// The result of one parse.
@@ -336,6 +338,7 @@ pub fn run(tokens: impl Iterator<Item = Lexeme>, src_len: u32, full_trace: bool)
                 start,
                 end: here,
                 built: true,
+                directive: lhs == NT_DIRECTIVE,
             });
         }
         let top = stack.last().map_or(0, |&(s, _)| s);
@@ -375,6 +378,7 @@ fn recover(
                     start: from,
                     end: error_at,
                     built: false,
+                    directive: false,
                 });
             }
             stack.push((act, error_at));
@@ -465,7 +469,8 @@ mod tests {
             [Statement {
                 start: 0,
                 end: 25,
-                built: false
+                built: false,
+                directive: false,
             }]
         );
     }

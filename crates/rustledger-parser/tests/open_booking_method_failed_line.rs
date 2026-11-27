@@ -130,18 +130,19 @@ fn test_parse_open_booking_method_then_other_failed_lines() {
 
 /// A blank line, an indented blank line or a column-0 line ends the
 /// statement before the failed line: beancount builds the `open` and reports
-/// its booking method. (beancount reports the failed line twice there,
-/// bean-check `2 4x2`; that is not this issue.)
+/// its booking method. The failed line is then an orphan indented line,
+/// which beancount reports twice, its indent and its invalid token
+/// (bean-check `2 4x2`).
 #[test]
 fn test_parse_open_booking_method_then_line_after_the_statement_keeps_its_error() {
     assert_counts(&[
-        (format!("{P}{XYZ}\n  hh\n"), vec![(2, 1), (4, 1)]),
-        (format!("{P}{XYZ}  \n  hh\n"), vec![(2, 1), (4, 1)]),
-        (format!("{P}{XYZ}\t\n  hh\n"), vec![(2, 1), (4, 1)]),
-        (format!("{P}{XYZ}; c\n  hh\n"), vec![(2, 1), (4, 1)]),
+        (format!("{P}{XYZ}\n  hh\n"), vec![(2, 1), (4, 2)]),
+        (format!("{P}{XYZ}  \n  hh\n"), vec![(2, 1), (4, 2)]),
+        (format!("{P}{XYZ}\t\n  hh\n"), vec![(2, 1), (4, 2)]),
+        (format!("{P}{XYZ}; c\n  hh\n"), vec![(2, 1), (4, 2)]),
         (
             format!("{P}{XYZ}  kk: \"v\"\n\n  hh\n"),
-            vec![(2, 1), (5, 1)],
+            vec![(2, 1), (5, 2)],
         ),
         // A doubled thousands separator is one number in beancount, which
         // builds the `open` (here it is an error of its own once the `open`

@@ -552,8 +552,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         bom_offset,
         use_green,
     );
-    // Behind a switch while the hand-modeled passes above are retired: make
-    // the errors agree with beancount's, computed from its grammar.
+    // Make the errors agree with beancount's, computed from its grammar (the
+    // error oracle). The hand-modeled passes above are being retired behind
+    // it; `RLEDGER_ERROR_ORACLE=0` turns it off to compare them alone.
     if nesting.is_outermost() && super::oracle::enabled() {
         errors = super::oracle::beancount::reconcile_errors(source, errors);
     }

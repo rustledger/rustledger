@@ -100,6 +100,12 @@ pub enum SlotKind {
     /// The reference's grammar built the statement and a check it makes
     /// right after rejected it (a pop of something never pushed).
     Semantic,
+    /// No error of the reference's: a place an overlay keeps for one of
+    /// rledger's own diagnostics on the slot's token, where the reference
+    /// reports nothing (a documented difference). The tightest diagnostic on
+    /// the token fills it, and its line keeps no other syntax diagnostic; where
+    /// rledger reports nothing there, nothing is synthesized.
+    StandIn,
 }
 
 /// One error the reference reports.
@@ -547,6 +553,11 @@ pub fn reconcile(
             if filled[k] {
                 continue;
             }
+            if slot.kind == SlotKind::StandIn {
+                // Only a diagnostic on its own token stands in.
+                budget -= 1;
+                continue;
+            }
             if let Some(h) = rest.next() {
                 out.push(h);
             } else if stand_ins > 0 {
@@ -638,6 +649,33 @@ mod tests {
                 "3:parse error: one",
                 "4:parse error: stands"
             ]
+        );
+    }
+
+    #[test]
+    fn test_reconcile_stand_in_is_never_synthesized() {
+        let src = "aa bb\ncc\n";
+        let stand_in = |span: Range<usize>, line| Slot {
+            kind: SlotKind::StandIn,
+            ..slot(span, line)
+        };
+        // Nothing on its token: nothing stands, and none is made.
+        let reference = Reference {
+            slots: vec![stand_in(0..2, 1)],
+            ..Reference::default()
+        };
+        assert_eq!(
+            run(src, vec![err(3, 5, "other")], &reference),
+            [] as [String; 0]
+        );
+        // The diagnostic on its token stands, the line's others go.
+        assert_eq!(
+            run(
+                src,
+                vec![err(0, 2, "bom"), err(0, 5, "wide"), err(3, 5, "other")],
+                &reference
+            ),
+            ["1:parse error: bom"]
         );
     }
 

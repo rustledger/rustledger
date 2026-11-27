@@ -799,7 +799,10 @@ use crate::types::{Error, LedgerOptions};
 /// `balance` beancount's grammar discards gets no balance finding (E3001,
 /// E2001, E2002) beside its parse error. Every such source has a parse error,
 /// which the loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 150;
+/// v151: loader v82, unchanged; parse errors move: a line where beancount
+/// reads a BOM into an account keeps rledger's one BOM diagnostic and no
+/// other syntax error. A source with a parse error keeps one.
+pub const CACHE_VERSION: u32 = 151;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

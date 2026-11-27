@@ -297,6 +297,72 @@ impl DeviationOverlay<Lexeme> for BomOrphanLine {
     }
 }
 
+/// beancount's lexer reads a word holding a BOM, with a `:` in it, as an
+/// account (`LEXICAL.md` rule 11 takes any UTF-8 character, a BOM included):
+/// its parser reports nothing there, and its builder's `Invalid account name`
+/// (a root holding a BOM is no account type) is a load-time error to rledger.
+/// rledger reports the mid-file BOM (`P0026`) once on such a line, however
+/// many BOMs or accounts it holds. On a line the reference reports nothing
+/// on, the first account its parser reads (shifts, not discards) holding a
+/// BOM gets a stand-in slot: rledger's BOM diagnostic there stands, and the
+/// line's other syntax diagnostics go.
+pub(super) struct BomInAccount;
+
+impl DeviationOverlay<Lexeme> for BomInAccount {
+    fn name(&self) -> &'static str {
+        "bom-in-account"
+    }
+    fn compatibility_section(&self) -> &'static str {
+        "p11-a-bom-in-an-account"
+    }
+    fn transform_reference(&self, src: &str, reference: &mut Reference) {
+        let b = src.as_bytes();
+        if !b.windows(BOM.len()).any(|w| w == BOM) {
+            return;
+        }
+        let mut lines_with_slots: Vec<u32> = reference.slots.iter().map(|s| s.line).collect();
+        lines_with_slots.sort_unstable();
+        // A line the reference's recovery consumed something on, or that a
+        // statement its recovery started holds, takes its verdict, as every
+        // quiet line does.
+        let quiet = reference.quiet_lines(&LineIndex::new(src));
+        let discarded = &reference.discarded;
+        let mut added = Vec::new();
+        let mut last_line = 0;
+        for l in super::lexer::Lexer::new(b) {
+            if l.tok != super::tables::Tok::Account || l.line == last_line {
+                continue;
+            }
+            let span = l.start as usize..l.end as usize;
+            // Discarded ranges are sorted and merged: a token is wholly in
+            // one or in none.
+            let k = discarded.partition_point(|r| r.end <= span.start);
+            let read = discarded.get(k).is_none_or(|r| r.start > span.start);
+
+            let holds_bom = b
+                .get(span.clone())
+                .is_some_and(|t| t.windows(BOM.len()).any(|w| w == BOM));
+            if read
+                && holds_bom
+                && lines_with_slots.binary_search(&l.line).is_err()
+                && quiet.binary_search(&l.line).is_err()
+            {
+                last_line = l.line;
+                added.push(crate::cst::oracle::Slot {
+                    span,
+                    line: l.line,
+                    kind: SlotKind::StandIn,
+                    message: "a mid-file BOM in an account".to_string(),
+                });
+            }
+        }
+        if !added.is_empty() {
+            reference.slots.extend(added);
+            reference.slots.sort_by_key(|s| s.span.start);
+        }
+    }
+}
+
 /// beancount drops an entry whose next column-0 line starts with an invalid
 /// token (its parser still waits for the entry's indented lines there), and
 /// with it the builder's errors; rledger keeps the entry and those errors.
@@ -440,6 +506,7 @@ impl Overlays {
             &TagsAfterFirstPosting,
             &self.indented_comment,
             &BomOrphanLine,
+            &BomInAccount,
             &KeptEntries,
             &CostMerge,
             &DivideByZero,
@@ -541,6 +608,63 @@ mod tests {
         );
         // The reference keeps both of beancount's errors there.
         assert_eq!(slot_lines("  \u{feff}x\n"), [1, 1]);
+    }
+
+    /// The lines of the stand-in slots on `src`.
+    fn stand_ins(src: &str) -> Vec<u32> {
+        reference(src, true)
+            .slots
+            .iter()
+            .filter(|s| s.kind == SlotKind::StandIn)
+            .map(|s| s.line)
+            .collect()
+    }
+
+    #[test]
+    fn test_bom_in_account_keeps_one_place_per_line() {
+        // One per line, however many accounts hold a BOM.
+        assert_eq!(
+            stand_ins("2024-01-02 pad \u{feff}assets:A \u{feff}assets:B\n"),
+            [1]
+        );
+        assert_eq!(
+            stand_ins("2024-01-02 *\n  \u{feff}assets:A\u{feff}x\n"),
+            [2]
+        );
+        // None where the reference reports an error on the line, or where
+        // its recovery reads the line or discards the account.
+        assert_eq!(
+            stand_ins("2024-01-02 *\n  \u{feff}assets:A 1 USD )\n"),
+            [] as [u32; 0]
+        );
+        assert_eq!(stand_ins("$ \u{feff}Assets:A\n"), [] as [u32; 0]);
+        assert_eq!(
+            stand_ins(
+                "2024-01-01 open Assets:A\n\n2024-01-02 2024-01-03 * \"n\"\n  \u{feff}Assets:A 1 USD\n"
+            ),
+            [] as [u32; 0]
+        );
+        // None without a BOM.
+        assert_eq!(stand_ins("2024-01-01 open Assets:A\n"), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn test_bom_in_account_is_one_error_per_line() {
+        let count = |src: &str| crate::parse(src).errors.len();
+        let bom_count = |src: &str| {
+            crate::parse(src)
+                .errors
+                .iter()
+                .filter(|e| matches!(e.kind, ParseErrorKind::BomInDirectiveBody))
+                .count()
+        };
+        for src in [
+            "2024-01-02 pad \u{feff}assets:A \u{feff}assets:B\n",
+            "2024-01-02 *\n  \u{feff}assets:A\u{feff}x\n",
+            "2024-01-02 custom \"b\" 1 \u{feff}Assets:A \u{feff}a-b:C\n",
+        ] {
+            assert_eq!((count(src), bom_count(src)), (1, 1), "{src:?}");
+        }
     }
 
     #[test]

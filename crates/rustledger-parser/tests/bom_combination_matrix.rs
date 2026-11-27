@@ -2130,12 +2130,14 @@ fn test_cause_glued_in_error_line_needs_more_errors_than_beancount() {
 /// `inner-bom-under-line-error` explains one error fewer than beancount's,
 /// where a `P0026` stands for the line's first error and the line has a BOM
 /// inside one of beancount's invalid tokens: on its own table row
-/// (`$n0 x1<BOM>y`, beancount 2, rledger 1 with one `P0026`, main 1, the BOM
-/// inside `x1<BOM>y`), and not with no inner BOM, with no `P0026`, or with
-/// rledger counting more than beancount.
+/// (`x0<BOM>y x1<BOM>y`, beancount 2, rledger 1 with one `P0026`, main 1, a
+/// BOM inside each token), and not with no inner BOM, with no `P0026`, or with
+/// rledger counting more than beancount. (Where the line's first invalid
+/// token holds no BOM, `$n0 x1<BOM>y`, the `P0026` stands for that token and
+/// `x1<BOM>y` has its own error, as in beancount.)
 #[test]
 fn test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic() {
-    let tail = "$n0 x1<BOM>y\\n";
+    let tail = "x0<BOM>y x1<BOM>y\\n";
     let (input, counts) = table_row(tail);
     let lines: Vec<&str> = input.split('\n').collect();
     let get = |m: &BTreeMap<usize, usize>| m.get(&3).copied().unwrap_or(0);
@@ -2926,13 +2928,17 @@ fn test_cause_glued_in_error_line_needs_exactly_the_difference() {
 
 /// `inner-bom-under-line-error`'s rewrite makes each inner BOM a `$`, which
 /// starts no token: a letter could finish a keyword. Real counts
-/// (`recorded_row`): `$n0 t<BOM>n`, beancount 2 (two invalid tokens, the BOM
-/// inside the second), rledger 1 (its `P0026`); rledger counts `$n0 t$n` 2,
-/// but `$n0 txn` 1.
+/// (`recorded_row`): `x0<BOM>y t<BOM>n`, beancount 2 (two invalid tokens, a
+/// BOM inside each), rledger 1 (its `P0026`); rledger counts `x0$y t$n` 2,
+/// but `x0yy txn` 1.
 #[test]
 fn test_cause_inner_bom_under_line_error_rewrites_to_no_token() {
     assert_eq!(
-        recorded_cause("$n0 t<BOM>n\\n", "3:2 3:1 3:2 3:2 3:2 3:2 - 55 -", 3),
+        recorded_cause(
+            "x0<BOM>y t<BOM>n\\n",
+            "3:2 3:1 3:2 3:2 3:2 3:2 - 52,58 -",
+            3
+        ),
         Some("inner-bom-under-line-error")
     );
 }
@@ -3573,7 +3579,10 @@ fn test_check_row_excepts_only_listed_exception_lines() {
             .unwrap_or_else(|| panic!("no table row for {tail:?}"));
         assert!(check_row(row).excepted.is_empty(), "{causes}: {tail}");
     }
-    assert!(seen.len() > 10, "{seen:?}");
+    // (Ten since `extra-construct-error` lost its one row of its own: that
+    // row's pipe after a header failure gives no warning now, as in
+    // beancount.)
+    assert!(seen.len() >= 10, "{seen:?}");
 }
 
 /// `list_diff` lists what is gone, then what is new, and nothing when the

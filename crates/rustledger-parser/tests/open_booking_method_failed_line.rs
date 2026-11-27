@@ -193,3 +193,15 @@ fn test_parse_open_booking_method_then_failed_line_keeps_the_open() {
     assert_eq!(opens[1].account.as_ref(), "Assets:B");
     assert_eq!(opens[1].booking, None);
 }
+
+/// An invalid booking method is reported on the `open`'s own line, not on a
+/// comment or blank line its node starts with after an earlier directive, as
+/// in beancount (#2995's rule for directive-level errors).
+#[test]
+fn test_parse_open_booking_method_is_reported_on_the_open_line() {
+    assert_counts(&[
+        (format!("{P};c\n{XYZ}"), vec![(3, 1)]),
+        (format!("{P}\n{XYZ}"), vec![(3, 1)]),
+        (format!("{P}; a\n; b\n{XYZ}"), vec![(4, 1)]),
+    ]);
+}

@@ -211,6 +211,39 @@ fn nothing_after_a_missing_flag_is_reported_on_the_line() {
     }
 }
 
+/// beancount warns about a `|` from its grammar, so any header its grammar
+/// fails on before the pipe gives no warning: a second flag, a keyword or a
+/// tag before the strings, a lone capital glued to what follows it. Each line
+/// is one error, the header's. Too many strings is its builder's error, after
+/// the pipe is read: two errors, the warning kept.
+#[test]
+fn a_pipe_after_a_header_failure_gives_no_warning() {
+    let bodies = "\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
+    for (header, n) in [
+        ("2024-01-02 * * \"a\" | \"b\"", 1),
+        ("2024-01-02 * open \"a\" | \"b\"", 1),
+        ("2024-01-02 * #t \"a\" | \"b\"", 1),
+        ("2024-01-02 P\"x\" | \"y\"", 1),
+        ("2024-01-02 Z open |", 1),
+        ("2024-01-02 * \"a\" | \"b\" \"c\"", 2),
+    ] {
+        let src = format!("{header}\n{bodies}");
+        for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+            let pipes = result
+                .errors
+                .iter()
+                .filter(|e| e.to_string().contains("Pipe symbol"))
+                .count();
+            assert_eq!(
+                (result.errors.len(), pipes),
+                (n, n - 1),
+                "{name} {header:?}: {:?}",
+                result.errors
+            );
+        }
+    }
+}
+
 /// #2905: a header whose first token after the date is a tag or a link has no
 /// flag either. beancount: `syntax error, unexpected TAG` (or `LINK`), one
 /// error, on the header line. Its postings belong to it, so they are not each

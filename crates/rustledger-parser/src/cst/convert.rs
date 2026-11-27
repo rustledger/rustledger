@@ -538,6 +538,14 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         bom_offset,
         &grammar_failures,
     );
+    // After every pass: it replaces whole lines with another parse's.
+    super::recovery::model_stray_cr_lines(
+        &mut errors,
+        source_file.syntax(),
+        stripped,
+        bom_offset,
+        use_green,
+    );
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -582,6 +590,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         syntax_root,
         alignment,
     }
+}
+
+/// The parse errors of `src`, a text with no leading BOM, for
+/// `recovery::model_stray_cr_lines`.
+pub(super) fn parse_analog_errors(src: &str, use_green: bool) -> Vec<crate::ParseError> {
+    parse_via_cst_inner(src, /* collect_occurrences = */ false, use_green).errors
 }
 
 // ---- Directive converters --------------------------------------
@@ -702,9 +716,11 @@ fn convert_open(
         if !holds_an_invalid_token(node.syntax().green())
             && !open_body_holds_a_failed_line(node.syntax())
         {
+            // On the `open`'s own line, past a comment line its node starts
+            // with (#2995).
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::InvalidBookingMethod(b),
-                span,
+                node_content_span(node.syntax(), bom_offset),
             ));
             return None;
         }
@@ -1650,10 +1666,11 @@ fn convert_transaction(
 /// scan the header directly.
 ///
 /// beancount warns about the pipe from its grammar, as it reads it, so a
-/// header with no flag (#2905), which its grammar fails on at the first
-/// string, is discarded to the end of the line, pipe included, with no
-/// warning. Only that defect is asked about here: it is always the first
-/// token after the date, so it always precedes the pipe.
+/// header its grammar fails on before the pipe (no flag, #2905; a second
+/// flag, a keyword or a tag before the strings, a lone capital glued to what
+/// follows it) is discarded to the end of the line, pipe included, with no
+/// warning. Too many strings is its builder's error, raised once the header
+/// is read, pipe and all, so it keeps the warning.
 fn header_has_pipe(node: &AstTransaction) -> bool {
     // Leading trivia (blank lines, comments) can precede the header inside the
     // node; `HeaderEnd` skips it (#2628).
@@ -1674,14 +1691,25 @@ fn header_has_pipe(node: &AstTransaction) -> bool {
     let Some(pipe_at) = pipe_at else {
         return false;
     };
-    let tokens = node.header_tokens().map(|t| {
-        let r = t.text_range();
-        (t.kind(), usize::from(r.start())..usize::from(r.end()))
-    });
+    // In the node's own frame, which the glued-flag check reads its text in
+    // (only for a header with a pipe).
+    let node_start = usize::from(node.syntax().text_range().start());
+    let text = node.syntax().text().to_string();
+    let tokens = node
+        .header_tokens()
+        .map(|t| {
+            let r = t.text_range();
+            (
+                t.kind(),
+                usize::from(r.start()) - node_start..usize::from(r.end()) - node_start,
+            )
+        })
+        .collect();
     !matches!(
-        super::txn_header::first_header_defect(tokens),
+        super::txn_header::first_header_defect_in(tokens, &text),
         Some((defect, range))
-            if defect == super::txn_header::HeaderDefect::MissingFlag && range.start < pipe_at
+            if !matches!(defect, super::txn_header::HeaderDefect::TooManyStrings(_))
+                && range.start + node_start < pipe_at
     )
 }
 
@@ -9544,8 +9572,9 @@ fn drop_errors_inside_a_line_error(
 /// - A token with a BOM inside it, not at its start (nor right after a lone
 ///   capital, `A<BOM>b`, which counts as BOM-led), is left to the line's BOM
 ///   diagnostic only while that diagnostic stands for nothing else: not once
-///   it stood for a BOM that starts the line or a BOM-led first token, nor
-///   when it is the second error.
+///   it stood for a BOM that starts the line, a BOM-led first token or a
+///   first token with no BOM in it (`$ x<BOM>y`), nor when it is the second
+///   error.
 ///
 /// Every other token gets its own error, a BOM-led one included: in the
 /// middle of a line it runs to the next blank, as beancount's does. Pinned,
@@ -9566,6 +9595,11 @@ pub(super) fn report_invalid_tokens_of_error_line(
     // Whether the line's BOM diagnostic already stands for a token, so a
     // token with a BOM inside it is one more invalid token.
     let mut bom_diagnostic_spent = secondary_bom;
+    // Whether this parser reports a stray `\r` on the line as an invalid
+    // token of its own.
+    let cr_error = invalid
+        .iter()
+        .any(|r| stripped.get(r.clone()).is_some_and(|t| t.starts_with('\r')));
     // Whether the token being looked at is the line's first invalid one. A
     // line-start BOM never leaves this set for the token after it to read:
     // the prefix then holds the BOM, which is no readable start.
@@ -9680,9 +9714,14 @@ pub(super) fn report_invalid_tokens_of_error_line(
         // A run that starts with a blank is not an invalid token but the rest
         // of a heading line after its `*`, which the lexer skips unread.
         if starts_the_line || text.starts_with([' ', '\t']) {
-            // The line's error stands for this first token; when it holds a
-            // stray BOM, that error is the BOM diagnostic, now spent on it.
-            bom_diagnostic_spent |= starts_the_line && bom_led;
+            // The line's error stands for this first token; when the line
+            // holds a stray BOM, that error is the BOM diagnostic, now spent
+            // on it: on a BOM-led token, or on one with no BOM in it (`$`, so
+            // `$ x<BOM>y` is two errors, as in beancount). A token with a BOM
+            // inside it keeps the diagnostic. So does a line with a stray
+            // `\r` this parser reports (#2980): that error is one beancount
+            // does not have, and the line keeps the count it had.
+            bom_diagnostic_spent |= starts_the_line && (bom_led || !holds_bom && !cr_error);
             continue;
         }
         if holds_bom && secondary_bom {

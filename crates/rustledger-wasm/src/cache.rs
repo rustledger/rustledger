@@ -747,7 +747,16 @@ use crate::types::{Error, LedgerOptions};
 /// beancount reports both. Parsed and booked directives do not move, so the
 /// loader's cache does not; both payloads here archive validation findings,
 /// and an older blob would keep serving the old ones.
-pub const CACHE_VERSION: u32 = 141;
+/// v142: loader v79, unchanged (after #3050's v141);
+/// parse errors move. The lines after one holding a stray `\r` count as
+/// beancount counts them (bison's recovery from a statement failing there),
+/// a line's BOM diagnostic stands for a first invalid token with no BOM, a
+/// misgrouped number beside a BOM-led token or a BOM in an account is
+/// reported, a pipe after a header failure gives no warning, and an invalid
+/// booking method is reported on its `open`'s line. Parsed directives do
+/// not move, and every such source has a parse error, before and after,
+/// which the loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 142;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -125,9 +125,12 @@ fn test_parse_lines_under_an_unreadable_line_are_quiet() {
 
 /// A line holding a stray `\r` (one not right before a `\n`) is read here in
 /// ways that differ from beancount's by context (`\r;c` is an error here, a
-/// blank line there, a pre-existing difference): it starts no window, ends one
-/// before it, and counts as a failed line when deciding whether the line after
-/// it starts one. So every line around it keeps its errors, as main gives them.
+/// blank line there, a deliberate difference, #2980). Where this parser
+/// reports the `\r` itself, the line keeps its own errors; every other line
+/// from there on is counted as beancount counts the input with each stray
+/// `\r` read as the blank it is there (`recovery::model_stray_cr_lines`), so
+/// bison's recovery from a statement that fails on such a line keeps the
+/// lines after it quiet (`\r$` then a posting, `option \r;c` then `-`).
 #[test]
 fn test_parse_stray_cr_lines_keep_their_errors() {
     assert_counts(&[
@@ -147,22 +150,20 @@ fn test_parse_stray_cr_lines_keep_their_errors() {
         ),
         // Unchanged neighbors.
         ("\r\n02\n".to_string(), vec![(2, 1)]),
-        ("\r$\n  Assets:A 1 USD\n".to_string(), vec![(1, 1), (2, 1)]),
+        ("\r$\n  Assets:A 1 USD\n".to_string(), vec![(1, 1)]),
         (" \r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
         ("\t\r;c\n02\n".to_string(), vec![(1, 1), (2, 1)]),
-        // A stray `\r` mid-line (beancount: one error fewer, or the same).
-        ("option \r;c\n#\n".to_string(), vec![(1, 1), (2, 1)]),
-        ("option \r;c\n-\n".to_string(), vec![(1, 1), (2, 1)]),
-        ("include \r;c\n-\n".to_string(), vec![(1, 1), (2, 1)]),
+        // A stray `\r` mid-line: the line after it is inside bison's
+        // recovery from the line's end, as in beancount.
+        ("option \r;c\n#\n".to_string(), vec![(1, 1)]),
+        ("option \r;c\n-\n".to_string(), vec![(1, 1)]),
+        ("include \r;c\n-\n".to_string(), vec![(1, 1)]),
         (
             "option \"a\" \"b\"\r;c\n-\n".to_string(),
             vec![(1, 1), (2, 1)],
         ),
-        ("2024-01-02\r;c\n-01\n".to_string(), vec![(1, 1), (2, 1)]),
-        (
-            "pushtag \r;c\n{\nx\n".to_string(),
-            vec![(1, 1), (2, 1), (3, 1)],
-        ),
+        ("2024-01-02\r;c\n-01\n".to_string(), vec![(1, 1)]),
+        ("pushtag \r;c\n{\nx\n".to_string(), vec![(1, 1), (3, 1)]),
         (
             "poptag\t\r#c\nAssets:A #\n".to_string(),
             vec![(1, 1), (2, 1)],
@@ -173,7 +174,7 @@ fn test_parse_stray_cr_lines_keep_their_errors() {
         ),
         (
             "   \r;cinclude\t1.5\t-01\npushmeta  \r;c\n  }#\n  \r\r\n".to_string(),
-            vec![(1, 1), (2, 1), (3, 1)],
+            vec![(1, 1), (2, 1)],
         ),
         (
             "2024-01-02 open Assets:A\r;c\n-\n".to_string(),

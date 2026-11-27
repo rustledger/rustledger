@@ -767,7 +767,16 @@ use crate::types::{Error, LedgerOptions};
 /// code is now E0001-E0007 (it was `LOAD`), an unreadable include's message
 /// `failed to read included file ...`, and a duplicate include on line 1 of
 /// the file included twice, as `rledger check` reports them.
-pub const CACHE_VERSION: u32 = 144;
+/// v145: loader v80 (after #3058's v144);
+/// both payloads' validation findings and plugin output move. Zero units
+/// at a cost with a number is `E4006`, `E4005` is on the posting,
+/// `allow_deprecated_none_for_tags_and_links` is `E7004` rather than
+/// `E7001`, `plugin "beancount.plugins.auto"` runs `auto_accounts` and
+/// `implicit_prices`, and a document file with an invalid date is
+/// reported and skipped instead of discarding every discovered document.
+/// `{*, *}` is a parse error, which no cache is saved for. The loader moves
+/// to v80 for the option warning it replays.
+pub const CACHE_VERSION: u32 = 145;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -799,7 +808,7 @@ pub const CACHE_VERSION: u32 = 144;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 79;
+const LOADER_CACHE_VERSION_PIN: u32 = 80;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

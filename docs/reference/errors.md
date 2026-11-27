@@ -353,6 +353,23 @@ there are fewer of them.
 
 **Fix**: Ensure cost values are non-negative (e.g., `{10 USD}` not `{-10 USD}`). Zero cost is allowed.
 
+### E4006: Zero Units Held at a Cost
+
+**Cause**: A posting's units are written as zero and it states a cost, so it
+records a lot of nothing. Beancount reports it as `Amount is zero`. Reported
+on the posting.
+
+```beancount
+2024-01-02 * "buy"
+  Assets:Stock   0 HOOL {10 USD}   ; E4006
+  Assets:Cash    0 USD
+```
+
+A zero price without a cost (`0 HOOL @ 10 USD`) is allowed, as is a cost spec
+with no number (`0 HOOL {}`), as in beancount.
+
+**Fix**: Write the number of units, or remove the posting.
+
 ## Currency Errors (E5xxx)
 
 ### E5001: Currency Not Declared
@@ -548,7 +565,7 @@ its own:
 
 | Options | True | Recognized as false |
 |---------|------|---------------------|
-| `render_commas`, `use_precise_interpolation`, `allow_pipe_separator`, `insert_pythonpath` | `1`, `true`, `yes` | `0`, `false`, `no` |
+| `render_commas`, `use_precise_interpolation`, `allow_pipe_separator`, `allow_deprecated_none_for_tags_and_links`, `insert_pythonpath` | `1`, `true`, `yes` | `0`, `false`, `no` |
 | `infer_tolerance_from_cost` | `1`, `true`, `on` | `0`, `false`, `off` |
 
 Case does not matter. So `infer_tolerance_from_cost "yes"` reads as false and

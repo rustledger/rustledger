@@ -234,6 +234,13 @@ fn first_posting_to_account(txn: &Transaction, i: usize) -> bool {
     !txn.postings[..i].iter().any(|p| &p.account == account)
 }
 
+/// Whether a posting has a source location to put a diagnostic on. A
+/// synthesized posting does not, and its error stays on the transaction.
+fn is_located(posting: &rustledger_core::Spanned<Posting>) -> bool {
+    rustledger_core::is_source_file_id(posting.file_id)
+        && posting.span != rustledger_core::Span::ZERO
+}
+
 /// Validate transaction structure.
 /// Returns false if validation should stop (no postings to validate).
 ///
@@ -357,20 +364,49 @@ pub fn validate_transaction_structure(
                     }
                 }
             };
+            // Zero units at a cost that states a number (E4006),
+            // beancount's "Amount is zero" (`booking_full.interpolate_group`).
+            // Only a written zero: an elided number has no amount here (this
+            // runs before booking), and beancount drops a posting whose
+            // units interpolate to zero. A cost with no number (`0 HOOL {}`)
+            // is skipped by the `let` above, as beancount drops that posting
+            // too. On the posting, where beancount reports it.
+            if let Some(units) = posting.amount()
+                && units.number.is_zero()
+            {
+                let mut error = ValidationError::new(
+                    ErrorCode::ZeroUnitsAtCost,
+                    format!(
+                        "Amount is zero: \"{} {}\" held at a cost in posting to {}",
+                        units.number, units.currency, posting.account
+                    ),
+                    txn.date,
+                );
+                if is_located(posting) {
+                    error = error.at_location(posting);
+                }
+                errors.push(error);
+            }
             if value < Decimal::ZERO {
                 let units_str = posting.amount().map_or_else(
                     || "?".to_string(),
                     |a| format!("{} {}", a.number, a.currency),
                 );
                 let cost_currency = cost.currency.as_ref().map_or("?", |c| c.as_str());
-                errors.push(ValidationError::new(
+                let mut error = ValidationError::new(
                     ErrorCode::NegativeCost,
                     format!(
                         "Cost is negative: {label} cost ({value} {cost_currency}) for {units_str} in posting to {}",
                         posting.account
                     ),
                     txn.date,
-                ));
+                );
+                // On the posting, as beancount reports its "Cost is
+                // negative"; it was on the transaction's first line.
+                if is_located(posting) {
+                    error = error.at_location(posting);
+                }
+                errors.push(error);
             }
         }
     }
@@ -1078,5 +1114,61 @@ mod validator_comparison_tests {
             has(&errs, ErrorCode::NegativeCost),
             "a negative cost must error: {errs:?}"
         );
+    }
+
+    /// Zero units at a cost with a number is beancount's "Amount is zero"
+    /// (E4006); zero units at a cost with no number (`{}`) or at a price
+    /// only are not, as in beancount (bean-check 3.2.3).
+    #[test]
+    fn test_validate_transaction_structure_zero_units_at_cost() {
+        let at_cost = |units: Decimal, spec: rustledger_core::CostSpec| {
+            Transaction::new(d(2024, 1, 1), "zero").with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(units, "STK")).with_cost(spec),
+            )
+        };
+        let per_unit = |v: Decimal| {
+            rustledger_core::CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: v })
+                .with_currency("USD")
+        };
+        for (label, txn, expected) in [
+            (
+                "zero units at 10 USD",
+                at_cost(dec!(0), per_unit(dec!(10))),
+                true,
+            ),
+            (
+                "zero units at zero cost",
+                at_cost(dec!(0), per_unit(dec!(0))),
+                true,
+            ),
+            (
+                "zero units, empty cost",
+                at_cost(dec!(0), rustledger_core::CostSpec::empty()),
+                false,
+            ),
+            (
+                "ten units at 10 USD",
+                at_cost(dec!(10), per_unit(dec!(10))),
+                false,
+            ),
+            (
+                "zero units at a price",
+                Transaction::new(d(2024, 1, 1), "zero").with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(0), "STK")).with_price(
+                        rustledger_core::PriceAnnotation::unit(Amount::new(dec!(10), "USD")),
+                    ),
+                ),
+                false,
+            ),
+        ] {
+            let mut errs = Vec::new();
+            validate_transaction_structure(&txn, &mut errs);
+            assert_eq!(
+                has(&errs, ErrorCode::ZeroUnitsAtCost),
+                expected,
+                "{label}: {errs:?}"
+            );
+        }
     }
 }

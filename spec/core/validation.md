@@ -322,6 +322,19 @@ cost basis.
 
 **Severity:** Error
 
+### BOOKING_ZERO_UNITS_AT_COST
+
+**Code:** `E4006`
+
+**Condition:** A posting's units are written as zero and its cost spec states a
+number (`0 HOOL {10 USD}`). Beancount's `Amount is zero`. A cost spec with no
+number (`{}`, `{USD}`) is not reported, as in beancount, which drops that
+posting; neither is a zero price without a cost.
+
+**Message:** `Amount is zero: "{units}" held at a cost in posting to {account}`
+
+**Severity:** Error
+
 ## Currency Errors
 
 ### CURRENCY_NOT_DECLARED

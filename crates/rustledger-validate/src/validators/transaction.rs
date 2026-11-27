@@ -145,6 +145,17 @@ pub fn validate_transaction_late(
         }
     }
 
+    // A transaction beancount's grammar discards (`Assets:A  1 $ USD`, an
+    // invalid token in a posting) is built nowhere there: it checks no
+    // balance for it, and its postings move no inventory, so a later
+    // `balance` sees the account without them. Asked only where a parse
+    // error is known to be in the transaction (casc3).
+    if holds_a_parse_error(&state.options, location)
+        && dropped_by_beancount(&state.options, location)
+    {
+        return;
+    }
+
     // Compute tolerances and check transaction balance.
     let tolerances = calculate_tolerances(txn, &state.options);
     let before = errors.len();
@@ -183,6 +194,31 @@ fn kept_under_error_recovery(
 ) -> bool {
     directive_text(options, location)
         .is_some_and(|text| rustledger_parser::transaction_holds_invalid_token(&text))
+}
+
+/// Whether a parse error starts in the directive at `location` or on the line
+/// after it (where beancount's statement may fail too, #2987; see
+/// [`line_at`]). `false` where the parse errors' places were not given
+/// ([`crate::SourceLines::with_parse_errors`]) or there is no location.
+fn holds_a_parse_error(
+    options: &crate::ValidationOptions,
+    location: Option<(rustledger_parser::Span, u16)>,
+) -> bool {
+    let (Some((span, file_id)), Some(lines)) = (location, options.source_lines.as_ref()) else {
+        return false;
+    };
+    match lines.parse_error_in(file_id, span.start..span.end) {
+        Some(true) => true,
+        Some(false) => {
+            // Only read the line after when an error starts at its start or
+            // later.
+            lines.parse_error_in(file_id, span.end..usize::MAX) == Some(true) && {
+                let next = line_at(lines, file_id, span.end).len();
+                lines.parse_error_in(file_id, span.end..span.end + next.max(1)) == Some(true)
+            }
+        }
+        None => false,
+    }
 }
 
 /// Whether beancount discards the directive at `location`, read from its

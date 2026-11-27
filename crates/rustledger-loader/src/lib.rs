@@ -843,6 +843,7 @@ impl Loader {
 
         // Collect parse errors
         if !result.errors.is_empty() {
+            source_map.set_parse_errors(file_id, &result.errors);
             errors.push(LoadError::ParseErrors {
                 path: path.to_path_buf(),
                 errors: result.errors,

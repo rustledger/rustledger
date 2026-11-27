@@ -223,12 +223,15 @@ pub struct ValidationOptions {
 ///
 /// It can also hand out the source text itself ([`Self::with_text`]), which
 /// the balance check reads to tell a transaction kept under error recovery
-/// (#2954).
+/// (#2954), and where each file's parse errors start
+/// ([`Self::with_parse_errors`]), so only a directive holding one is read.
 #[derive(Clone)]
 pub struct SourceLines {
     position_of:
         std::sync::Arc<dyn Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync>,
     text_of: Option<TextOf>,
+    /// By file id, the sorted start offsets of the file's parse errors.
+    parse_errors: Option<std::sync::Arc<Vec<Vec<usize>>>>,
 }
 
 /// Gives the text of bytes `range` of file `file_id`, if it is at hand.
@@ -243,7 +246,48 @@ impl SourceLines {
         Self {
             position_of: std::sync::Arc::new(position_of),
             text_of: None,
+            parse_errors: None,
         }
+    }
+
+    /// With where each file's parse errors start: `by_file[file_id]` holds
+    /// the byte offsets of that file's, in any order. A file past the end of
+    /// `by_file` has none.
+    #[must_use]
+    pub fn with_parse_errors(mut self, mut by_file: Vec<Vec<usize>>) -> Self {
+        for starts in &mut by_file {
+            starts.sort_unstable();
+        }
+        self.parse_errors = Some(std::sync::Arc::new(by_file));
+        self
+    }
+
+    /// With `starts` (byte offsets, in any order) as where file `file_id`'s
+    /// parse errors start, in place of what [`Self::with_parse_errors`] gave
+    /// for it: an editor's buffer, parsed again since the ledger was loaded.
+    /// Files are known to have none until one is given.
+    #[must_use]
+    pub fn with_file_parse_errors(mut self, file_id: u16, mut starts: Vec<usize>) -> Self {
+        starts.sort_unstable();
+        let by_file = std::sync::Arc::make_mut(self.parse_errors.get_or_insert_default());
+        let i = usize::from(file_id);
+        if by_file.len() <= i {
+            by_file.resize_with(i + 1, Vec::new);
+        }
+        by_file[i] = starts;
+        self
+    }
+
+    /// Whether a parse error of file `file_id` starts in `range`, or `None`
+    /// when where its parse errors are was not given.
+    #[must_use]
+    pub fn parse_error_in(&self, file_id: u16, range: std::ops::Range<usize>) -> Option<bool> {
+        let by_file = self.parse_errors.as_ref()?;
+        let starts = by_file
+            .get(usize::from(file_id))
+            .map_or(&[][..], Vec::as_slice);
+        let k = starts.partition_point(|&s| s < range.start);
+        Some(starts.get(k).is_some_and(|&s| s < range.end))
     }
 
     /// With `text_of`, which gives the text of bytes `range` of file
@@ -271,6 +315,51 @@ impl SourceLines {
         self.text_of
             .as_ref()
             .and_then(|text_of| text_of(file_id, range))
+    }
+}
+
+#[cfg(test)]
+mod source_lines_tests {
+    use super::SourceLines;
+
+    fn lines() -> SourceLines {
+        SourceLines::new(|_, offset| rustledger_booking::SourcePosition::in_parsed_file(offset, 0))
+    }
+
+    #[test]
+    fn test_parse_error_in_is_unknown_until_given() {
+        assert_eq!(lines().parse_error_in(0, 0..10), None);
+    }
+
+    #[test]
+    fn test_parse_error_in_finds_a_start_in_the_range() {
+        let lines = lines().with_parse_errors(vec![vec![30, 5], vec![]]);
+        assert_eq!(lines.parse_error_in(0, 0..5), Some(false));
+        assert_eq!(lines.parse_error_in(0, 0..6), Some(true));
+        assert_eq!(lines.parse_error_in(0, 6..30), Some(false));
+        assert_eq!(lines.parse_error_in(0, 30..31), Some(true));
+        assert_eq!(lines.parse_error_in(1, 0..100), Some(false));
+        // A file past the list has none.
+        assert_eq!(lines.parse_error_in(7, 0..100), Some(false));
+    }
+
+    #[test]
+    fn test_with_file_parse_errors_replaces_one_file() {
+        let lines = lines()
+            .with_parse_errors(vec![vec![5]])
+            .with_file_parse_errors(0, vec![50])
+            .with_file_parse_errors(2, vec![1]);
+        assert_eq!(lines.parse_error_in(0, 0..10), Some(false));
+        assert_eq!(lines.parse_error_in(0, 40..60), Some(true));
+        assert_eq!(lines.parse_error_in(1, 0..100), Some(false));
+        assert_eq!(lines.parse_error_in(2, 0..2), Some(true));
+        // Given for one file alone, the others are known to have none.
+        let alone = super::SourceLines::new(|_, o| {
+            rustledger_booking::SourcePosition::in_parsed_file(o, 0)
+        })
+        .with_file_parse_errors(1, vec![3]);
+        assert_eq!(alone.parse_error_in(0, 0..100), Some(false));
+        assert_eq!(alone.parse_error_in(1, 0..4), Some(true));
     }
 }
 

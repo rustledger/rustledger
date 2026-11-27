@@ -460,6 +460,11 @@ pub struct SourceMap {
     /// LSP hand one to [`crate::run_plugins`]); placeholders are only added,
     /// never changed, so an id stays valid for the map's life.
     placeholders: Arc<parking_lot::Mutex<Placeholders>>,
+    /// Where each file's parse errors start (byte offsets), by file id: the
+    /// validator reads a directive's text for beancount's verdict on it only
+    /// where one is ([`Self::parse_error_starts`]). Empty, or shorter than
+    /// [`Self::files`], for files with none.
+    parse_errors: Vec<Vec<usize>>,
 }
 
 /// One file's lines, apart from its [`SourceMap`]; see
@@ -622,6 +627,21 @@ impl SourceMap {
     /// include breadth first meets first, as beancount parses it there and
     /// reports the other as a duplicate.
     ///
+    /// Records where file `file_id`'s parse errors start.
+    pub fn set_parse_errors(&mut self, file_id: usize, errors: &[rustledger_parser::ParseError]) {
+        if self.parse_errors.len() <= file_id {
+            self.parse_errors.resize_with(file_id + 1, Vec::new);
+        }
+        self.parse_errors[file_id] = errors.iter().map(|e| e.span.start).collect();
+    }
+
+    /// Where each file's parse errors start, by file id
+    /// ([`Self::set_parse_errors`]); a file past the end has none.
+    #[must_use]
+    pub fn parse_error_starts(&self) -> &[Vec<usize>] {
+        &self.parse_errors
+    }
+
     /// The one rank every surface breaks a cross-file tie by
     /// ([`crate::source_lines`], which the validator and the WASM, FFI and
     /// LSP surfaces all read). A file no include reaches from file 0 (a map

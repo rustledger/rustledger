@@ -809,7 +809,11 @@ use crate::types::{Error, LedgerOptions};
 /// v153: loader v82, unchanged; parse errors at a multi-line string are
 /// placed by the error oracle's reconciler, not by a hand-modeled pass. A
 /// source with a parse error keeps one.
-pub const CACHE_VERSION: u32 = 153;
+/// v154: loader v82, unchanged; validation findings move: a transaction
+/// beancount's grammar discards moves no inventory, so a later `balance` sees
+/// its account without it. Every such source has a parse error, which the
+/// loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 154;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

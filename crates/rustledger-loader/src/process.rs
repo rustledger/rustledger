@@ -2520,6 +2520,7 @@ pub fn source_lines_overlaid<'a>(
         source_map.parse_ranks(),
         Some(source_map.placeholder_lines()),
     )
+    .with_parse_errors(source_map.parse_error_starts().to_vec())
 }
 
 /// [`source_lines`] for one text standing alone as file 0: an editor's

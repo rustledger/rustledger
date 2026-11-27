@@ -231,6 +231,29 @@ garbage
         closes_nonempty: false,
         refused: &[],
     },
+    // A transaction beancount's grammar discards moves no inventory there
+    // either (casc3): the `balance` after it sees `Assets:A` without its
+    // posting, so it holds. rledger kept the posting under error recovery
+    // and reported the balance failing (E2001) beside the parse error. Only
+    // a transaction holding a parse error is asked about, so each surface
+    // hands the validator where its parse errors are.
+    SurfaceCase {
+        name: "a transaction beancount's grammar discards moves no inventory",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+2024-01-02 * \"x\"
+  Assets:A  1 $ USD
+  Assets:B  -1 USD
+2024-01-03 balance Assets:A 0 USD
+",
+        findings: &[Finding {
+            code: "P0012",
+            line: 4,
+            message: "parse error: unexpected input",
+        }],
+        closes_nonempty: false,
+        refused: &[],
+    },
     SurfaceCase {
         name: "no balance check for a balance beancount's grammar discards",
         source: "2024-01-01 open Assets:A

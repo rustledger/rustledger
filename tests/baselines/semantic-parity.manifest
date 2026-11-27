@@ -25,7 +25,6 @@
 2	entries|postings.order|transaction|-|expr+multi-currency
 2	errors|impl-fewer|oracle:LoadError|-|-|-
 2	errors|impl-fewer|oracle:balance-failed|balance|-|-
-1	entries|missing-in-impl|open|-|-
 1	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
 1	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
 1	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
@@ -349,7 +348,7 @@ compat	6e402cfc3b97	match	tests/compatibility/files/beanahead/tests_resources_re
 compat	f258b2116d3f	crash	tests/compatibility/files/beanahead/tests_resources_recon_rx.beancount
 compat	ba91c1349f1b	match	tests/compatibility/files/beanahead/tests_resources_recon_x.beancount
 compat	807af72c8dbc	match	tests/compatibility/files/beanbot/accounts.beancount
-compat	5407ecf28272	match	tests/compatibility/files/beancount-blog-examples/chapter-2_journal.beancount
+compat	5407ecf28272	crash	tests/compatibility/files/beancount-blog-examples/chapter-2_journal.beancount
 compat	e0b8c228bc05	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_accounts.beancount
 compat	af36162f4b54	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_balance.beancount
 compat	cd000082be00	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_transactions.beancount
@@ -364,7 +363,7 @@ compat	c03179661f08	match	tests/compatibility/files/beancount-blog-examples/chap
 compat	94a79f7b19de	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_prices.beancount
 compat	93d94d43aa8e	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_transactions.beancount
 compat	1cb5a5ad222d	match	tests/compatibility/files/beancount-blog-examples/chapter-5_journal-gross.beancount
-compat	d23be2176e48	match	tests/compatibility/files/beancount-blog-examples/chapter-5_journal-net.beancount
+compat	d23be2176e48	crash	tests/compatibility/files/beancount-blog-examples/chapter-5_journal-net.beancount
 compat	3dd35b73d46f	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_accounts.beancount
 compat	02d1d5d3fcda	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_prices.beancount
 compat	c3f076210f9f	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_transactions.beancount
@@ -374,7 +373,7 @@ compat	4a73e48383bc	match	tests/compatibility/files/beancount-blog-examples/chap
 compat	4e6e916a86c2	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_accounts.beancount
 compat	8f4897d69323	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_journal.beancount
 compat	f8ce508067ec	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_transactions.beancount
-compat	6e25a8e0afb1	match	tests/compatibility/files/beancount-blog-examples/chapter-6_total_journal-net.beancount
+compat	6e25a8e0afb1	crash	tests/compatibility/files/beancount-blog-examples/chapter-6_total_journal-net.beancount
 compat	3546f7c0b4fd	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_journal-net.beancount
 compat	455652f96e94	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_src_accounts.beancount
 compat	517391e99d1b	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_src_journal.beancount
@@ -642,7 +641,7 @@ compat	aa5406e1825c	match	tests/compatibility/files/gnucash-to-beancount/data_sa
 compat	7e72b5313683	match	tests/compatibility/files/henriquebastos-gnucash/data_sample.beancount
 compat	4cdb61440fd2	match	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Comment.beancount
 compat	900c0ef0ceb7	match	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Option.beancount
-compat	55f4bf57a3fe	match	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Simple.beancount
+compat	55f4bf57a3fe	crash	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Simple.beancount
 compat	14fe10edac0a	match	tests/compatibility/files/interpolation/e01_augment_empty.beancount
 compat	a17cdbb0d8e4	match	tests/compatibility/files/interpolation/e02_reduce_empty_auto.beancount
 compat	ab12195a53df	match	tests/compatibility/files/interpolation/e03_augment_currency_only.beancount
@@ -954,11 +953,11 @@ compat	579751e9c2d5	match	tests/compatibility/files/portfolio-eidorb/cdk_demo-fu
 compat	b7beddf4cb97	match	tests/compatibility/files/pynomina/nomina_examples_example.beancount
 compat	a7add6e5543e	match	tests/compatibility/files/reds-importers/beancount_reds_importers_example_my.beancount
 compat	9535314fe103	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_box_accrual_test.beancount
-compat	a363d4bdf22b	match	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.gain_loss.beancount
-compat	301578cc8749	match	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount
-compat	375372cbd5ae	match	tests/compatibility/files/reds-plugins/beancount_reds_plugins_effective_date_examples.beancount
-compat	f538da85f831	entries|missing-in-impl|open|-|-	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zerosum-example.beancount
-compat	c315b0b4d17c	match	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zs_test.beancount
+compat	a363d4bdf22b	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.gain_loss.beancount
+compat	301578cc8749	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount
+compat	375372cbd5ae	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_effective_date_examples.beancount
+compat	f538da85f831	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zerosum-example.beancount
+compat	c315b0b4d17c	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zs_test.beancount
 compat	2e70c3e68bd7	match	tests/compatibility/files/smart-importer/tests_data_chinese.beancount
 compat	9053a99daaa7	match	tests/compatibility/files/smart-importer/tests_data_multiaccounts.beancount
 compat	759daca66aed	match	tests/compatibility/files/smart-importer/tests_data_simple.beancount

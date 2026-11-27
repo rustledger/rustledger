@@ -99,8 +99,8 @@ pub fn is_glob_pattern(path: &str) -> bool {
 }
 pub use process::{
     BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
-    LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
-    option_warnings_to_errors, parse_errors_to_ledger_errors, process,
+    LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_error_to_ledger_error,
+    load_raw, load_with_fs, option_warnings_to_errors, parse_errors_to_ledger_errors, process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, plugin_error_to_ledger_error, run_plugins};
@@ -260,6 +260,44 @@ pub enum LoadError {
 }
 
 impl LoadError {
+    /// The diagnostic code every surface reports this error with, the one
+    /// `rledger explain` documents: E0001 a file that cannot be read, E0002
+    /// an include cycle, E0003 an include path outside the ledger's
+    /// directory, E0004 a duplicate include or a file that cannot be
+    /// decrypted, E0005 an include glob that matches nothing, E0006 one that
+    /// cannot be expanded, E0007 too many files. A file's parse errors, folded
+    /// into one, are `LOAD`: each is reported with its own `P` code (see
+    /// [`load_error_to_ledger_error`]).
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "E0001",
+            Self::IncludeCycle { .. } => "E0002",
+            Self::PathTraversal { .. } => "E0003",
+            Self::DuplicateInclude { .. } | Self::Decryption { .. } => "E0004",
+            Self::GlobNoMatch { .. } => "E0005",
+            Self::GlobError { .. } => "E0006",
+            Self::TooManyFiles { .. } => "E0007",
+            Self::ParseErrors { .. } => "LOAD",
+        }
+    }
+
+    /// A suggested fix for this error, where there is one.
+    #[must_use]
+    pub const fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::IncludeCycle { .. } => Some("break the cycle by removing one of the includes"),
+            Self::PathTraversal { .. } => Some("use paths within the base directory"),
+            Self::DuplicateInclude { .. } => Some(
+                "the file is included from more than one place; its directives are loaded once",
+            ),
+            Self::GlobNoMatch { .. } => {
+                Some("check that the glob pattern is correct and files exist")
+            }
+            _ => None,
+        }
+    }
+
     /// Whether the ledger the load produced is still every file the include
     /// graph names, read once, despite this error, so a figure derived from it
     /// is right. True for a duplicate include and an include cycle (the file

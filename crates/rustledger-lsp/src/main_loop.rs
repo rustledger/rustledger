@@ -5060,12 +5060,12 @@ mod tests {
                 .iter()
                 .map(|(c, l, _)| (c.as_str(), *l))
                 .collect::<Vec<_>>(),
-            [("E2001", 3), ("LOAD", 0)],
+            [("E0001", 0), ("E2001", 3)],
             "check's reference: {check:?}"
         );
         let check_load: Vec<_> = check
             .iter()
-            .filter(|(c, ..)| c == "LOAD")
+            .filter(|(c, ..)| c == "E0001")
             .cloned()
             .collect();
 
@@ -5076,10 +5076,10 @@ mod tests {
         let published = codes_only(&located);
         assert_eq!(
             last_published_for(&published, &main).map(sorted),
-            Some(vec![("E2001".to_string(), 3), ("LOAD".to_string(), 0)]),
+            Some(vec![("E0001".to_string(), 0), ("E2001".to_string(), 3)]),
             "{published:?}"
         );
-        assert_eq!(published_located(&located, &main, &["LOAD"]), check_load);
+        assert_eq!(published_located(&located, &main, &["E0001"]), check_load);
 
         std::fs::write(&missing, "2024-01-01 open Assets:M\n").expect("create missing");
         state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
@@ -5119,7 +5119,7 @@ mod tests {
                 .iter()
                 .map(|(c, l, _)| (c.as_str(), *l))
                 .collect::<Vec<_>>(),
-            [("LOAD", 1), ("LOAD", 2)],
+            [("E0001", 2), ("E0002", 1)],
             "check's reference: {check:?}"
         );
         assert!(
@@ -5135,7 +5135,7 @@ mod tests {
         open_doc(&mut state, &main, main_text);
         let located = drain_published_with_messages(&receiver);
         let published = codes_only(&located);
-        assert_eq!(published_located(&located, &b, &["LOAD"]), check);
+        assert_eq!(published_located(&located, &b, &["E0001", "E0002"]), check);
         assert_eq!(
             last_published_for(&published, &main),
             Some(vec![]),

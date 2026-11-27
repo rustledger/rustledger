@@ -675,7 +675,8 @@ pub fn validate_with_filesystem(
     // The parse errors are rendered here one by one with their code and line,
     // rather than folded by `process` into one line-less `parse errors in
     // <path>`; every other load error stays for `process`, the canonical
-    // renderer of those (code `LOAD`, with the include's file and line), as
+    // renderer of those (`load_error_to_ledger_error`: E0001-E0007, at the
+    // include's file and line), as
     // in `Ledger::from_file_map`.
     let parse_failures = load_result.take_parse_errors();
     let mut errors = load_errors_to_errors(&parse_failures, &load_result.source_map);
@@ -860,7 +861,7 @@ fn query_with_filesystem(
     // as the FFI's `query-file` and every other WASM query surface list them.
     // This refused before `process`, so no `Ledger` existed and it listed none
     // (#2960). Every other load error stays for `process`, which reports it
-    // as `LOAD`.
+    // with its E000x code.
     let parse_failures = load_result.take_parse_errors();
     let parse_blocks_queries = parse_failures.iter().any(LoadError::blocks_queries);
     let parse_errors = load_errors_to_errors(&parse_failures, &load_result.source_map);
@@ -947,7 +948,7 @@ fn query_with_filesystem(
         &ledger.source_map,
         LedgerContext::from_ledger(&ledger),
     );
-    // `process` already carries every load error as a `LOAD` ledger error,
+    // `process` already carries every load error as a ledger error (E000x),
     // so the reported list is the ledger's, not the load's again.
     let load_errors = errors;
     match executor.execute(&query) {
@@ -1183,9 +1184,9 @@ mod load_error_tests {
     /// Both multi-file surfaces report a load error alike: `validateMultiFile`
     /// (and `validateWithHost`, the same `validate_with_filesystem`) and
     /// `Ledger.fromFiles`. A duplicate include and a missing include each
-    /// keep the code `LOAD` and the place `process` gives them (the missing
-    /// include's file and line; none for the duplicate, as `rledger check`
-    /// prints it), beside a parse error rendered with its own code and line.
+    /// get the code and the place `process` gives them, as `rledger check`
+    /// prints them (E0001 at the missing include's file and line; E0004 on
+    /// line 1 of the file included twice), beside a parse error rendered with its own code and line.
     /// The validate surface once rendered every load error itself, and its
     /// load errors had no code.
     #[test]
@@ -1236,17 +1237,21 @@ mod load_error_tests {
                 .map(|e| (e.code.clone(), e.file.clone(), e.line))
         };
         let main = Some("main.beancount".to_string());
-        // `process` gives a duplicate no place, as `rledger check` prints it
-        // with none.
+        // A duplicate on line 1 of the file included twice, as `rledger
+        // check` prints it.
         assert_eq!(
             load("Duplicate filename"),
-            Some((Some("LOAD".to_string()), None, None)),
+            Some((
+                Some("E0004".to_string()),
+                Some("x.beancount".to_string()),
+                Some(1)
+            )),
             "{:?}",
             validated.errors
         );
         assert_eq!(
             load("missing.beancount"),
-            Some((Some("LOAD".to_string()), main.clone(), Some(3))),
+            Some((Some("E0001".to_string()), main.clone(), Some(3))),
             "{:?}",
             validated.errors
         );

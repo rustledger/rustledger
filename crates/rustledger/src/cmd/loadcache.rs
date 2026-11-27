@@ -167,7 +167,7 @@ pub fn load_result_cached(
 /// not be read: a decryption failure or an I/O error other than not-found
 /// (an include naming a directory). bean-query raises an uncaught `OSError`
 /// there and prints no rows; answering would silently leave the file out (a
-/// locked gpg-agent would make every balance zero). Every other LOAD error
+/// locked gpg-agent would make every balance zero). Every other load error
 /// (an include of a missing file, an include cycle, a duplicate include, an
 /// empty glob) is reported and the query answers, as bean-query answers.
 ///

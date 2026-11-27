@@ -230,7 +230,7 @@ impl LedgerState {
                 // Parse errors are the LSP's own to report, each on its line
                 // from a fresh parse of its file. Left in, `process` would
                 // also give each file one line-less `parse errors in <path>`
-                // LOAD error; taken out, the ledger's LOAD errors are exactly
+                // LOAD error; taken out, the ledger's load errors are exactly
                 // the include failures [`Self::load_errors`] publishes.
                 drop(raw.take_parse_errors());
                 process(raw, &options).map(|ledger| (ledger, raw_directives))
@@ -342,7 +342,7 @@ impl LedgerState {
         self.ledger.as_ref()
     }
 
-    /// The load errors of the loaded ledger (code `LOAD`): a missing or
+    /// The load errors of the loaded ledger (E0001-E0007): a missing or
     /// unreadable include, an include cycle, a duplicate include, an include
     /// glob that matches nothing, and the like, as the loader's `process`
     /// words and locates them, so as `rledger check` reports them (#2959).
@@ -354,7 +354,7 @@ impl LedgerState {
         self.ledger
             .iter()
             .flat_map(|ledger| ledger.errors.iter())
-            .filter(|e| e.code == "LOAD")
+            .filter(|e| e.is_load_error())
     }
 
     /// How numerals should be grouped when formatting `path`.

@@ -763,7 +763,11 @@ use crate::types::{Error, LedgerOptions};
 /// such an entry's body is parsed on its own too, three levels deep at most.
 /// Parsed directives do not move, and every such source has a parse error,
 /// before and after, which the loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 143;
+/// v144: loader v79, unchanged. A `Ledger` archives its load errors, whose
+/// code is now E0001-E0007 (it was `LOAD`), an unreadable include's message
+/// `failed to read included file ...`, and a duplicate include on line 1 of
+/// the file included twice, as `rledger check` reports them.
+pub const CACHE_VERSION: u32 = 144;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

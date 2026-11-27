@@ -108,9 +108,13 @@ const ALLOWED: &[Allowed] = &[
             (GRAMMAR_PLUGIN, "E8004", 0),
             (PYTHON_PLUGINS, "PLUGIN", 21),
             (UC_PLUGIN_IMPORT, "E8004", 0),
+            (MISSPELLED_PLUGIN, "E8004", 0),
+            (MISSPELLED_PLUGIN_CONFIG, "E8004", 0),
         ],
         surface: &[
             (UC_PLUGIN_IMPORT, "E8006", 1),
+            (MISSPELLED_PLUGIN, "E8006", 1),
+            (MISSPELLED_PLUGIN_CONFIG, "E8006", 1),
             (UNKNOWN_PLUGIN, "E8006", 3),
             (WASM_PLUGIN, "E8006", 2),
             (GRAMMAR_PLUGIN, "E8006", 2),
@@ -242,6 +246,11 @@ const WASM_PLUGIN: &str = "crates/rustledger-loader/tests/fixtures/with_wasm_plu
 const GRAMMAR_PLUGIN: &str =
     "tests/fixtures/lima-tests/LexerAndParserErrors.GrammarExceptionsPlugin.beancount";
 const PYTHON_PLUGINS: &str = "tests/fixtures/python-plugins/with_plugins.beancount";
+// `beancount.plugin.unrealized` (singular `plugin`): no native plugin answers
+// to that path, so it is a Python module reference like any other.
+const MISSPELLED_PLUGIN: &str = "tests/fixtures/lima-tests/ParserPlugin.Plugin.beancount";
+const MISSPELLED_PLUGIN_CONFIG: &str =
+    "tests/fixtures/lima-tests/ParserPlugin.PluginWithConfig.beancount";
 const DOC_DISCOVERY: &str = "crates/rustledger-loader/tests/fixtures/doc_discovery.beancount";
 const DOC_DISCOVERY_UNKNOWN: &str =
     "crates/rustledger-loader/tests/fixtures/doc_discovery_unknown.beancount";

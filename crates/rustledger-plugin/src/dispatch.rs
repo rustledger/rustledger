@@ -132,8 +132,8 @@ pub enum PluginRunError {
 ///
 /// This is the first step of [`resolve_plugin`] and the one definition of
 /// "native" a host should use (#2486). A `python:`-forced name is never
-/// native. Prefixed names resolve via their short last segment inside the
-/// registry.
+/// native. A module path resolves only when it is exactly one a native
+/// plugin answers to (`native::native_plugin_name`).
 #[must_use]
 pub fn find_native_plugin<'a>(
     name: &str,
@@ -159,10 +159,10 @@ pub fn find_native_plugin<'a>(
 /// where `auto` is declared. It used to be refused as an unsupported
 /// Python module. `pedantic`, whose parts all run after booking, is one
 /// native plugin instead. A `python:`-forced name is never expanded, and a
-/// name resolves by its last segment, as [`find_native_plugin`] resolves it.
+/// name resolves as [`find_native_plugin`] resolves it (`native_plugin_name`).
 pub fn plugin_parts(name: &str, force_python: bool) -> impl Iterator<Item = &str> {
     const AUTO: &[&str] = &[crate::native::AUTO_ACCOUNTS_NAME, "implicit_prices"];
-    let parts = match name.rsplit('.').next() {
+    let parts = match crate::native::native_plugin_name(name) {
         Some("auto") if !force_python => Some(AUTO),
         _ => None,
     };

@@ -68,6 +68,14 @@ Rustledger has 33 native plugins. These 30 match Python beancount behavior:
 
 `long_short` deliberately diverges from its Python counterpart (`beancount_reds_plugins.capital_gains_classifier.long_short` 0.4.0, and `beancount_ln_plugins.ln.long_short`): closing a written option or any short position is always short-term whatever its holding period (US IRC 1234(b), and 1233(a) for short sales), where the Python plugin books it by holding period like a sale of a long lot, and a cover's gain carries the posting's sign. `rledger report capgains` already applied the short rule; the plugin now matches it (issue #2733).
 
+A native plugin is named by exactly one of: its bare name (`zerosum`),
+beancount's module path for it (`beancount.plugins.zerosum`), or the exact
+module path of the third-party plugin it replaces
+(`beancount_reds_plugins.zerosum.zerosum`; the list is
+`rustledger_plugin::THIRD_PARTY_MODULES`). Any other module path is not
+native, so a misspelled one (`beancount.plugin.unrealized`) is not found, as
+beancount does not find it either.
+
 Additionally, `document_discovery` auto-discovers documents from `option "documents"` directories.
 
 **Workaround**: Use rustledger's native plugins where available, or remove unsupported plugin directives.
@@ -847,7 +855,7 @@ These do not affect the underlying values.
 ### The `effective_date` Plugin
 
 rustledger runs `beancount_reds_plugins.effective_date.effective_date` natively
-(any module name whose last segment is `effective_date`). It moves the same
+(that module path, `effective_date`, or `beancount.plugins.effective_date`). It moves the same
 postings to the same holding accounts as upstream on an ordinary config, and
 deliberately differs in five places:
 

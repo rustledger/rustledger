@@ -2114,7 +2114,7 @@ e31d407f8ada
 1	impl-fewer|oracle:ParserSyntaxError|top|DATE ASTERISK
 1	impl-fewer|oracle:lex:token|top|NUMBER error
 1	impl-more|impl:P0006+P0012+P0026|indented|INDENT error
-1	impl-more|impl:P0006+P0012|indented|DATE CLOSE
+1	impl-more|impl:P0006|indented|DATE CLOSE
 1	impl-more|impl:P0006|top|ACCOUNT
 1	impl-more|impl:P0006|top|DATE OPEN
 1	impl-more|impl:P0012+P0024|top|CURRENCY error

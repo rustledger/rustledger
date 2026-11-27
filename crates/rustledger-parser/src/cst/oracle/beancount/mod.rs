@@ -461,18 +461,22 @@ pub fn deviation_overlays() -> Vec<(&'static str, &'static str)> {
 /// The reference's slots on `src`, overlays applied, as `(line, kind)` with
 /// `kind` `"lexical"`, `"syntax"` or `"fatal"`: what reconciliation would
 /// hold rledger's errors to. For drift tests against beancount.
+///
+/// The places overlays keep for rledger's own diagnostics
+/// (`SlotKind::StandIn`) are no errors of beancount's, so they are left out.
 pub fn overlaid_slots(src: &str) -> Vec<(u32, &'static str)> {
     reference(src, false)
         .slots
         .iter()
-        .map(|s| {
+        .filter_map(|s| {
             let kind = match s.kind {
                 SlotKind::Lexical => "lexical",
                 SlotKind::Syntax => "syntax",
                 SlotKind::Fatal => "fatal",
                 SlotKind::Semantic => "semantic",
+                SlotKind::StandIn => return None,
             };
-            (s.line, kind)
+            Some((s.line, kind))
         })
         .collect()
 }

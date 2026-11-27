@@ -759,6 +759,14 @@ A number with more significant digits than rledger's decimal type holds
 it. See "Decimal Precision" in the project's `AGENTS.md`. Overlay
 `decimal-precision`.
 
+### P11. A BOM in an Account
+
+beancount's lexer reads a word holding a BOM, with a `:` in it, as an
+account, so its parser reports nothing there; its `Invalid account name` for
+it is a load-time error in rledger's terms. rledger reports the mid-file BOM
+(`P0026`) instead, once per line however many BOMs or accounts the line
+holds, and no other syntax error on that line. Overlay `bom-in-account`.
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

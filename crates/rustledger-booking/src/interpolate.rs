@@ -98,6 +98,22 @@ pub enum InterpolationError {
         reason: &'static str,
     },
 
+    /// A posting held at a cost carries a price whose number is to be
+    /// computed (`@`, `@@`, `@ USD`): beancount's "Cannot infer price for
+    /// postings with units held at cost". The cost decides the posting's
+    /// weight, so the balance says nothing about the price. It used to be
+    /// inert (#1919); a price NUMBER without a currency (`@ 12`) still takes
+    /// the cost's currency (#3047).
+    #[error(
+        "cannot infer the price of the {account} posting: its units are held at a cost, \
+         so the balance does not determine a price; write the price (e.g. `@ 12.00 USD`) \
+         or remove it"
+    )]
+    PriceBesideCost {
+        /// The account of the posting held at a cost.
+        account: rustledger_core::Account,
+    },
+
     /// Solving a bare price sigil from the residual gives a negative price
     /// (#1915). Refused for the same reason as [`Self::NegativeInferredCost`]:
     /// the balance is asking for something that is not a price.
@@ -184,6 +200,7 @@ impl InterpolationError {
             Self::UnsolvableUnits { account, .. }
             | Self::AmbiguousBarePriceCurrency { account, .. }
             | Self::UnsolvablePrice { account, .. }
+            | Self::PriceBesideCost { account }
             | Self::NegativeInferredPrice { account, .. }
             | Self::CannotInferCurrency { account, .. } => Some(account),
             Self::MultipleMissing { .. }
@@ -1555,7 +1572,7 @@ fn interpolate_inner(
     // Postings carrying a bare price sigil (`@` / `@@` with no amount), whose
     // price is solved from the residual once the currency is known (#1915):
     // `(posting index, units, sigil kind)`. Cost-bearing postings never appear
-    // here — cost beats price, so their sigil does not affect the balance.
+    // here: a sigil beside a cost is refused before the scan.
     let mut bare_price: Vec<(usize, Amount, rustledger_core::PriceKind)> = Vec::new();
 
     // Postings priced `@ 1.20` — price number written, price currency elided.
@@ -1577,6 +1594,24 @@ fn interpolate_inner(
     // writes (#1911). Empty for every posting that weighs at its own units,
     // which is the overwhelming majority — `HashMap::new` does not allocate.
     let mut scaled_missing: HashMap<usize, (Currency, Decimal)> = HashMap::new();
+
+    // A price whose number is to be computed, beside a cost: refused, as
+    // beancount refuses it (`booking_full.interpolate_group`, "Cannot infer
+    // price for postings with units held at cost"). A price number without
+    // a currency (`@ 12`) is data and takes the cost's currency (#3047).
+    if let Some(posting) = transaction.postings.iter().find(|p| {
+        p.cost.is_some()
+            && p.price.as_ref().is_some_and(|price| {
+                !matches!(
+                    price.amount,
+                    Some(IncompleteAmount::Complete(_) | IncompleteAmount::NumberOnly(_))
+                )
+            })
+    }) {
+        return Err(InterpolationError::PriceBesideCost {
+            account: posting.account.clone(),
+        });
+    }
 
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
@@ -1774,10 +1809,8 @@ fn interpolate_inner(
                         // both answer the request with silence and let an
                         // unbalanced transaction look balanced.
                         //
-                        // Reached only when the posting has no cost spec (the cost
-                        // branches come first), which is right: cost beats price,
-                        // so alongside a cost the sigil is inert — it feeds implicit
-                        // price directives and never the balance.
+                        // Reached only when the posting has no cost spec: a sigil
+                        // beside a cost is refused before the scan.
                         bare_price.push((i, amount.clone(), price.kind));
                     }
                 } else {
@@ -4886,12 +4919,12 @@ mod tests {
         }
     }
 
-    /// Cost beats price, so alongside a cost the sigil never touches the
-    /// balance — it feeds implicit price directives only. Treating it as a
-    /// weight unknown there would reject transactions that are perfectly
-    /// determined by their cost basis.
+    /// A price to compute beside a cost is refused, as beancount refuses it
+    /// ("Cannot infer price for postings with units held at cost"): the cost
+    /// decides the weight, so the balance cannot give the price. It was
+    /// inert (#1919).
     #[test]
-    fn a_bare_price_beside_a_cost_is_inert() {
+    fn refuses_a_bare_price_beside_a_cost() {
         let txn = Transaction::new(date(2010, 5, 28), "Buy with a bare price")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(2), "HOOL"))
@@ -4903,8 +4936,27 @@ mod tests {
                 Amount::new(dec!(-600.00), "USD"),
             ));
 
-        let result = interpolate(&txn).expect("the cost determines the weight");
-        assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+        match interpolate(&txn) {
+            Err(InterpolationError::PriceBesideCost { account }) => {
+                assert_eq!(account.as_str(), "Assets:Stock");
+            }
+            other => panic!("expected PriceBesideCost, got {other:?}"),
+        }
+        // A price NUMBER beside a cost is data, not a request (#3047).
+        let numbered = Transaction::new(date(2010, 5, 28), "Buy with a price number")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(2), "HOOL"))
+                    .with_cost(per_unit_cost(dec!(300.00), "USD"))
+                    .with_price(rustledger_core::PriceAnnotation {
+                        kind: rustledger_core::PriceKind::Unit,
+                        amount: Some(IncompleteAmount::NumberOnly(dec!(310))),
+                    }),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-600.00), "USD"),
+            ));
+        assert!(interpolate(&numbered).is_ok());
     }
 
     /// Both the units number and the price missing is two unknowns on one

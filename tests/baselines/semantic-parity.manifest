@@ -19,12 +19,11 @@
 15	entries|extra-in-impl|close|-|-
 8	entries|extra-in-impl|open|-|-
 4	entries|postings.order|transaction|-|multi-currency
-2	balances|extra-in-impl|account|-|-
+3	balances|extra-in-impl|account|-|-
 2	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
 2	entries|postings.order|transaction|-|elided+multi-currency
 2	entries|postings.order|transaction|-|expr+multi-currency
 2	errors|impl-fewer|oracle:LoadError|-|-|-
-2	errors|impl-fewer|oracle:balance-failed|balance|-|-
 1	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
 1	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
 1	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
@@ -911,8 +910,8 @@ compat	7eef4f1a9d0b	match	tests/compatibility/files/parser-lima/test-cases_PushP
 compat	c87b568f1150	match	tests/compatibility/files/parser-lima/test-cases_Simple.CRLF.beancount
 compat	664f96bcaa26	match	tests/compatibility/files/parser-lima/test-cases_Simple.beancount
 compat	8673c3bc5e36	match	tests/compatibility/files/parser-lima/test-cases_Sort.OpenBeforeTransactionSameDate.beancount
-compat	8c9b9914c14b	errors|impl-fewer|oracle:balance-failed|balance|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInPosting.beancount
-compat	0caba17429d5	errors|impl-fewer|oracle:balance-failed|balance|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInTransactionLine.beancount
+compat	8c9b9914c14b	balances|extra-in-impl|account|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInPosting.beancount
+compat	0caba17429d5	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInTransactionLine.beancount
 compat	a6c37b6770f5	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.NoFinalNewline.beancount
 compat	20922ecbd2ad	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.SingleErrorTokenAtTopLevel.beancount
 compat	3e8066f07408	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.CostNegative.beancount

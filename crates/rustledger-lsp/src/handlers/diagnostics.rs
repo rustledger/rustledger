@@ -1146,7 +1146,7 @@ pub fn all_diagnostics(
         // Use ledger-wide options when a ledger is loaded (handles multi-file
         // ledgers where name_* options may be in included files); fall back
         // to per-file options for single-file validation.
-        let validation_options = if let Some(ls) = ledger_state
+        let mut validation_options = if let Some(ls) = ledger_state
             && let Some(ledger) = ls.ledger()
         {
             // The current buffer's lines from its text (#2901). Another open
@@ -1168,6 +1168,22 @@ pub fn all_diagnostics(
             build_validation_options_from_file(&result.options, base_dir)
                 .with_source_lines(rustledger_loader::source_lines_of_text(source))
         };
+        // Where the current buffer's parse errors are, from its fresh parse:
+        // the balance check asks beancount's verdict on a transaction
+        // holding one (casc3). As file 0 when it stands alone.
+        let buffer_file_id = if ledger_state.and_then(LedgerState::ledger).is_some() {
+            current_file_id
+        } else {
+            Some(0)
+        };
+        if let Some(fid) = buffer_file_id {
+            validation_options.source_lines = validation_options.source_lines.map(|lines| {
+                lines.with_file_parse_errors(
+                    fid,
+                    result.errors.iter().map(|e| e.span.start).collect(),
+                )
+            });
+        }
 
         // Build plugin context for running plugins before validation.
         // Multi-file: merge ledger plugins with fresh buffer plugins (so

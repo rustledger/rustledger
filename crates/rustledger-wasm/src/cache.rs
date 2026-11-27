@@ -782,7 +782,12 @@ use crate::types::{Error, LedgerOptions};
 /// beancount, so a directive's or a posting's comment text now holds the
 /// rest of the line (`; c\rmore`, which was `; c`), and parse errors move
 /// on inputs whose line went on past such a `\r`.
-pub const CACHE_VERSION: u32 = 146;
+/// v147: loader v82 (after #3060's v146);
+/// both payloads' validation findings move. A price to compute beside a
+/// cost (`{10 USD} @ USD`) is a booking failure where it was ignored. A
+/// file with bytes that are not UTF-8 reports them (the loader's v82), but
+/// WASM takes text, so only its pin moves for that.
+pub const CACHE_VERSION: u32 = 147;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -814,7 +819,7 @@ pub const CACHE_VERSION: u32 = 146;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 81;
+const LOADER_CACHE_VERSION_PIN: u32 = 82;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -38,13 +38,12 @@ Files with expected Python-only errors (plugin configuration, deprecated options
 
 ### 1. Multi-Currency Transactions
 
-Python beancount allows transactions with multiple currencies without explicit conversion prices. Rustledger requires either:
-
-- A price (`@` or `@@`) annotation
-- All postings in the same currency
-- Explicit balancing
-
-**Workaround**: Add `@ 1.0 USD` or appropriate price to multi-currency transactions.
+Both engines refuse a transaction whose postings in different currencies do
+not balance (`Assets:A 1 USD` against `Assets:B -1 EUR`, no price): each
+currency must balance on its own unless a price or cost converts it. The
+only difference is the report. beancount gives one error listing every
+residual (`Transaction does not balance: (1 USD, -1 EUR)`), and rustledger
+gives one `E3001` per unbalanced currency, on the same line.
 
 ### 2. Python Plugin Loading
 
@@ -75,11 +74,22 @@ Additionally, `document_discovery` auto-discovers documents from `option "docume
 
 ### 3. Push/Pop Meta and Tag Validation
 
-Python beancount validates that `pushtag`/`poptag` and `pushmeta`/`popmeta` directives are balanced. Rustledger's validation is less strict in some edge cases.
+Both engines report the same four mistakes: a `poptag` or `popmeta` of
+something never pushed (`P0020`, `P0022`), and a `pushtag` or `pushmeta`
+never popped (`P0021`, `P0023`). The difference is where an unpopped push is
+reported: beancount reports it at the end of the file (`<load>:0`),
+rustledger on the `pushtag` or `pushmeta` line. See the `grammar-*` rows of
+[Upstream Check Coverage](upstream-checks.md).
 
-### 4. Deprecated Options
+### 4. Deprecated and Unknown Options
 
-Python beancount reports errors for deprecated options like `plugin_processing_mode`. Rustledger ignores unknown options.
+Both engines report an unknown option name (`E7001`, beancount's `Invalid
+option`), an option that may not be set (`E7005`), and each of beancount's
+three deprecated options (`E7004`: `inferred_tolerance_multiplier`,
+`allow_pipe_separator`, `allow_deprecated_none_for_tags_and_links`), with an
+invalid value for a known option reported as `E7002` or `E7008`. rustledger
+reports them when it loads the file, on the option's line, where beancount's
+parser reports them.
 
 ### 5. BQL Display Precision
 

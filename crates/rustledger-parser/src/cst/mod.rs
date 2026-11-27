@@ -59,7 +59,6 @@ mod green;
 mod lossless_tokens;
 mod oracle;
 mod parser;
-mod recovery;
 mod syntax_kind;
 mod trivia;
 mod txn_header;

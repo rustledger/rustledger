@@ -7,9 +7,10 @@
 //! cannot start with (an indented line is discarded to its end), shifts an
 //! end of line, a date or an undated keyword, and its lexer still reports
 //! every invalid token, invalid date and malformed number.
-//! `cst/recovery.rs` runs that machine over a port of beancount's lexer and
-//! keeps, on each line inside the window, as many of rledger's errors as
-//! beancount's lexer finds there.
+//! The parser's error oracle (`cst/oracle/`) replays that machine over
+//! beancount's own grammar and tokens, and holds each line of rledger's
+//! errors to it: on a line inside the window, as many as beancount's lexer
+//! finds there.
 //!
 //! Every expected count below was checked against `bean-check` 3.2.3
 //! (`beancount.parser.parser.parse_string`), with one deliberate difference

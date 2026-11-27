@@ -537,14 +537,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         bom_offset,
         &grammar_failures,
     );
-    // After every pass: it replaces whole lines with another parse's.
-    super::recovery::model_stray_cr_lines(
-        &mut errors,
-        source_file.syntax(),
-        stripped,
-        bom_offset,
-        use_green,
-    );
     // Make the errors agree with beancount's, computed from its grammar (the
     // error oracle). The hand-modeled passes above are being retired behind
     // it; `RLEDGER_ERROR_ORACLE=0` turns it off to compare them alone.
@@ -596,12 +588,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         alignment,
         defect_spans,
     }
-}
-
-/// The parse errors of `src`, a text with no leading BOM, for
-/// `recovery::model_stray_cr_lines`.
-pub(super) fn parse_analog_errors(src: &str, use_green: bool) -> Vec<crate::ParseError> {
-    parse_via_cst_inner(src, /* collect_occurrences = */ false, use_green).errors
 }
 
 // ---- Directive converters --------------------------------------
@@ -10196,14 +10182,10 @@ enum Trigger {
 /// line and does start a window: beancount's string runs to the end of
 /// the file, so nothing after it is reported there either.)
 ///
-/// What this pass leaves alone, the general model after it
-/// ([`super::recovery::quiet_bison_recovery`], #2993 part B) reads on
-/// beancount's own tokens: the window after every failed line (a header, a
-/// posting, a metadata line), the dates and keywords bison shifts mid-line,
-/// and the entry it builds at one (#2979). This pass stays ahead of it for
-/// the shapes it calibrates, which the general model does not yet cover
-/// alone (disabling either window kind here moves inputs away from
-/// beancount: the line a BOM starts, an invalid second date).
+/// What this pass leaves alone, the error oracle after it (`super::oracle`)
+/// reads on beancount's own grammar: the window after every failed line (a
+/// header, a posting, a metadata line), the dates and keywords bison shifts
+/// mid-line, and the entry it builds at one (#2979).
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree once and
 /// lexes each line after a failed line at most once.

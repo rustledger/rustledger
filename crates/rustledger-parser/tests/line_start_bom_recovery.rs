@@ -5,7 +5,7 @@
 //! byte) as the start of an invalid token, which runs to the next blank. So
 //! the statement it starts, or breaks into, fails right there, and bison's
 //! recovery stays quiet about the lines after it until its grammar has read
-//! three tokens again (`quiet_after_failed_line_starts`): a transaction's
+//! three tokens again (the error oracle replays that): a transaction's
 //! postings after its BOM-led header, or the rest of a block a BOM line
 //! breaks into, are no errors there. Each was an orphan `unexpected input`
 //! here, where the BOM line ended the block.

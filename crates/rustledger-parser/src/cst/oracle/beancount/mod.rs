@@ -793,10 +793,18 @@ mod tests {
     /// shape of beancount's error recovery: failed lines and the quiet ones
     /// after them, entries its recovery starts mid-line (each parsed once
     /// more on its own for its builder's errors), stray `\r`s, BOMs. (These
-    /// are the shapes the hand-modeled recovery pass was held linear on.)
+    /// are the shapes the hand-modeled recovery passes were held linear on.)
     #[test]
     fn test_parse_with_the_oracle_is_linear_on_recovery_shapes() {
-        let shapes: [(&str, fn(usize) -> String); 16] = [
+        let shapes: [(&str, fn(usize) -> String); 22] = [
+            ("`$` lines", |n| "$\n".repeat(n)),
+            ("`!` lines", |n| "!\n".repeat(n)),
+            ("`$` and a posting", |n| "$\n  Assets:A 1 USD\n".repeat(n)),
+            ("`$` then postings", |n| {
+                "$\n".to_string() + &"  Assets:A 1 USD\n".repeat(n)
+            }),
+            ("`pushmeta k:` lines", |n| "pushmeta k: \"v\"\n".repeat(n)),
+            ("one long `$` line", |n| "$ ".repeat(n) + "\n"),
             ("failed headers and blanks", |n| {
                 "pushtag #a $\n\n  2024-02-30 5\n".repeat(n)
             }),

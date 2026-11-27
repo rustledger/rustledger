@@ -9,8 +9,8 @@
 //! token it cannot read, `$`, `2<BOM>?02`; a marker alone on its line, `!`;
 //! an undated declaration holding an invalid token, `pushmeta k: "v"`), the
 //! lines after it report only the lexer's own errors until that window ends.
-//! `quiet_after_failed_line_starts` models it for these lines with the rules
-//! of a dated line's window (#2979).
+//! The error oracle replays that window from beancount's own grammar; it
+//! was first modeled for these lines with a dated line's rules (#2979).
 //!
 //! Where a line in the window holds a date or an undated keyword, bison
 //! shifts it and may end its recovery inside the line, which is not modeled:

@@ -756,7 +756,14 @@ use crate::types::{Error, LedgerOptions};
 /// booking method is reported on its `open`'s line. Parsed directives do
 /// not move, and every such source has a parse error, before and after,
 /// which the loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 142;
+/// v143: loader v79, unchanged (after the stray-`\r` PR's v142, one
+/// higher since both PRs move parse errors);
+/// parse errors move. A recovery that starts in the body of an entry bison
+/// builds mid-line goes on past that body, and an entry bison builds inside
+/// such an entry's body is parsed on its own too, three levels deep at most.
+/// Parsed directives do not move, and every such source has a parse error,
+/// before and after, which the loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 143;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

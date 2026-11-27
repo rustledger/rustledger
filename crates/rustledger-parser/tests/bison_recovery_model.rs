@@ -695,3 +695,116 @@ fn test_parse_misgrouped_number_beside_a_bom_token_is_reported() {
         ),
     ]);
 }
+
+/// A line of the body of an entry bison builds mid-line (#2979) that fails
+/// starts a recovery of its own, which goes on past the entry's last indented
+/// line: the column-0 lines bison discards after it are quiet, as after any
+/// failed line (`"s"` after a phantom transaction's failing posting, after a
+/// phantom `open` whose body takes no posting).
+#[test]
+fn test_parse_recovery_goes_on_past_the_body_of_an_entry_built_mid_line() {
+    assert_counts(&[
+        (
+            "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\"s\"\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\n\"s\"\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\"s\"\n\"t\"\n\"u\"\n".to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            format!("{P}  2024-01-02 open Assets:Z\n  kk: \"v\"\n  Assets:A 1 USD\n\"s\"\n"),
+            vec![(2, 1), (4, 1)],
+        ),
+        (
+            "2024-01-02 2024-01-03 open Assets:C\n  Assets:A 1 USD 2024-01-02\ninclude\n"
+                .to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+        (
+            "2024-01-02 2024-01-03 * \"n\"\n  Assets:A 1 USD 2024-01-02\n2024-01-02 123\n"
+                .to_string(),
+            vec![(1, 1), (2, 1)],
+        ),
+    ]);
+}
+
+/// An entry bison builds inside the body of one it built mid-line (`$`, then
+/// `  2024-01-02 open Assets:Z` twice: the second fails the first `open`'s
+/// body at its date, and bison builds it in turn) is parsed on its own too,
+/// up to `MAX_PHANTOM_DEPTH` levels, so the first entry's header line is
+/// quiet, as in beancount, where it kept its error.
+#[test]
+fn test_parse_entry_built_inside_an_entry_built_mid_line_is_modeled() {
+    let open = "  2024-01-02 open Assets:Z\n";
+    assert_counts(&[
+        (format!("$\n{open}{open}"), vec![(1, 1), (3, 1)]),
+        (
+            format!("$\n{open}{open}{open}  x\n"),
+            vec![(1, 1), (3, 1), (4, 1), (5, 1)],
+        ),
+        (
+            format!("$\n{}  x\n", open.repeat(6)),
+            vec![(1, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1)],
+        ),
+        (
+            format!("{P}{open}  2024-01-02 * \"n\"\n    Assets:A 1 USD 5\n\"s\"\n"),
+            vec![(2, 1), (3, 1), (4, 1)],
+        ),
+    ]);
+}
+
+/// Entries built inside one another, and windows going on past their bodies,
+/// cost a bounded number of parses of the input: a large file of them parses
+/// in time linear in its size. Each shape is timed at `SMALL` and at eight
+/// times as many lines, and the large run must take no more than eight times
+/// the small one, with a wide margin for a loaded machine (quadratic work
+/// would take about sixty-four times as long).
+#[test]
+fn test_parse_nested_entries_and_their_tails_parse_in_linear_time() {
+    const SMALL: usize = 2_000;
+    let shapes: [(&str, &str, &str); 4] = [
+        (
+            "entries nested in entries",
+            "$\n",
+            "  2024-01-02 open Assets:Z\n",
+        ),
+        (
+            "nested entries with failing bodies",
+            "$\n",
+            "  2024-01-02 open Assets:Z\n  x\n",
+        ),
+        (
+            "windows past an entry's body",
+            "",
+            "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\"s\"\n",
+        ),
+        (
+            "stray `\\r` lines over nested entries",
+            "$\n",
+            "  2024-01-02 open\rAssets:Z\n  2024-01-02 open Assets:Z\n",
+        ),
+    ];
+    for (label, head, unit) in shapes {
+        let time = |n: usize| {
+            let src = format!("{head}{}", unit.repeat(n));
+            let start = std::time::Instant::now();
+            let errors = parse(&src).errors.len();
+            (start.elapsed(), errors)
+        };
+        // Warm up, then take the faster of two runs of each size.
+        let _ = time(SMALL / 4);
+        let small = time(SMALL).0.min(time(SMALL).0);
+        let (large, errors) = time(8 * SMALL);
+        assert!(errors > 0, "{label}: the input has errors to model");
+        assert!(
+            large <= small * 24 + std::time::Duration::from_secs(2),
+            "{label}: {large:?} for {} lines against {small:?} for {SMALL}: not linear",
+            8 * SMALL
+        );
+    }
+}

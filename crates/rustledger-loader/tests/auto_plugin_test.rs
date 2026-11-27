@@ -72,3 +72,29 @@ fn test_auto_plugin_ledger_needs_the_plugin() {
         ledger.errors
     );
 }
+
+/// `check --auto` (`LoadOptions::auto_accounts`) loads the same plugin as
+/// `bean-check --auto` (`beancount.plugins.auto`): it opened the accounts but
+/// added no implicit price.
+#[test]
+fn test_auto_flag_runs_auto_accounts_and_implicit_prices() {
+    let mut vfs = VirtualFileSystem::new();
+    vfs.add_file("main.beancount", LEDGER);
+    let options = LoadOptions {
+        auto_accounts: true,
+        ..LoadOptions::default()
+    };
+    let ledger = load_with_fs(Path::new("main.beancount"), &options, Box::new(vfs)).expect("loads");
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let opens = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, Directive::Open(_)))
+        .count();
+    let prices = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, Directive::Price(_)))
+        .count();
+    assert_eq!((opens, prices), (3, 1));
+}

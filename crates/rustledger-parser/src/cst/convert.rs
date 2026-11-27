@@ -512,6 +512,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // own (an invalid date included) is no repeat.
     report_duplicate_metadata(source_file.syntax(), bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
+    // Before any pass quiets an error: the formatter copies a directive
+    // holding a quieted one verbatim too (`ParseResult::defect_spans`).
+    let defect_spans: Vec<crate::Span> = errors.iter().map(|e| e.span).collect();
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
     quiet_after_failed_line_starts(&mut errors, source_file.syntax(), stripped, bom_offset);
     drop_errors_inside_a_line_error(
@@ -589,6 +592,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         has_leading_bom,
         syntax_root,
         alignment,
+        defect_spans,
     }
 }
 

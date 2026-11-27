@@ -229,15 +229,19 @@ fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
     }
 }
 
-/// The error-tolerant formatter's line-ending fold: a bare `\r`
-/// (classic-Mac) line ending after a stray quote is a line break, so the
-/// directive after it is read and formatted, instead of being kept inside
-/// a string the quote never opened.
+/// The error-tolerant formatter's line-ending fold keeps a bare `\r`
+/// (classic-Mac) line ending after a stray quote: the lexer does not end a
+/// line there, so the whole line is one broken directive, copied verbatim
+/// with its error. Folding the `\r` into a line break used to turn the file
+/// into a different, valid one. Only the stray `\r` at the end of the file,
+/// which is trivia, goes.
 #[test]
-fn test_format_source_folds_a_bare_cr_after_a_stray_quote() {
-    let out = format_source("2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\r");
+fn test_format_source_keeps_a_bare_cr_after_a_stray_quote() {
+    let src = "2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\r";
+    let out = format_source(src);
     assert_eq!(
         out,
-        "2024-01-01 open Assets:A \"\n2024-01-02 open Assets:B\n"
+        "2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\n"
     );
+    assert_eq!(parse(&out).errors.len(), parse(src).errors.len());
 }

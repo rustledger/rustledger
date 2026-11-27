@@ -340,9 +340,35 @@ pub struct ParseResult {
     /// `canonical_payload_excludes_alignment`.
     /// Lazily computed; see [`ParseResult::alignment`].
     alignment: std::sync::OnceLock<crate::format::PostingAlignment>,
+    /// The spans of every parse error found before the passes that quiet
+    /// errors beancount does not report (bison's recovery window, the rest
+    /// of a line after an invalid token): a superset of [`Self::errors`]'
+    /// spans, in the original-source frame.
+    ///
+    /// A quieted error still marks text the parser could not read. The
+    /// formatter copies every directive holding one verbatim, as it does a
+    /// directive holding a reported error: rebuilt from its typed values, the
+    /// directive would lose that text (`include E` after a failed line
+    /// became `include`).
+    ///
+    /// Excluded from [`__baseline_canonical_payload`]: what it adds over
+    /// `errors` is a formatter-internal input, not an observable.
+    pub(crate) defect_spans: Vec<Span>,
 }
 
 impl ParseResult {
+    /// The spans of every parse error found before the passes that quiet
+    /// what beancount does not report: a superset of [`Self::errors`]'
+    /// spans. **Internal**: for the formatter round-trip oracle, which lets
+    /// a line inside bison's recovery window gain a reported error the
+    /// formatter's normalization uncovers, as long as the line was already
+    /// unread text.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __defect_spans(&self) -> &[Span] {
+        &self.defect_spans
+    }
+
     /// The currency token at byte `offset`, if the lexer read one there.
     ///
     /// A cursor sitting at either end of the token counts, as it does for
@@ -653,6 +679,7 @@ pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
         has_leading_bom,
         syntax_root,
         alignment,
+        defect_spans,
     } = result;
     // Both `syntax_root` and `alignment` are redundant
     // derivations of fields already in the canonical payload
@@ -665,6 +692,7 @@ pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
     // and `canonical_payload_excludes_alignment`.
     let _ = syntax_root;
     let _ = alignment;
+    let _ = defect_spans;
     let mut out: Vec<u8> = Vec::new();
     let directives_json = serde_json::to_value(directives)
         .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());

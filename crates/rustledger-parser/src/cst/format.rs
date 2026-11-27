@@ -191,20 +191,27 @@ pub fn display_width(s: &str) -> usize {
 /// Returns canonical text. A non-empty output ends with a newline;
 /// the file's leading and trailing blank lines are kept, as
 /// bean-format keeps them, and an empty file formats to an empty
-/// string (#2506).
+/// string (#2506). The one exception: a broken last line that the
+/// newline would repair (a lone capital is beancount's invalid token at
+/// the end of the file, not before a `\n`) keeps going without one.
 ///
 /// **Parse errors.** Text the parser cannot read is never deleted.
 /// An unparsable top-level line is copied verbatim (#1335), and so
 /// is a whole directive that holds a parse error (#2794), since
 /// rebuilding it from its typed values would drop the unread text.
+/// A broken line keeps a `\r` (or the lack of a final newline) whose
+/// removal would repair it, and every line holding an error keeps its
+/// bytes, so a broken file stays broken where it was. Pinned, with
+/// idempotence and meaning preservation, by the round-trip oracle
+/// (`tests/format_roundtrip_properties.rs`, `fuzz_format_roundtrip`).
 ///
-/// **Line-ending normalization runs BEFORE parsing.** The lexer
-/// does not treat bare `\r` as a line terminator, so a classic-
-/// Mac-authored `directive\r…\rdirective\r` would otherwise parse
-/// as a single broken directive and the rest of the user's ledger
-/// would be silently dropped. We normalize `\r\n` and bare `\r`
-/// to `\n` first, then parse — matching the canonical-form
-/// promise that line endings are LF-only on output.
+/// **Line-ending normalization runs BEFORE parsing.** `\r\n` is
+/// folded to `\n` (see [`crlf_to_lf_outside_strings`]), matching the
+/// canonical-form promise that line endings are LF-only on output. A
+/// bare `\r` with more of the line after it is kept: the lexer does not
+/// end a line there, so a classic-Mac `\r`-only file stays the broken
+/// file it is (its directives are copied verbatim) rather than being
+/// turned into a different, valid one.
 #[must_use]
 pub fn format_source(source: &str) -> String {
     format_source_grouped(source, GroupingStyle::default())
@@ -223,14 +230,154 @@ pub fn format_source(source: &str) -> String {
 /// and every ledger that has not opted in is byte-for-byte unaffected.
 #[must_use]
 pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
-    let (stripped, _had_bom) = crate::bom::strip_leading(source);
-    let normalized = crlf_to_lf_outside_strings(stripped);
+    // The parser strips the one leading BOM itself; stripping it here as
+    // well made a second BOM, which the parser keeps as text,
+    // the file's leading one, so each pass dropped one more.
+    let repaired = RepairedLines::new(source);
+    let normalized = fold_line_endings(source, &|line| repaired.holds(line));
     // The full parse, not just the tree: its errors locate the directives
-    // that must be copied verbatim (#2794). `normalized` has its BOM
-    // stripped, so only a second BOM would offset the spans from the tree.
+    // that must be copied verbatim (#2794). The spans are in the frame of
+    // `normalized`, BOM included; the tree is not.
     let parsed = crate::parse_without_occurrences(&normalized);
-    let broken = ErrorRanges::new(&parsed.errors, if parsed.has_leading_bom { 3 } else { 0 });
-    format_tree(&parsed.syntax_node(), style, &broken)
+    let mut broken = ErrorRanges::new(&parsed);
+    // A `\r` left in `normalized` is one the fold kept on purpose.
+    broken.keep_cr = true;
+    let mut out =
+        keep_bom_before_a_second(&parsed, format_tree(&parsed.syntax_node(), style, &broken));
+    // The newline added after a last line can repair it too. A lone capital
+    // is beancount's `CAPITAL` only before a space, a tab or a `\n`, so
+    // `2024-01-01T` at the end of the file is an invalid token and
+    // `2024-01-01T\n` a transaction flagged `T`, which the next pass rebuilt
+    // as `2024-01-01 T`. Such a line keeps going without a newline.
+    // A kept last line (`+4K\r`) gets no newline either: it would turn the
+    // line's stray `\r` into a CRLF, which the next pass folds.
+    if !source.is_empty()
+        && !source.ends_with('\n')
+        && out.ends_with('\n')
+        && ((repaired.holds_last() && out[..out.len() - 1].ends_with('\r'))
+            || (last_line_has_error(&normalized, &parsed)
+                && !last_line_has_error(&out, &crate::parse_without_occurrences(&out))))
+    {
+        out.pop();
+    }
+    out
+}
+
+/// Whether a reported error of `parsed` (the parse of `src`) sits on `src`'s
+/// last line, the one after its last `\n`.
+fn last_line_has_error(src: &str, parsed: &crate::ParseResult) -> bool {
+    let last = src.trim_end_matches('\n').rfind('\n').map_or(0, |i| i + 1);
+    parsed.errors.iter().any(|e| e.span.end > last)
+}
+
+/// The lines (0-based, by `\n`) of a source whose tokens folding its line
+/// endings would change, for [`format_source_grouped`] to keep exactly as
+/// written.
+///
+/// A lone capital before a `\r` is beancount's invalid token (`CAPITAL`
+/// needs a space, a tab or a `\n` after it), so `open Assets:A,B\r\n` is an
+/// error and `open Assets:A,B\n` a valid open, and a stray `\r` before the
+/// line ending (`R\r\t\n`) works the same. Folding such a line repaired it,
+/// and the formatter then rebuilt the directive. A line the lexer reads
+/// differently without its `\r`s keeps its bytes, line ending included, so it
+/// stays what it was.
+///
+/// Decided per line from the line's own bytes, so a kept line is kept again
+/// on the next pass (formatting stays idempotent), and only for a file that
+/// holds a `\r`.
+struct RepairedLines(Vec<bool>);
+
+impl RepairedLines {
+    fn new(source: &str) -> Self {
+        if !source.contains('\r') {
+            return Self(Vec::new());
+        }
+        let body = source.strip_prefix('\u{FEFF}').unwrap_or(source);
+        let kept = body
+            .split_inclusive('\n')
+            .map(|line| {
+                // A line beancount skips (a comment, a heading) reads the same
+                // either way; the fold's own rewrite of a lone marker (`*\r`
+                // to `* `, #2779) keeps it skipped.
+                if !line.contains('\r') || crate::logos_lexer::beancount_ignores_line(line) {
+                    return false;
+                }
+                let folded = fold_line_endings(line, &|_| false);
+                folded != line
+                    && (line_tokens(line) != line_tokens(&folded)
+                        || ends_with_lone_capital_before_cr(line))
+            })
+            .collect();
+        Self(kept)
+    }
+
+    /// Whether line `line` is kept as written.
+    fn holds(&self, line: usize) -> bool {
+        self.0.get(line).copied().unwrap_or(false)
+    }
+
+    /// Whether the last line is kept as written.
+    fn holds_last(&self) -> bool {
+        self.0.last().copied().unwrap_or(false)
+    }
+}
+
+/// The tokens of one line, trivia left out, for [`RepairedLines`].
+fn line_tokens(line: &str) -> Vec<String> {
+    crate::logos_lexer::tokenize_lossless(line)
+        .into_iter()
+        .filter(|(t, _)| {
+            !matches!(
+                t,
+                crate::logos_lexer::Token::Whitespace(_) | crate::logos_lexer::Token::Newline
+            )
+        })
+        // The kind only: the text of a token the fold rewrites on purpose
+        // (`*\r` becomes `* `, #2779) is not a change of reading.
+        .map(|(t, _)| {
+            let debug = format!("{t:?}");
+            debug.split('(').next().unwrap_or_default().to_string()
+        })
+        .collect()
+}
+
+/// Whether `line` ends in a lone capital followed only by blanks holding a
+/// `\r` (a CRLF's, or a stray one) before its line ending. Beancount reads
+/// that capital as an invalid token (`CAPITAL` needs a space, a tab or a `\n`
+/// after it, and a `\r` is none), where before a bare `\n` it is a currency
+/// or a flag. The parser's glued one-letter rules decide this, not the lexer,
+/// so [`line_tokens`] does not see it.
+fn ends_with_lone_capital_before_cr(line: &str) -> bool {
+    let content = line.strip_suffix('\n').unwrap_or(line);
+    let text = content.trim_end_matches([' ', '\t', '\r']);
+    if !content[text.len()..].starts_with('\r') {
+        return false;
+    }
+    crate::logos_lexer::tokenize_lossless(text)
+        .last()
+        .is_some_and(|(_, span)| {
+            span.end == text.len()
+                && span.end - span.start == 1
+                && text.as_bytes()[span.start].is_ascii_uppercase()
+        })
+}
+
+/// `out`, the formatted text of `parsed`, with the leading BOM put back when a
+/// second BOM follows it. The leading BOM is dropped otherwise. The second is
+/// text the parser keeps in the tree, and with the first gone it would become
+/// the leading BOM the next pass drops, so formatting was not idempotent.
+fn keep_bom_before_a_second(parsed: &crate::ParseResult, out: String) -> String {
+    let second_bom = parsed
+        .syntax_node()
+        .first_token()
+        .is_some_and(|t| t.kind() == crate::SyntaxKind::BOM);
+    if parsed.has_leading_bom && second_bom {
+        let mut kept = String::with_capacity(out.len() + crate::bom::BOM.len());
+        kept.push_str(crate::bom::BOM);
+        kept.push_str(&out);
+        return kept;
+    }
+    out
 }
 
 /// Like [`format_source`] but reuses the caller's
@@ -268,13 +415,10 @@ pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
 /// non-empty, this function delegates to `format_source(source)`
 /// — losing the cache benefit but preserving byte-identity for
 /// inputs whose CST diverges from what `format_source`'s
-/// pre-parse normalization would produce. Concretely: bare-`\r`
-/// (classic Mac) line terminators are normalized to LF by
-/// `format_source` before parsing, but `parse_via_cst` does NOT
-/// normalize them — so the cached CST treats them as broken
-/// content and `parse_result.errors` is non-empty. The fallback
-/// path keeps the byte-identity claim total instead of
-/// "holds-only-when-clean".
+/// pre-parse normalization would produce (the error list it needs
+/// to copy broken directives verbatim is computed on the normalized
+/// text). The fallback path keeps the byte-identity claim total
+/// instead of "holds-only-when-clean".
 ///
 /// **Stale `parse_result` is the caller's responsibility.** The
 /// producer-side cache invariant (see
@@ -304,12 +448,9 @@ pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
 #[must_use]
 pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str) -> String {
     // Parse-error fallback. See the function rustdoc for the
-    // rationale: `parse_via_cst` does not run the same input
-    // normalization `format_source` does (no CRLF/bare-CR
-    // normalize), so for sources containing bare-`\r` line
-    // terminators the cached CST is wrong-shaped and the cache
-    // path would diverge from `format_source`. Delegating
-    // preserves byte-identity unconditionally.
+    // rationale: `format_source` locates the directives to copy
+    // verbatim from the errors of its own, normalized parse.
+    // Delegating preserves byte-identity unconditionally.
     if !parse_result.errors.is_empty() {
         return format_source(source);
     }
@@ -334,7 +475,10 @@ pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str
          different documents — the cache path will emit text for the wrong \
          buffer.",
     );
-    format_node_with_alignment(&node, parse_result.alignment())
+    keep_bom_before_a_second(
+        parse_result,
+        format_node_with_alignment(&node, parse_result.alignment()),
+    )
 }
 
 /// Like [`format_source`], but returns the parse errors instead
@@ -382,7 +526,10 @@ pub fn try_format_source_grouped(
     // `ParseResult` is computed WITHOUT grouping, so it can only be reused for
     // the default style — see `format_node_with_style`'s invariant.
     if style.groups_anything() {
-        return Ok(format_node_grouped(&result.syntax_node(), style));
+        return Ok(keep_bom_before_a_second(
+            &result,
+            format_node_grouped(&result.syntax_node(), style),
+        ));
     }
     Ok(format_source_with_parsed(&result, source))
 }
@@ -417,7 +564,9 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     out.push_str(bom);
     let mut strings = StringLiterals::new(body);
     for (i, ch) in body.char_indices() {
-        if ch == '\n' && !strings.contains(i) {
+        // A `\n` that already has its `\r` (a broken line the formatter
+        // copied with its CRLF) keeps just the one.
+        if ch == '\n' && !strings.contains(i) && !out.ends_with('\r') {
             out.push_str("\r\n");
         } else {
             out.push(ch);
@@ -577,8 +726,15 @@ impl std::fmt::Display for CanonicalizeError {
 
 impl std::error::Error for CanonicalizeError {}
 
-/// Replace CRLF and bare-CR line terminators with LF, but ONLY
-/// outside string literals.
+/// Replace CRLF line terminators with LF, but ONLY outside string
+/// literals, and drop a stray run of `\r`s before a line ending.
+///
+/// A bare `\r` with more of the line after it is NOT a line terminator
+/// to the lexer (it is comment text in a comment and an error
+/// elsewhere), so it is kept: folding it into a line break would change
+/// what the file means, turning the rest of a comment into a line of
+/// its own, or a classic-Mac `\r`-only file the parser rejects into one
+/// it accepts.
 ///
 /// String literals (`"…"`) can contain raw `\r` and `\n` per the
 /// lexer's `STRING` rule; folding CR inside a string would mutate
@@ -599,6 +755,12 @@ impl std::error::Error for CanonicalizeError {}
 /// for tooling (CLI `--diff`, format-equivalence checks) that
 /// needs the same string-aware normalization.
 pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
+    fold_line_endings(src, &|_| false)
+}
+
+/// [`crlf_to_lf_outside_strings`], leaving every line `keep` holds (0-based,
+/// counted by `\n`) exactly as written, its line ending included.
+fn fold_line_endings<'s>(src: &'s str, keep: &dyn Fn(usize) -> bool) -> std::borrow::Cow<'s, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
@@ -626,38 +788,50 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         start: bom.len(),
         scanned: bom.len(),
     };
+    // The 0-based line `i` is on.
+    let mut line_no = 0usize;
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
-        let in_string = strings.contains(i);
+        if strings.contains(i) || keep(line_no) {
+            out.push(ch);
+            if ch == '\n' {
+                line_no += 1;
+            }
+            continue;
+        }
+        if ch == '\n' {
+            line_no += 1;
+        }
+        if ch == '\r' && peek != Some('\n') && i >= run_end {
+            (run_end, run_is_stray) = stray_cr_run(body, i);
+        }
         // A lone column-0 marker followed by a `\r` is a line beancount
         // ignores (flex's `.` takes the `\r`); without the `\r` it is a
-        // bare-marker error. Outside a string, every branch below drops or
-        // folds the `\r`, so a space stands in for it (#2779).
-        if ch == '\r' && !in_string {
+        // bare-marker error. When the `\r` goes (the `\r` of a CRLF, or one
+        // in a stray run), a space stands in for it (#2779).
+        if ch == '\r' && (peek == Some('\n') || (i < run_end && run_is_stray)) {
             let text = &out[line.start_in(&out)..];
             if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
                 out.push(' ');
             }
         }
-        if in_string {
-            out.push(ch);
-        } else if ch == '\r' && peek == Some('\n') {
+        if ch == '\r' && peek == Some('\n') {
             out.push('\n');
             chars.next();
+            line_no += 1;
         } else if matches!(ch, '\r' | ' ' | '\t') && i < run_end && run_is_stray {
-            // The rest of a stray run: dropped with its `\r`.
-        } else if ch == '\r' {
-            if i >= run_end {
-                (run_end, run_is_stray) = stray_cr_run(body, i);
-            }
-            // A stray `\r` is trivia to the lexer (#2774); folding
-            // it into a line break would add a blank line, which
-            // ends a transaction. Any other bare `\r` is a
-            // classic-Mac line terminator.
-            if !run_is_stray {
-                out.push('\n');
-            }
+            // A stray run is trivia to the lexer (#2774) and is dropped.
+            // Folding it into a line break would add a blank line, which
+            // ends a transaction.
         } else {
+            // Everything else is kept, a bare `\r` with more of the line
+            // after it included. The lexer does not end a line there (in a
+            // comment the `\r` is comment text, elsewhere it is an error), so
+            // folding it into a line break changed what the file means: the
+            // rest of a comment became a line of its own, a classic-Mac file
+            // the parser rejects became one it accepts, and `format_source`
+            // disagreed with `format_source_with_parsed`, which reads the
+            // unfolded text.
             out.push(ch);
         }
     }
@@ -890,7 +1064,7 @@ impl NodeEmitter<'_, '_> {
             if let Some(ws) = line_indent {
                 out.push_str(ws.text());
             }
-            let trailing = emit_error_node(n, out);
+            let trailing = emit_error_node(n, self.broken.keep_cr, out);
             spacing.after_node();
             // The node's own trailing blank lines were trimmed off its text;
             // they still separate it from what follows.
@@ -914,17 +1088,30 @@ impl NodeEmitter<'_, '_> {
 /// tokens, header defects, catch-all body lines, shape checks), and a second
 /// classifier here would drift from them (Canonical-Function Discipline).
 #[derive(Default)]
-struct ErrorRanges(Vec<(usize, usize)>);
+struct ErrorRanges {
+    ranges: Vec<(usize, usize)>,
+    /// Whether a verbatim copy keeps a `\r` before a line ending. Set by
+    /// `format_source_grouped`, whose line-ending fold leaves a `\r` only
+    /// where dropping it would repair a broken line; elsewhere a `\r` there
+    /// is a CRLF the canonical LF output drops.
+    keep_cr: bool,
+}
 
 impl ErrorRanges {
-    /// The ranges of `errors`, whose spans are `bom_offset` bytes ahead of
-    /// the tree's offsets. An empty span still marks the byte it sits on.
-    fn new(errors: &[crate::ParseError], bom_offset: usize) -> Self {
-        let mut spans: Vec<(usize, usize)> = errors
+    /// The ranges of `parsed`'s errors, quieted ones included
+    /// (`ParseResult::defect_spans`: beancount reports no error inside
+    /// bison's recovery window, but the text there is still unread), in the
+    /// tree's frame. An empty span still marks the byte it sits on.
+    fn new(parsed: &crate::ParseResult) -> Self {
+        let bom_offset = if parsed.has_leading_bom { 3 } else { 0 };
+        let mut spans: Vec<(usize, usize)> = parsed
+            .errors
             .iter()
-            .map(|e| {
-                let start = e.span.start.saturating_sub(bom_offset);
-                let end = e.span.end.saturating_sub(bom_offset).max(start + 1);
+            .map(|e| e.span)
+            .chain(parsed.defect_spans.iter().copied())
+            .map(|span| {
+                let start = span.start.saturating_sub(bom_offset);
+                let end = span.end.saturating_sub(bom_offset).max(start + 1);
                 (start, end)
             })
             .collect();
@@ -936,7 +1123,10 @@ impl ErrorRanges {
                 _ => merged.push((start, end)),
             }
         }
-        Self(merged)
+        Self {
+            ranges: merged,
+            keep_cr: false,
+        }
     }
 
     /// Whether `range` shares a byte with any error range.
@@ -944,8 +1134,8 @@ impl ErrorRanges {
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         // The merged ranges are disjoint and sorted, so their ends ascend:
         // the first one ending after `start` is the only candidate.
-        let i = self.0.partition_point(|&(_, e)| e <= start);
-        self.0.get(i).is_some_and(|&(s, _)| s < end)
+        let i = self.ranges.partition_point(|&(_, e)| e <= start);
+        self.ranges.get(i).is_some_and(|&(s, _)| s < end)
     }
 }
 
@@ -1068,7 +1258,24 @@ fn format_node_with_style(
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
                     indent = Some(t);
                 } else {
-                    spacing.top_level_token(&t, &mut out);
+                    // An indented comment line here (only the file-leading
+                    // region leaves one outside every node) keeps its indent.
+                    // The indent is read: beancount reports such a line
+                    // (`unexpected INDENT`) and rledger accepts it on purpose
+                    // but still keeps bison's recovery after it quiet, so an
+                    // indented line after it is clean (`\t;\n\t+`) where after
+                    // a column-0 comment it is an error. Where the comment is
+                    // after a directive that takes no metadata the comment
+                    // line is itself reported, and moved to column 0 it would
+                    // be an ordinary comment, the error gone.
+                    let keep_indent = line_indent
+                        .as_ref()
+                        .filter(|_| super::convert::is_comment_kind(t.kind()));
+                    spacing.top_level_token(
+                        &t,
+                        keep_indent.map(crate::SyntaxToken::text),
+                        &mut out,
+                    );
                 }
             }
         }
@@ -1099,6 +1306,9 @@ struct TopLevelSpacing {
     pending: usize,
     /// Whether the current top-level line holds a comment.
     line_has_comment: bool,
+    /// Whether a BOM token was written on the current line, which is still
+    /// open: its `NEWLINE` is written as it comes.
+    bom_line_open: bool,
 }
 
 impl TopLevelSpacing {
@@ -1118,27 +1328,42 @@ impl TopLevelSpacing {
     /// A directive or error node was emitted; it ends with its own newline.
     const fn after_node(&mut self) {
         self.line_has_comment = false;
+        self.bom_line_open = false;
     }
 
     /// A top-level token: a comment is emitted on its own line, a `NEWLINE`
     /// ends a comment's line or is a blank line, anything else is ignored.
-    fn top_level_token(&mut self, t: &crate::SyntaxToken, out: &mut String) {
+    /// `indent` is written before a comment (a reported, indented comment line).
+    fn top_level_token(&mut self, t: &crate::SyntaxToken, indent: Option<&str>, out: &mut String) {
         match t.kind() {
             crate::SyntaxKind::COMMENT
             | crate::SyntaxKind::PERCENT_COMMENT
             | crate::SyntaxKind::SHEBANG
             | crate::SyntaxKind::EMACS_DIRECTIVE => {
                 self.flush(out);
+                out.push_str(indent.unwrap_or_default());
                 push_comment_text(out, t.text());
                 out.push('\n');
                 self.line_has_comment = true;
+                self.bom_line_open = false;
             }
             crate::SyntaxKind::NEWLINE => {
-                if self.line_has_comment {
+                if self.bom_line_open {
+                    out.push('\n');
+                    self.bom_line_open = false;
+                } else if self.line_has_comment {
                     self.line_has_comment = false;
                 } else {
                     self.blank_lines(1);
                 }
+            }
+            // A BOM in the tree is one after the file's leading BOM, which the
+            // parser strips: text, kept verbatim. Skipping it deleted it, and
+            // the error the parser reports for it where it has one.
+            crate::SyntaxKind::BOM => {
+                self.flush(out);
+                out.push_str(t.text());
+                self.bom_line_open = true;
             }
             _ => {}
         }
@@ -1309,10 +1534,7 @@ pub fn format_parsed_range(
     } else {
         parse_result.alignment()
     };
-    let broken = ErrorRanges::new(
-        &parse_result.errors,
-        if parse_result.has_leading_bom { 3 } else { 0 },
-    );
+    let broken = ErrorRanges::new(parse_result);
     format_node_range_with_style(&node, range, alignment, style, &broken)
 }
 
@@ -1476,7 +1698,7 @@ fn format_node_range_with_style(
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
                     indent = Some(t);
                 } else {
-                    spacing.top_level_token(&t, &mut out);
+                    spacing.top_level_token(&t, None, &mut out);
                 }
             }
         }
@@ -1739,7 +1961,7 @@ fn push_comment_text(out: &mut String, text: &str) {
 ///
 /// Returns the number of blank lines that ended the node's text, which it
 /// trims; the caller keeps them as the gap before whatever follows (#2506).
-fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
+fn emit_error_node(node: &crate::SyntaxNode, keep_cr: bool, out: &mut String) -> usize {
     // Trim a line's trailing whitespace, but not past the start of the line
     // (the newline ending the line before is not this line's, so a blank
     // line stays) nor past the end of the last string on it.
@@ -1748,10 +1970,26 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     // `*\r`) is ignored by beancount, but a lone `*` is an error there, so
     // one space is kept after the `*` (#2779). A line that was a lone marker
     // already stays one: it is an error either way.
-    fn end_line(text: &mut String, string_end: usize) {
+    fn end_line(text: &mut String, string_end: usize, keep_cr: bool) {
         let line_start = text.rfind('\n').map_or(0, |i| i + 1);
         let ignored = crate::logos_lexer::beancount_ignores_line(&text[line_start..]);
-        let keep = text.trim_end().len().max(line_start).max(string_end);
+        // Only the blanks the lexer skips. `str::trim_end` also takes Unicode
+        // whitespace (a no-break space, a vertical tab), which the lexer
+        // reports as an error: trimming it deleted the error with it. A `\r`
+        // stays when `keep_cr` says so: then it is one dropping which would
+        // repair the line (a lone capital before a `\r` is beancount's
+        // invalid token; see `RepairedLines`).
+        let content = text.trim_end_matches([' ', '\t', '\r']).len();
+        // With `keep_cr`, a trailing run holding a `\r` is kept whole: it is
+        // the stray `\r` run of a line kept as written (`RepairedLines`), and
+        // trimming the blanks after its `\r` would turn it into a CRLF, which
+        // reads differently again.
+        let keep = if keep_cr && text[content..].contains('\r') {
+            text.len()
+        } else {
+            content
+        };
+        let keep = keep.max(line_start).max(string_end);
         text.truncate(keep);
         if ignored && is_lone_marker(&text[line_start..]) {
             text.push(' ');
@@ -1766,11 +2004,12 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
         match t.kind() {
             crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
                 // A CRLF's `\r` is part of the line for `end_line`'s
-                // ignored-line check (`*\r\n` is a heading), and trimmed.
+                // ignored-line check (`*\r\n` is a heading), and trimmed
+                // unless `keep_cr`.
                 if t.text().starts_with('\r') {
                     text.push('\r');
                 }
-                end_line(&mut text, string_end);
+                end_line(&mut text, string_end, keep_cr);
                 text.push('\n');
             }
             crate::SyntaxKind::STRING => {
@@ -1780,7 +2019,7 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
             _ => text.push_str(t.text()),
         }
     }
-    end_line(&mut text, string_end);
+    end_line(&mut text, string_end, keep_cr);
     // Trim leading AND trailing blank lines: the caller emits the leading
     // blank lines (via `leading_blank_lines`) so emitting them here too would
     // double-count them and break idempotence. Internal blank lines and the
@@ -4037,22 +4276,16 @@ mod tests {
     }
 
     #[test]
-    fn bare_cr_line_endings_normalized_to_lf_before_parse() {
-        // Bug: the lexer doesn't treat bare CR as a line terminator,
-        // so a classic-Mac-authored `directive\r…\rdirective\r`
-        // parsed as one broken directive and the rest were silently
-        // dropped. format_source normalizes line endings BEFORE
-        // parsing so bare CR (and CRLF) are treated as LF.
+    fn bare_cr_line_endings_kept_as_the_broken_line_they_are() {
+        // The lexer doesn't treat a bare CR as a line terminator, so a
+        // classic-Mac-authored `directive\r…\rdirective\r` is one broken
+        // directive, which bean-check rejects too. The formatter keeps it,
+        // and its error, verbatim: folding the CRs into line breaks turned
+        // the file into a different, valid one. No text is lost either way.
         let src = "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\r";
         let out = format_source(src);
-        assert!(
-            out.contains("2024-01-01 open Assets:A"),
-            "first directive lost: {out:?}"
-        );
-        assert!(
-            out.contains("2024-01-02 open Assets:B"),
-            "second directive lost on bare-CR input: {out:?}"
-        );
+        assert_eq!(out, "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\n");
+        assert!(!crate::parse(&out).errors.is_empty(), "{out:?}");
     }
 
     #[test]

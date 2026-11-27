@@ -1631,6 +1631,30 @@ jobs:
           # --help is the probe bean_price_compat.rs itself uses.
           bean-price --help > /dev/null
           python -c "import beancount_options.check_option_expiry, beancount_options.check_option_assignment"
+      # The BcLexer drift test (rustledger-parser, `cst::bc_lexer_drift`)
+      # compares the recovery model's port of beancount 3.2.3's lexer with
+      # beancount's own lexer, over the corpora the parse-error parity
+      # manifest pins: its own venv, so the beancount it reads is exactly
+      # 3.2.3 whatever the suites above install, with ptadiff at the
+      # manifest's revision (the generator sample and crash-safe workers),
+      # and the fuzz corpus at the manifest's commit.
+      - name: Set up the BcLexer drift test
+        run: |
+          set -euo pipefail
+          manifest=tests/baselines/parse-error-parity.manifest
+          rev=$(sed -n 's/^#@ptadiff-rev //p' "$manifest")
+          commit=$(sed -n 's/^#@fuzz-commit //p' "$manifest")
+          if [ -z "$rev" ] || [ -z "$commit" ]; then
+            echo "::error::$manifest lacks #@ptadiff-rev or #@fuzz-commit"
+            exit 1
+          fi
+          python -m venv "$RUNNER_TEMP/bc-drift"
+          "$RUNNER_TEMP/bc-drift/bin/pip" install beancount==3.2.3 \
+            "ptadiff @ git+https://github.com/rustledger/pta-standards@${rev}#subdirectory=tooling/differential"
+          "$RUNNER_TEMP/bc-drift/bin/python" -I -c "import beancount, ptadiff; assert beancount.__version__ == '3.2.3'"
+          git fetch --depth=1 origin "$commit"
+          mkdir -p "$RUNNER_TEMP/fuzz"
+          git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C "$RUNNER_TEMP/fuzz"
       # The CPython WASI runtime that python_plugin_wasi and
       # plugin_conformance run Python plugins with. Without this every run
       # downloaded it (~14 MB) for those suites, and once more for the test
@@ -1688,6 +1712,12 @@ jobs:
           # The module-path hint runs host python3 on a name from the ledger;
           # its no-import regression test needs python3 to mean anything.
           cargo test -p rustledger-plugin --features python-plugins --lib suggest_module_path -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
+          # REQUIRE turns the test's skips (no beancount 3.2.3, no ptadiff,
+          # no fuzz corpus) into failures.
+          RLEDGER_BEANCOUNT_PYTHON="$RUNNER_TEMP/bc-drift/bin/python" \
+          RLEDGER_BC_LEXER_DRIFT_FUZZ_DIR="$RUNNER_TEMP/fuzz" \
+          RLEDGER_BC_LEXER_DRIFT_REQUIRE=1 \
+            cargo test -p rustledger-parser --lib bc_lexer_drift -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: The cached CPython runtime was used, not downloaded again
         if: steps.cpython-cache.outputs.cache-hit == 'true'
         run: |
@@ -1708,7 +1738,7 @@ jobs:
           # Every gated suite prints a recognizable marker when it skips;
           # any of them appearing means an availability probe drifted
           # despite the assert step above.
-          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: beancount-options not installed|Skipping: BEANCOUNT_OPTIONS_DIR not set|Skipping: python3 not available" /tmp/gated-tests.log; then
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: beancount-options not installed|Skipping: BEANCOUNT_OPTIONS_DIR not set|Skipping: python3 not available|Skipping: ptadiff not available" /tmp/gated-tests.log; then
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi
@@ -1720,9 +1750,12 @@ jobs:
   # every input is compared or the job fails; nothing is skipped quietly.
   #
   # Inputs: the stray-character matrix, every tracked ledger, the downloaded
-  # compat corpus, and the parser fuzz corpora at the `fuzz-corpus` commit
-  # tests/baselines/parse-error-parity.manifest pins (so the input set is
-  # fixed; bumping the pin is a manifest update).
+  # compat corpus, the parser fuzz corpora at the `fuzz-corpus` commit
+  # tests/baselines/parse-error-parity.manifest pins, and a seeded generator
+  # sample from pta-standards' differential package (ptadiff) at the revision
+  # the manifest pins (`#@ptadiff-rev`). So the input set is fixed; bumping
+  # either pin is a manifest update. ptadiff also names every mismatch with a
+  # category key, and the manifest pins each key's count.
   #
   # Every run, pull requests included, compares ALL of it (~111k inputs, the
   # fuzz corpus in full). No sample is needed: with an optimized build,
@@ -1780,6 +1813,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fuzz"
           git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C "$RUNNER_TEMP/fuzz"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Install ptadiff at the pinned revision
+        run: |
+          set -euo pipefail
+          rev=$(sed -n 's/^#@ptadiff-rev //p' tests/baselines/parse-error-parity.manifest)
+          if [ -z "$rev" ]; then
+            echo "::error::no #@ptadiff-rev line in tests/baselines/parse-error-parity.manifest"
+            exit 1
+          fi
+          # From git at the pinned commit: pip records the commit, and the
+          # harness's --check fails unless it is the pinned one.
+          pip install "ptadiff @ git+https://github.com/rustledger/pta-standards@${rev}#subdirectory=tooling/differential"
       # Runs first and can fail the job: a classifier bug that called every
       # input a match would otherwise read as perfect parity.
       - name: Self-test the harness
@@ -1800,6 +1844,8 @@ jobs:
             --fuzz-commit "${{ steps.fuzz.outputs.commit }}" \
             --compat-dir tests/compatibility/files \
             --report "$RUNNER_TEMP/parity.md" \
+            --categories-json "$RUNNER_TEMP/parity-categories.json" \
+            --minimize 10 \
             --check
       - name: Report to the job summary
         if: always()
@@ -1809,3 +1855,12 @@ jobs:
           else
             echo "no report: the comparison did not get that far" >> "$GITHUB_STEP_SUMMARY"
           fi
+      # Every category with its size, sources and shortest (or, for the ten
+      # largest, minimized) example, for whoever picks the next one to fix.
+      - name: Upload the category report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: parse-error-parity-categories
+          path: ${{ runner.temp }}/parity-categories.json
+          if-no-files-found: ignore

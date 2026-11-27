@@ -135,10 +135,21 @@ lines they land on and how many each line carries. The harness,
 normalization (BOM, CRLF, line-0 errors) and the mismatch categories.
 
 The manifest pins the current result: one row per tracked or downloaded
-ledger (matches included), then, for the stray-character matrix and the
-fuzz corpora, the ids of the inputs that do not match, grouped by
-category. Its `#@fuzz-commit` line pins the `fuzz-corpus` commit the fuzz
-inputs come from, so the input set only changes when the pin does.
+ledger (matches included), then, for the stray-character matrix, the fuzz
+corpora and a seeded generator sample (`gen`), the ids of the inputs that
+do not match, grouped by category. Its `#@fuzz-commit` line pins the
+`fuzz-corpus` commit the fuzz inputs come from, and `#@generators` the
+generator sample, so the input set only changes when a pin does.
+
+Both sides run through `ptadiff`, pta-standards' differential package
+(`tooling/differential` in rustledger/pta-standards), at the commit
+`#@ptadiff-rev` pins. ptadiff also names every mismatch with a **category
+key** (`#@category-key`, the `shape` key: which side reports more on the
+first disagreeing line, that side's error kinds, the line's kind, and the
+line's token shape from beancount's black-box lexer). The `@ categories`
+section pins how many `fuzz`, `matrix` and `gen` inputs fall in each key
+(a row is `count<TAB>key`). The report lists the categories largest first
+and minimizes the ten largest examples.
 
 The `Parse-error parity` job in `.github/workflows/compat.yml` runs it on
 every PR with `--check`:
@@ -150,10 +161,13 @@ every PR with `--check`:
   `BASELINE_UPDATE`: run `--update` (below) and commit the manifest. Left
   unpinned, the improvement could be lost by a later PR without anything
   failing.
-- A run that does not cover the pinned inputs fails: a `fuzz` or `matrix`
-  count that differs from the manifest's `#@inputs` line, or a pinned
-  `fuzz` / `matrix` id that is not among the inputs (an empty or partial
-  fuzz directory would otherwise read as "no regressions").
+- A category key whose count differs from its `@ categories` row is a
+  stale pin too: the same inputs mismatch, but differently.
+- A run that does not cover the pinned inputs fails: a `fuzz`, `matrix` or
+  `gen` count that differs from the manifest's `#@inputs` line, a pinned id
+  of theirs that is not among the inputs (an empty or partial fuzz
+  directory would otherwise read as "no regressions"), or a generator
+  sample, category key or ptadiff commit other than the pinned ones.
 - A tracked ledger with no row (a test `.beancount` added or edited by the
   PR) or a downloaded one (upstream changed it) only warns, and the log
   prints the `pin-row` line that pins it. Pin it with the steps below, or
@@ -163,10 +177,16 @@ The job is advisory until a maintainer adds it to the branch's required
 checks.
 
 To update the pin (after a parser change that improves parity, or to move
-to a newer `fuzz-corpus` commit):
+to a newer `fuzz-corpus` commit or ptadiff revision):
 
 ```bash
-# The pinned commit, as CI reads it:
+# ptadiff at the pinned revision, as CI installs it (to move the pin, use
+# another pta-standards commit here; --update records whichever is
+# installed, and refuses one it cannot identify):
+rev=$(sed -n 's/^#@ptadiff-rev //p' tests/baselines/parse-error-parity.manifest)
+pip install "ptadiff @ git+https://github.com/rustledger/pta-standards@${rev}#subdirectory=tooling/differential"
+# (or pass a clean pta-standards checkout: --ptadiff PATH/tooling/differential)
+# The pinned fuzz commit, as CI reads it:
 commit=$(sed -n 's/^#@fuzz-commit //p' tests/baselines/parse-error-parity.manifest)
 git fetch origin "$commit"
 # Or move the pin to the branch tip instead:

@@ -5,12 +5,19 @@
 # Ids are content hashes (sha256, first 12 hex digits).
 # `@ ledgers`: source<TAB>id<TAB>category<TAB>path, one row per
 # tracked or downloaded ledger, matches included.
-# `@ <source> <category>`: the fuzz or matrix inputs that do not
-# match, one id per line. An unlisted fuzz or matrix input is pinned
-# as matching.
+# `@ <source> <category>`: the fuzz, matrix or gen inputs that do not
+# match, one id per line. An unlisted fuzz, matrix or gen input is
+# pinned as matching.
+# `@ categories`: count<TAB>key, how many fuzz, matrix and gen inputs
+# fall in each ptadiff category key (`#@category-key`), computed with
+# pta-standards' tooling/differential at `#@ptadiff-rev`.
 #@fuzz-commit 9bc79f4f35f52c50813164f43307e7d151d70d8c
+#@ptadiff-rev 2b844dc283f5feded147c13fb3be4474a73af0e6
+#@category-key shape
+#@generators g1:1:2000 g1b:1:2000 g2:1:2000 g2b:1:2000 g3:1:2000 g3b:1:2000
 #@inputs fuzz 44589
 #@inputs matrix 66816
+#@inputs gen 12000
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount
@@ -3281,6 +3288,1403 @@ daacea995def
 e3edc31be7c2
 eb4121fcd5a2
 fba1f6a59ac4
+@ gen crash
+16b769b55c47
+@ gen eof
+aa9f9397202e
+d76ae244087a
+@ gen lexer-token-split
+003e1fa9df53
+00734b2428e2
+0260344c6307
+0413b5adb145
+0508881712e4
+07512efaab02
+07ba6e36306a
+07bfaae6b125
+0853bb2755d9
+09cb335f25cc
+09f2cf64a4a9
+0a866b9a1d19
+0a9435051d05
+0adbdbfa28dd
+0b80df6a3744
+0bd4fd5f724c
+0cc4e50b567c
+0d2ce0e0fa53
+0dc5719f9eca
+0e72670c1bfa
+0ecd492068e1
+0ef1f7f64ed6
+0fd643627637
+119e5087e644
+11fdec9e5c1d
+12e395cbfa3e
+1328d8ba16f5
+13d539b20feb
+1452e7ceb151
+14ea3fc9d1bc
+16b1ce6ea813
+16c07e7ef544
+172b36b61ad3
+17931fa615fa
+191f0fe07e98
+192ce8e625e4
+193dbf86912c
+1a3582ea1755
+1b4a96c77be5
+1b82c1d12726
+1bda6677fcce
+1c3ec4c5fdbb
+1d0c206cbc84
+1d424669bf92
+1dfa0d9de806
+1e3ea0e2afae
+1ea32640410c
+2041558c0fea
+204aceb1f4d1
+20633fefbc79
+216def812f9d
+232e3f3451c2
+234963db2254
+234eaa652937
+247212a6d8fc
+2481c6107e99
+24ec22612989
+257dec181fa7
+25a031fc388f
+28af5755fb42
+2ac02b61443a
+2accc7563543
+2ad3857bd77c
+2b3baf26b2f1
+2b960fb6f5f3
+2c17a61aa8a2
+2cf346568588
+2cfa00063ab8
+2e1dd70822bd
+2e5bf7aace84
+2ed6c8f4a904
+2f8367ac55fb
+31a289ee7242
+334c9aea7361
+335a8b82c2d9
+337d2fa1d9c7
+33dcd369a1bf
+35032b777218
+350dcab189c4
+359e3e494aa3
+35da258479fd
+3690ddca8342
+36ea9367a1d2
+3913df1c5864
+3abce14c1209
+3b61cb9c1854
+3b7571eab0bb
+3e4ab9425564
+3ef16a388acb
+3ff5c84cdd72
+409c51e573da
+419d05db0e44
+41c27c22df97
+42d90e048705
+43d8291be331
+43da6c3d0f14
+449f744a227d
+4574b119905a
+473946b59126
+47463d3c7a10
+475f4ed86df3
+485241e8cdc1
+48ff03da2ca9
+4914d670657c
+4a01c14cf3df
+4aaea1b6fef9
+4afb64c7d3bb
+4b6a308db14a
+4c873105292a
+4f27b27f4200
+503bfdc3d90c
+50cb99cf44f4
+52efad7912a8
+55a8bcf47264
+55ab9d894fe6
+564b73c9f95f
+566cf3aed6a4
+584934eaae9f
+5876fe6c076a
+58b0e58cedb3
+58d85dff0299
+593a92176a02
+5969ed62649d
+597e56110e0d
+5a878f037dda
+5bbfba871fab
+5eefb845cf09
+60d06112c923
+61e58a484c65
+62685c1384da
+63159bc7b615
+6572f122fa93
+657485534885
+683c25cdd1df
+685303ddc729
+69699ebce8b8
+6a0657a410b7
+6b60c06b2657
+6c790c35d5e3
+6d060b757fb9
+6f6f4cee69d3
+708876a26329
+70ebe0bc6f2f
+71b9046a6661
+72756b9fe4c0
+7288cb40b2b4
+72e8385b0641
+736aed326f6b
+7417d7aadecd
+74fc25456c29
+75174ee860e5
+75c70f873619
+75dd3576d97d
+762ffacd592c
+76f84fc42ec4
+782f6d2f839d
+78c812220232
+78e0f0c467a2
+79c58c0a91cd
+79f71439f6e5
+79fdf27c1502
+7a2f4073dd89
+7be3a6117a0d
+7c468c65d544
+7c7c4bcb2680
+7cc545511d49
+7d8c0946442e
+7ddd44c3c5c3
+7f0982c5d87c
+7f16d9362e3b
+8133e4a0365d
+814e686502d1
+8662727ff88b
+8662b3e51c2d
+86b590be62df
+87db5f420bd9
+892fdf4d97b5
+8a41d05fb704
+8a9521d0f72c
+8a9a0259a39e
+8af4f6457fa3
+8cab0df2f97d
+8cb437b51fba
+8e5bb7ae957a
+8fa695ce0f4b
+911939fc85f7
+9160581a1421
+91a621bc545e
+91b9abc6568d
+920f6e3d8a7e
+922dc2888d27
+94239ce912c0
+94cb39898124
+94fdbd763c05
+9502695243da
+9505bf160c2b
+95ea2ce49ee0
+9649b2f87b8d
+965f2182a9a4
+970f48d2375b
+973e1dba7ec0
+97b2ef30c6ce
+98651d0e61d6
+98c89bef27be
+99f835f92f0d
+9a62a6ca0f8d
+9af0ca33fca0
+9affde81931d
+9b3baac57344
+9b81e0fdf5d8
+9bf339982476
+9c0baffb827f
+9c813cd255ea
+9d2ecba3b899
+9d5f16a9c5fd
+9dd320d700f9
+9fdecf6776ea
+9fe11c4790ce
+a1276778673c
+a2286c1713ea
+a3d2c33d00d4
+a3e1543f6d92
+a454405a0b71
+a4b4a25e7714
+a65df83ce56d
+a7045744c19d
+a78be80c9374
+aadb88aad951
+ab390c3d0e91
+ab40ed5a143c
+ac09d72d5dd5
+ac29fd9e6105
+ad136565532b
+ad71af6de68e
+ae2c3a0473f6
+af62cf674f90
+b02dc9be3e1d
+b0efa4a5b060
+b21099a88bf0
+b2a46b73bcf4
+b2c029434b3c
+b37b6b153264
+b422c5546427
+b464324d831a
+b4c087258407
+b554de8cbc36
+b57a48368aad
+b58507c59497
+b6c8329ea9c7
+b6f790de0181
+b7267ab2c3bb
+b72d41a5fd54
+b78c4b61da8a
+b7a7c128aebf
+b804e48828df
+b962b7fc02dc
+bb257f64ada8
+bb36e3662c31
+bbbe1fbf5fd7
+bf980f089b10
+c07da40e0b7a
+c0b60df07acf
+c263a5c8e427
+c2d399810c93
+c31213c28267
+c516858a4b6a
+c68d933cfbf0
+c7cb40231350
+c9322dafb8b4
+c9e33cfc1fd1
+ca20c4048f58
+caed2c9c5b4d
+cafcf038c673
+caff6ed40ebe
+ccbde2a6db00
+ccc0136b300c
+cd0d4554da77
+cd1eb095fcda
+cdc1ecc73c37
+cdeba7e97c29
+cf8ebb6dd184
+cfe4a4b27693
+d027c54eef7c
+d1e02e7e5732
+d21390d1e4c2
+d25136348a27
+d2c221eaa984
+d4694b703803
+d4bb134cb9a7
+d5006b851de1
+d528180f983e
+d67c936bfc77
+d77f6441d45b
+d7a076f1c0c0
+d7ceb9d08c8f
+d885bd549efb
+d89162e7ec44
+d89e62a004e1
+d8f1ab3b19ae
+db529c2d7b36
+dbce2ed1aea2
+dc9931d3fa0c
+e1afa97ec054
+e29bcf7dc938
+e4e02fa42941
+e5ec81084ac6
+e605655054b5
+e6d7e5209393
+e7a22f4ddbed
+e93e8a88f19f
+e97724e85a15
+ea38fd0c0a6b
+ea661a6c3fde
+eb1f84e0fa8a
+eb23cac166a5
+ec0eb072a918
+ec53fa87db04
+eeb70f81c56b
+eecb686b8950
+ef5614df23f3
+efaebf6282ba
+f0ca9733fe41
+f24ffdf932af
+f31dd48cfa5d
+f3a4c42bca23
+f3a62975d81b
+f3ef0861e0fd
+f42f34cf75c0
+f6857476770d
+f7f976755a12
+f7fcdcd6cf2b
+f8a1ea9a6275
+f8ff99334c84
+fa41283e0b1f
+fa83f1c4d3b6
+fba79efb1c55
+fc2904b844a0
+fc8917d3065c
+fd76b4c3f7d3
+fda14b171930
+fda2d1c8e242
+fe88cbb02b11
+fed5a3af26fb
+fede3244c0ff
+ff774ce959cd
+@ gen lexer-tokens-merged
+00582119ba27
+00af1395043a
+00d85127a664
+018dcc061a43
+03b5b656d596
+03f32e029d21
+06f53d319e7c
+06fd7ad8bb30
+072913a87b56
+07e1fbb9e924
+0bad486b5d56
+0c15e3410292
+0e25e1e847c6
+0e8c2ebc1185
+105a6a14ce0b
+109b2c35fdb1
+130b45084915
+1327c027a937
+1531aa1cb4d2
+156750f6c374
+15d9d4d4d01b
+1686ce62cc04
+16a0ca866870
+16f91b190e0d
+170a121c5b84
+174d30e92d70
+18fcf1805fc2
+1937acd5e5d1
+19b27383fc59
+19f4f7b71758
+1b2f24080c9a
+1c0de9314d83
+1d759d0aacdc
+1e4cf33a41cf
+20a30aeecbc4
+21a8093eadd1
+221852dbeca4
+22ea8f0a1708
+2370ad8a6d7b
+2393d4cdb643
+25354349b2a8
+266f869586eb
+2693237f3fef
+27ccdfcf6826
+287ab98db378
+28beb3fadf41
+2934ad29a19a
+29b66c0e0780
+29f7778d1313
+2aae8ee312be
+2d51e61931ea
+2e515fe0a4cd
+2e6490db2009
+2f7e3ebbdc88
+31b792508ac4
+334e92d3770d
+334ea135bbad
+33ebaf581e11
+34207671108f
+34b855e5f6a6
+34e6dbba21f0
+35ecd6f5ded1
+35fcd7ff1354
+38fe2640bac0
+3bb4788e5084
+3bc54bce8cd3
+3bd2ff636db6
+3c96027ec9a1
+3d5499289aba
+3dc1deb68f34
+3ffc1b312b33
+4179ca8bd59c
+41d1764ab050
+43115fa6609d
+45baaee189bb
+45d8f1b8065d
+4627ce8aeb41
+46f6195d40d9
+476e3dfd055d
+47764fcdc302
+47fe0cc196af
+48c12ed060fd
+492e9064b43c
+49655e40299e
+4affa8afff06
+4b8d9ff6f7a1
+4c7dbd3990d0
+4cabf8471a47
+4d18cf40d864
+4d58ccebbf6e
+4dbd6620a2c2
+4dfca81a80e3
+4e12422f74ee
+4e54c7498a38
+4eaef3e28c2c
+4f9719132589
+5210382f6126
+523220196241
+52d8cc47657a
+539ced1282d9
+540d40825dfd
+55387ee71edb
+557fb09faec4
+558956ead169
+5636c60fac66
+5703deb08c3c
+57723bfa5feb
+590d1ab7dbde
+591cf6adb628
+5a8805414963
+5a93ba5e7800
+5b806c7c2ab3
+5b82da2e9c82
+5c0b6bdebe06
+5eaeb789948a
+5f21587bf401
+5f94330bb1fe
+613470c3b706
+61c772ef78f2
+63f02b86e37e
+64fa3a79e544
+65a97f1d26a1
+66281ac9fdd5
+66ea61bdd93d
+66efa8ee54f6
+676b95d82998
+6ad244e757d4
+6ba1d23ca717
+6c28160db4ca
+6ccdbc60da3c
+6ddefcf49ddd
+6f1b0ea34c96
+6fa619ff5ae1
+7089cd0ab825
+710689ef0ee6
+71e9b07cdcf5
+7481cc7d2777
+74f416d4c843
+758c6ec8485d
+75bfb7fb5b1e
+75dad4609646
+77c8b0f71d44
+7920d2bd1822
+793f6cee1f62
+7b2b57afeb63
+7b55ca467e7e
+7cf8ae99e53a
+7d37bd86456e
+7e4e650478eb
+7f0b7341eadf
+7f1c310364ad
+7f696dddb9aa
+807ad72ff990
+8158ed583ed7
+81fdc2fdbb82
+82b2469d8c99
+82b9b1affdfe
+82c8c7b75827
+8415e2456fe1
+844aedd9670c
+853b88623f20
+87d2620cdf4e
+895843f51d67
+89599f1c52cb
+89893982aadc
+8a48e1b597f7
+8a609dd38a63
+8b8816da68cd
+8c40fc86fd22
+8cae95203363
+8e201ac08baf
+8e4bb1cb6ff3
+8e7f0632c210
+8ed5d8722cf5
+8f812e86ab5a
+8fc87d2411a1
+8ff78b3f7d5e
+9047e4d4efc1
+906d27a788ea
+906fd9f6996f
+9112864bd0a1
+913c7de26f15
+9297df666328
+9354d1547620
+9355e16757c2
+936ecc10f3bd
+94310d13bbcf
+9590534853d2
+961ac664d295
+985c2fc2cbbe
+98b33937477d
+98c6fc9863a3
+996b5136e5d1
+9bd9f7b5ef28
+9bf54d6eb3fd
+9c16ac67f759
+9c5b9f92f944
+9d1f1f04d2b6
+9d7443b271ee
+9ddfc4b09ec1
+a0637bd9a6de
+a354f3981709
+a47b12a946f4
+a4ca6ec58ca8
+a5c69c69574d
+a5cfcebddab2
+a71c6f9a4625
+a72788f5c73f
+a7714d7d42f1
+a778b1d3bf32
+a7ee5360dc88
+a82bb8c98ebb
+a910cb4a8da6
+abb62f18eec7
+ad0d7a485b86
+ae46d5c32b33
+ae86a34f686c
+afe252210097
+b06dc2ac7bcf
+b0dd24a5dee6
+b18bd37f523f
+b2a778b073ce
+b2af20683c59
+b3b2357dd190
+b3d6f89cc6a8
+b49a59f09a32
+b550762998ee
+b69e2a5c4add
+b6c69d707a09
+b8d59128c8a9
+b948783f1ea6
+b98fb58cdeec
+ba0e97606d3a
+ba10743ed85b
+ba65a42493cc
+bc190e7b8431
+bd7b2fdf857c
+c161f0135937
+c37c4de58544
+c3d40b050fb7
+c44f1cd72990
+c45d5ba74319
+c5660f88aab4
+c5c9ce77d5f3
+c5f219f83094
+c85ee88351dc
+c8fdea62863e
+c8fef24810ad
+c96a17a27ae0
+ca884067544b
+cb875321e01f
+cb9153708e28
+cb9843fd8472
+ccc864716ae5
+cd743ea31a2d
+cec5e7027b60
+d12848d13c7d
+d2855c6ba379
+d2b7472697a7
+d42f4f12cebb
+d596359abe56
+d6654bd50a57
+d8368e896a17
+d8a877ffb425
+d9feded1d993
+da52466c9509
+db198f135618
+db8a6b2bdaaa
+dbced510e249
+dbddf37684d9
+dd23a658a909
+dda8150c6131
+de6f0779ee17
+de70db944d40
+defca0d91d7a
+dfb41f3b8616
+e0c96d89e8c2
+e10ab9d65abb
+e3e2f91eacc0
+e5c15d31faab
+e5feb452937a
+e864da76e4ac
+e9451d1fef0f
+ea7b94518149
+ebde1b20c5bd
+ec6fe26f0a1e
+ed8b8439fb4f
+ee8ce8f000b5
+f086a8804a41
+f1106ea49d27
+f172049723b0
+f36c2a662d54
+f3ee96994b12
+f4d4b5a2d589
+f51470ba916f
+f5a703490da3
+f644954249e8
+f6c9cbdfe41a
+f863baf58731
+f88993481b27
+f964b01ef2b1
+f99d9bc20ba9
+f9ee52de749d
+faa4e4e9a0be
+fb03d8fdf645
+fc01ebae3a9a
+fc74118b21eb
+fcb32be04a02
+fda0ead3777a
+fdbf8f63bc2d
+fdd3648b25c1
+fea0fb0bc855
+feaabba66c95
+ffcdf5ea60b7
+fff3e4d11d43
+@ gen more-on-line
+01ef549d32fc
+028480a5e3a2
+047c66e03c51
+04873c2b793a
+048c232f37f4
+05a5cc3d9f96
+062e8d5b1089
+0636578f8f5f
+06e712526f52
+0a874dc65bb1
+0ae6e61d304c
+0bbbb21f2149
+0c8c1688be94
+0d841e77d820
+0dbe0947d793
+109ae0b665fe
+10e21a44642a
+10fdcc1ad543
+11455cf5b231
+12f751c76976
+130264174f84
+136f07b93d04
+13cf46f27292
+13e95665690f
+14127c40b43b
+15cae24a76e5
+174f961b0edd
+17a4bf6d5811
+183912f2fecd
+1963f8525b53
+19888ea45e1c
+19d5000687fc
+1c4b72e4faab
+1c5542093b66
+1c8d151598b0
+1fb218d14734
+20bd66a9acf1
+214a6fc2b799
+2182f4cea501
+219e62903e20
+22d2c88f37c4
+23505b4b8668
+24c36deaa05c
+26a201197718
+288221bfde85
+28eaaa13a09f
+2a0ab15aee68
+2b440d795de2
+2d4f9ca93ef7
+2d9303a2dda3
+2ddec494b668
+2f29aaf39252
+30f99a39cd8e
+311709586de9
+32073ba23644
+32f6b32bfd4d
+338de9f6bc60
+33b97578c254
+3565dcff2c21
+3568838405aa
+35c8c60faf61
+368f539d93e1
+36cff8cc7e3d
+371d3868a44b
+37544fe1c050
+37d650007438
+38ab8b4f76c2
+38f4b0221bb8
+3a1133ce0104
+3a5af6c1ee66
+3a713cffe538
+3bab9f403aba
+3c47bb5fd3fe
+3d80e537c0a4
+3f379f063b5f
+40433141b4d6
+40ca3ea040d3
+4186890100f2
+41e35bcb94f2
+41ecb50cd9f2
+41fea84364b9
+426408a1165b
+42742543ee30
+42ba54c4d3b7
+437f2bae132f
+45420cce2c2b
+45969ac86873
+48d7f2b7d464
+49653094ea40
+499e208bed74
+4a6d6bfc575d
+4ab96d8bba8b
+4bf96d51ca77
+4ca0a7f2ab4f
+4da846a37900
+4ee0157ff178
+4f15d8c4abf0
+4f625e4d7128
+4fa527d92b46
+4fed57210e6c
+5355373a84b6
+538e60829625
+539ff587b37a
+55589994abc8
+55e36eb67ae9
+5640ff1fc2bb
+566694899fc2
+57b535f934e6
+580003093a6a
+582c33e70549
+583ce2e7a8ca
+5a56f27449ba
+5aadb347e43e
+5b1f0e37aedf
+5c0e36048b90
+5c5e437c0d7c
+5c72e2f4617b
+5d30d3292e90
+5dc668f72c1d
+5f170613428d
+60a286083a9a
+6143b67c278e
+61ad574f2865
+61c85fba03bf
+61d4ec723e0f
+6263c5347b63
+629bfe3573d7
+62e3a08eb2ce
+63e3fd236ba2
+64117b770047
+6447635c7fa6
+64b90d28f8a3
+64bf7a017461
+68ff91ea5c52
+691c71af30ab
+694853949e7c
+6a3b2b5fe37f
+6ad25e3e9161
+6f54d853b55c
+6f7988bcf928
+6fbf9b9a1cfa
+707514ba338b
+723358f8e9a1
+727a46e2404c
+72e5c222b52d
+73eb5ab8cec3
+744ccb7757b1
+754397e807e9
+7561bd64de4b
+75dbf2ecf18f
+760ca1c36eba
+76b681075502
+78f6d1e4afdd
+795a38e3d8f3
+7a6fb96ea500
+7c9c48e30780
+7cfb766c8e75
+7dfb24f5d779
+7e25e4713615
+7e91292bbdf5
+7f243ce5f645
+7fd2e4096b43
+7fd3124864a3
+8079cb31dfde
+80a1a806231f
+830e7a22e16a
+8431cc054f95
+84c31acddbd6
+84d920daaaa4
+851f11140f4f
+85738455204a
+87547cdd55cd
+877fd4635985
+884d9f314cd7
+8886ae8411ef
+88c7023f68fb
+89306785339a
+895bb245e029
+8a3b91e8cdc6
+8b585ac9838e
+8b9ce4819bac
+8db6fb4b677d
+8de527609706
+8ec9c3383616
+8f3036977b27
+917fdaa1390d
+920f27929b8a
+932ebe07f271
+933109f624d6
+942a86657181
+95522574ef79
+96b21a16b0c3
+97c780155c42
+998ee6fe2b56
+9ad39f28ebf1
+9baf2ead6604
+9d1aad94d662
+9e07aedc0e99
+9edd4b55731f
+9fc2b62247bb
+9fdbafe7446e
+a0b37a59e506
+a2d04176f438
+a32142e4ebbc
+a33735b74e38
+a3a8194dd92f
+a4f125fe1643
+a55e4d0d6591
+a6bdd1c61e0d
+a6f9371b7deb
+a861224d4a8c
+a895624cad2b
+a8adfa9b3d17
+a9787cf09793
+aa0ccf91b940
+ab5726193eec
+ac428279f725
+acabca53a133
+acf2beb9825c
+adc02021f14c
+ae19926d5a7f
+ae701787c461
+aec964ba807c
+af85c52dc4c6
+afe566039b91
+b00b33854841
+b051688bc754
+b09bad1f9902
+b17cd5ff2fc4
+b1d49b0f8e3e
+b476e099ec2f
+b5247021eac5
+b5251b4dadc0
+b553fd5a1f7a
+b6d5cbb62694
+b7774324dbf7
+b929006865e8
+ba12d0d681f8
+ba4cd84c0c17
+bab0789e3c10
+bb937bfde6a6
+bcab45bd07b1
+bd3ada45bef4
+bdee7b3ff467
+bf6e351968fd
+c216f306fc27
+c217cc1d01ad
+c4c1d21f435f
+c648aa4dbc89
+c85266eae9f3
+c8ef5c6583d4
+c92fa2c3a55e
+ca1c6d29cd82
+ca4039b96cbb
+ca968176f2b2
+cb200d675dc4
+cb31cc9cf695
+cb4e0c8d28de
+cbffbef9bf79
+cc37e1e3fd33
+cd1f6bc37b84
+ce5757c6fe15
+ce7ad485add7
+ce9d743d9b47
+cf8b395197e8
+cff4b2589c09
+d2457040d0d4
+d28c2111fc2b
+d2f78f087573
+d3268b5a1d98
+d3769ce53aa4
+d5a26db5d16c
+d755706d1043
+d75c9d0a8948
+d779e0f414bf
+d7ae3c1e3957
+d8eb2dcbb63f
+db04aa98334c
+dbd5fa5448e0
+dcf447313bf6
+deb3f123d31a
+df23c98e2840
+df5ab1285575
+dfce61c5f49d
+e090f5ebeac0
+e19d36ef9479
+e1eb37f6206f
+e32c4db0b87a
+e3e01dced34c
+e4405e16b9c8
+e567e0053a11
+e63d15922067
+e63fa9d221bf
+e7902206597a
+e84b74c47e3e
+e84e79d19e94
+e8dee323075b
+ea357ce125e9
+ea80cc0e3317
+eb0931fa558c
+eba4f5c65ac6
+ec5d9d598e3d
+ec7290f2b276
+ec933ecdf7e9
+ec9b79dba1d5
+ee7f4dd774db
+f0a4cff5b2fe
+f10453408fdc
+f1902e95c244
+f2d642c057c0
+f377e32a3e8c
+f3aa9355bcd9
+f4d6fdb9d721
+f4e08f183fa8
+f5a32624b83f
+f5b2015d652e
+f6f7eb5697b9
+f6f7f81f2b57
+f887eea07b88
+fa3fedab428e
+fe1695d367cd
+fefbf0f2c4ef
+ff1229752403
+ffc41037a84d
+ffe6740d8bdf
+@ gen off-by-one
+921681b20f97
+a8ac432c05a6
+@ gen rl-indented-line
+0bd5b0b4b94e
+0c5bcc3a35c1
+0c749d2879a6
+0de8fde7e78e
+10534e6058f5
+12f806d06595
+1a40f7781932
+1ca7eacf11a5
+1dbe5ac7b671
+203cdbb3393c
+26cfc0e1bf50
+29c9f7a939fc
+2d5fc4d3954d
+32138b81106c
+34e28e15f0a5
+3532197cb338
+35596d44d140
+36f3188a290c
+38d284f601d2
+3d18799aa4f7
+3dc53a2e6542
+40e831263279
+47a21f1ee0d7
+47c5c518e7d1
+4ac46033c91b
+4ea83ec23846
+5118fc6a359e
+533a442c2ee8
+54366eb367a2
+5776902b5f3b
+5b556051f684
+5d9f4c5f48f7
+6039085dc9d6
+61bd4e62b5bf
+628d53d41ffb
+6490ea5de9fd
+65c310ac5208
+6b541c5a51b6
+6c954a497915
+6dc9ad06831c
+6dff01b8b46b
+72d33cb588eb
+740be7ddda9e
+7737d1bd0ef6
+79313823dd28
+7d981b197340
+80042bc15143
+801a128d324b
+81ab3118488d
+8292a0ad9275
+882328dd3969
+8b6198e3fc2c
+911f5d5b535f
+92e52f317d94
+968efb9ae7b1
+96ec2ed7752b
+98e52dff3275
+9cc4f5908f10
+9d1616271e17
+9e647a1b396b
+9fdf74faf96f
+a2740fc27e31
+a2d5a0fdd9af
+a47d43a0d649
+a98935362f5d
+aad890eec9e8
+aca1f10c1aa7
+aced43849cff
+acf523bd9f93
+aeea686c844a
+b1050db1ae40
+b24731d0987d
+b28543e49dc2
+b3dfdac606ae
+b45a74cda36f
+b4dbcc92bf17
+c0e70119feef
+c2e422e125e8
+c8bd4d4a4459
+cb27f6be2532
+cf22130d7ddd
+cf5c8033da01
+cf7387d560a1
+d1022a487a8a
+d97934c6b0d3
+dacf861048d3
+daf537594229
+de67c0ef85a8
+df6a63f818f2
+e16e12f73e3e
+e2700b8c73d5
+e88274f14d02
+e91a8df3d236
+eb388a5ba4ea
+ec535bbe9cfe
+eceb4cda0129
+fabc1146687f
+@ gen rl-misses-line
+072b3e2092bf
+075f87cacf22
+07b001c864bd
+0edd24675f26
+1678b1ec2451
+1a3ba3ad881d
+25946b31987a
+25ca8088a7b8
+2c9951f524c6
+378714f163e8
+678840f0020a
+705eaefc6540
+a121f57eeda0
+c68940990dbc
+cd37c8ef6f30
+d58344b7035b
+e523cf26db76
+ff0f8fc4648c
+@ gen rl-only
+1b6adf0a16b6
+28610a8aa796
+381108a7a564
+439fb6ce1a5c
+47e9df25c748
+4b9b53e3758f
+60d42766f2e1
+6364ac53a684
+63b74dc11c56
+684006cc2c40
+6e2814f372ec
+7695d7c70506
+78edcd785341
+7aea19e7e296
+8a6543a37d2c
+a36f569bbc52
+b55eaee62009
+d7b070704f9c
+e8767a7dbc86
+ed0e033edadb
+f65e47e02e3b
+ff3bc5f8a245
+@ gen rl-top-level-line
+009513e36427
+03549e9a5f50
+041154b50cb1
+044acba6ea44
+0496fdcf982f
+0732d92b496d
+086bbf250ab9
+0905826b8635
+0a4393d2148a
+0bd45f257745
+0cd5d7ccdbef
+0db64df37c62
+0e2bf4259078
+0e355dc867b2
+0e4cd10aab19
+102d25c0b2ba
+10a9307b6f1c
+11b90320b336
+11edf8cb60e9
+1241603a93ad
+15a37fdf1255
+15a8dda24a2c
+15e3c0f1dce5
+16392eb849a0
+16734d1b66c0
+1740f7950350
+1777c331fcc5
+181a644d7f32
+191219d5edd8
+1add8f8fcb3b
+1c179b515eef
+1c756456ce78
+202a44cce60f
+2030f64b5a5e
+21b2968044a0
+23a0e89e828f
+250c30265d4a
+27f1d55f2e60
+291475e4da02
+2a4a680be631
+2a5443e2665a
+2f6d545016fa
+2fbd23bb554b
+2fc89339e6cd
+3078c894660e
+30fe9cf1521f
+310388bcf7ec
+32802a036700
+3611946a414c
+368dd3d4cd6d
+36ce15aa0923
+36f8155c9ab2
+36fcf830e471
+393e6aec0baf
+398b2b0cfbe4
+3bfc8c3877bc
+3da3fccbfc71
+3dfc0603cdcd
+3ea2821a6f61
+3ed0b1fd44b9
+3fe092927ac6
+4005b3b0e3e6
+420932791c6b
+425691766a7d
+42a4a574ab98
+42d146580cb3
+453b69cd8b41
+475818dfa252
+487d694845e3
+48c69ef454b0
+4918b76cda9f
+4bf5e868073a
+4c30136d96e6
+4c77305bc1a6
+4dc95a54cb18
+4e363ac01a8b
+4e497c8bcc75
+51381df868a1
+5150f57fa698
+51f59207a039
+529d7935f265
+52c1dc52872b
+539dc0b0f9f2
+53a2b3be0ffd
+550343fa89ab
+560ae6534f49
+562543129b5b
+562b02d4dc33
+56f190b09117
+579aa5d714cd
+58e575118903
+593200a5c330
+5d028c32a547
+5f4e2bdc63cb
+600a99de9e22
+61968533fe81
+62a5302f7082
+6352ee540fd7
+644130304487
+647180150079
+652c873ac3e3
+65c32e123306
+66233c94b214
+664177b617c0
+66697f146361
+668d4ebbcc8a
+66aad181d932
+673cc7462596
+67abd9ebc6f9
+69c47eba6d60
+6d30d714bab8
+6e64b149a232
+6fab63de5513
+70919ee0d466
+73e0cf974ca3
+74026236e248
+742170a20088
+744c98d7814f
+75fd0aeed3c8
+76d2325acb6d
+76e23cdcb3d3
+785f4b371bc3
+78bdae00ef8c
+78c50b09b34d
+79aa3f76d01f
+79c933e20e28
+7ad0a4efa95f
+7e16e1ffc5de
+7fd2ae90a40e
+80069cdce82e
+80e6ceb40a09
+812c59e136c9
+816002898ba6
+819d0e476036
+8388566d9ca7
+839d154ed3ed
+86942d4081a4
+883577791a47
+899f16027ba3
+8ba28a281f9a
+8bbc5214569d
+8f74e666bb2a
+901820d9b0a1
+90c1c711b53d
+919770159219
+92d7bcc40ae2
+9452c4b27867
+94797249f2e4
+951fa65e1094
+9c0342c5ec3b
+9c4d11195662
+9cb9e23253d2
+9deaa1711dbe
+9fa51f7bf73c
+9fd4ddd1577b
+a0adef7b3586
+a1f78c297790
+a296522420fe
+a314fadb0917
+a61522064c8a
+a70b9c7fd831
+a8261e2e456b
+a843b2e27864
+a9db69f5ff41
+a9ebcc404556
+aa382acc73ca
+ab4c8d922424
+aba5dda49151
+abc5f859b2da
+acd81b1ef2b9
+acf322a8d540
+ad3305db26ae
+ad990d7552f0
+ae110cafb946
+af821bb2eaf5
+b0fe265289f0
+b11bf732bdaa
+b256f55f76aa
+b29f13e1f708
+b2cc411273d0
+b44b82caecb7
+b4a698592e39
+b4d8aebfd9d8
+bad45b3fe52b
+bae1bf28224e
+bb03ef6be208
+bb1b02e18c51
+bbfe28195c2c
+bfbf757699f6
+c35e8cf2bc77
+c3aa3b8f03a9
+c400c49380a0
+c4c12b2297bf
+c4f8b3d5d295
+c6a1701804b9
+c6df31307b4b
+c71ac730fe01
+c897e05e99ac
+caa29a31e373
+cae1be1a2497
+cc2477421e68
+cc72bb27db4f
+cd97f80ab630
+cec161228c8c
+cf8834a32005
+d164d90263c3
+d168d41fee0e
+d18bf492a099
+d1f2752809e8
+d2517fd9c7cc
+d26ce60b4b30
+d291abf31edb
+d2ce29e23e51
+d2fa25b50e13
+d4329b06045c
+d54d325e6fcd
+d6eaa53e84d3
+d842fbcff825
+d8c46d3dbc3a
+d9638ba8fd70
+d981528e439d
+d990dd2a97f9
+d9fecc5d1f9c
+da18079f44f3
+dada9e7ec15d
+dc006849c6c9
+dc046ecc2be4
+dc3b4f3bc280
+dd5a6725257d
+df33ee4edf16
+df3d18dc3458
+e0310b1115cc
+e06080cae352
+e1aaadaaf9f9
+e3b44bd969d6
+e3cbc96669fe
+e3fa2cb64049
+e545ac3424c2
+e657f998b90c
+e6bd9da0b938
+e71c9fcc50e5
+e8337a25b6ba
+e8790e601ce3
+eb929a7c8ecb
+ee914c417990
+eff3b457bb36
+f033c3645169
+f12028f693da
+f1daeb346ac0
+f1e695c66d02
+f47ec11bdbd8
+f4ce2a6ba7bf
+f53c8939dc0e
+f8040c73ca06
+f88345f1f158
+f8f5ebadbbc3
+f914bbc3eed6
+f9aabc8fc7e4
+fa614fb23a1e
+fea33259d290
 @ matrix crash
 0151b2ac7c16
 019e5b10b510
@@ -3837,3 +5241,544 @@ c33c2cc38442
 c41dc962165e
 cf46f01bfffe
 e31d407f8ada
+@ categories
+287	impl-fewer|oracle:lex:token+syn:INDENT|indented|INDENT error
+239	impl-more|impl:P0012|top|^ error
+167	impl-more|impl:P0012|top|DATE error
+164	impl-more|impl:P0012|indented|CAPITAL error
+116	impl-fewer|oracle:lex:token+syn:NUMBER|top|NUMBER error
+77	impl-more|impl:P0012|top|CUSTOM error
+70	impl-more|impl:P0012|indented|INDENT ACCOUNT
+69	impl-fewer|oracle:lex:token|top|^ error
+68	impl-more|impl:P0006+P0012|top|^ error
+65	impl-more|impl:P0012|top|-
+59	impl-more|impl:P0012|top|BALANCE error
+59	impl-more|impl:P0012|top|NUMBER MINUS
+59	impl-more|impl:P0012|top|NUMBER error
+58	impl-more|impl:P0012|top|DATE OPEN
+57	impl-fewer|oracle:lex:date+lex:token|top|^ error
+56	impl-more|impl:P0012|top|DATE ASTERISK
+55	impl-more|impl:P0012|top|ASTERISK error
+53	impl-more|impl:P0012|indented|ACCOUNT error
+53	impl-more|impl:P0012|top|FLAG error
+53	impl-more|impl:P0012|top|OPEN error
+45	impl-more|impl:P0012|top|CURRENCY error
+43	impl-more|impl:P0012+P0015|top|^ error
+43	impl-more|impl:P0012|top|HASH error
+41	impl-fewer|oracle:lex:number+lex:token|top|^ error
+41	impl-more|impl:P0012|indented|INDENT KEY
+36	impl-more|impl:P0012+P0026|top|^ error
+35	impl-more|impl:P0012+P0026|top|BALANCE error
+34	impl-more|impl:P0012|top|NUMBER NUMBER
+27	impl-fewer|oracle:lex:token+syn:CURRENCY|top|CURRENCY error
+27	impl-more|impl:P0006+P0012|top|ACCOUNT error
+27	impl-more|impl:P0012+P0026|indented|INDENT error
+27	impl-more|impl:P0012|top|SLASH error
+26	impl-more|impl:P0012+P0026|top|FLAG error
+23	impl-more|impl:P0012|indented|INDENT error
+22	impl-more|impl:P0012|top|TAG error
+20	impl-fewer|oracle:lex:token|top|DATE error
+20	impl-more|impl:P0012|indented|INDENT NUMBER
+19	impl-more|impl:P0006+P0012|top|CURRENCY error
+19	impl-more|impl:P0012+P0026|indented|NUMBER error
+19	impl-more|impl:P0012+P0026|top|CUSTOM error
+19	impl-more|impl:P0012|top|STRING error
+18	impl-more|impl:P0012|indented|HASH error
+18	impl-more|impl:P0012|indented|NUMBER error
+18	impl-more|impl:P0012|top|ACCOUNT error
+18	impl-more|impl:P0012|top|MINUS error
+17	impl-more|impl:P0012+P0026|top|NUMBER error
+15	impl-more|impl:P0012+P0026|top|DATE error
+15	impl-more|impl:P0012|indented|FLAG error
+14	impl-fewer|oracle:lex:number+lex:token+syn:NUMBER|top|NUMBER error
+14	impl-fewer|oracle:lex:token+syn:KEY|top|COLON error
+14	impl-fewer|oracle:lex:token|indented|COLON error
+13	impl-fewer|oracle:lex:token+syn:NUMBER|top|ACCOUNT error
+13	impl-fewer|oracle:lex:token|indented|INDENT error
+13	impl-fewer|oracle:syn:INDENT|indented|INDENT ACCOUNT
+13	impl-more|impl:P0006+P0012+P0026|top|^ error
+13	impl-more|impl:P0006+P0012|top|COLON error
+12	impl-fewer|oracle:lex:date+lex:token+syn:INDENT|indented|INDENT error
+12	impl-fewer|oracle:lex:token+syn:SLASH|top|SLASH error
+12	impl-more|impl:P0006+P0012|top|NUMBER error
+12	impl-more|impl:P0012|top|DATE DATE
+11	eof|impl:P0021|eof|-
+11	eof|impl:P0023|eof|-
+11	impl-more|impl:P0012+P0015+P0026|top|^ error
+11	impl-more|impl:P0020|top|POPTAG TAG
+11	impl-more|impl:P0022|top|POPMETA KEY
+11	impl-more|impl:P0025|top|DATE OPEN
+10	impl-fewer|oracle:lex:token+syn:NUMBER|top|COMMA error
+10	impl-more|impl:P0012+P0026|indented|ACCOUNT error
+10	impl-more|impl:P0012|indented|COLON error
+10	impl-more|impl:P0012|top|COLON error
+10	impl-more|impl:P0012|top|DATE FLAG
+9	impl-fewer|oracle:lex:token+syn:NUMBER|top|CAPITAL error
+9	impl-fewer|oracle:lex:token+syn:NUMBER|top|COLON error
+9	impl-more|impl:P0012+P0015|top|DATE error
+9	impl-more|impl:P0012|indented|CURRENCY error
+9	impl-more|impl:P0012|top|DATE HASH
+8	impl-fewer|oracle:lex:token+syn:INDENT|indented|ACCOUNT error
+8	impl-more|impl:P0006+P0012+P0026|top|NUMBER error
+8	impl-more|impl:P0012|indented|LCURL error
+8	impl-more|impl:P0012|top|PAD error
+7	impl-fewer|oracle:lex:date+lex:token|indented|INDENT error
+7	impl-fewer|oracle:lex:token+syn:ACCOUNT|top|ACCOUNT error
+7	impl-fewer|oracle:lex:token+syn:HASH|indented|HASH error
+7	impl-fewer|oracle:lex:token+syn:NUMBER|top|LCURL error
+7	impl-fewer|oracle:lex:token+syn:NUMBER|top|MINUS error
+7	impl-fewer|oracle:lex:token|indented|NUMBER error
+7	impl-more|impl:P0006+P0012+P0026|top|CURRENCY error
+7	impl-more|impl:P0006+P0012|indented|ACCOUNT error
+7	impl-more|impl:P0006+P0012|top|ACCOUNT ACCOUNT
+7	impl-more|impl:P0006+P0012|top|DATE error
+7	impl-more|impl:P0012+P0015|indented|INDENT error
+7	impl-more|impl:P0012+P0026|top|HASH error
+7	impl-more|impl:P0012|indented|DATE OPEN
+7	impl-more|impl:P0012|top|DATE BALANCE
+7	impl-more|impl:P0012|top|DATE CUSTOM
+6	impl-fewer|oracle:lex:token+syn:NUMBER|top|CURRENCY error
+6	impl-fewer|oracle:lex:token|indented|CURRENCY error
+6	impl-more|impl:P0006+P0012+P0026|top|ACCOUNT error
+6	impl-more|impl:P0012+P0015|indented|COLON error
+6	impl-more|impl:P0012+P0026|top|ASTERISK error
+6	impl-more|impl:P0012|indented|INDENT DATE
+6	impl-more|impl:P0012|indented|INDENT OPTION
+6	impl-more|impl:P0012|indented|INDENT STRING
+6	impl-more|impl:P0012|top|FLAG
+6	impl-more|impl:P0012|top|LINK error
+6	impl-more|impl:P0012|top|PLUS error
+5	impl-fewer|oracle:lex:number+syn:FLAG|indented|FLAG error
+5	impl-fewer|oracle:lex:token+syn:FLAG|indented|FLAG error
+5	impl-fewer|oracle:lex:token+syn:LCURL|top|LCURL error
+5	impl-fewer|oracle:lex:token+syn:MINUS|top|MINUS error
+5	impl-fewer|oracle:lex:token+syn:NUMBER|top|HASH error
+5	impl-more|impl:P0006|top|ACCOUNT
+5	impl-more|impl:P0012+P0026|top|CURRENCY error
+5	impl-more|impl:P0012|indented|PLUS error
+5	impl-more|impl:P0012|top|CURRENCY
+5	impl-more|impl:P0012|top|LCURL error
+5	impl-more|impl:P0012|top|OPTION STRING
+4	impl-fewer|oracle:ParserError+syn:NUMBER|indented|INDENT ACCOUNT
+4	impl-fewer|oracle:lex:number+lex:token+syn:INDENT|indented|INDENT error
+4	impl-fewer|oracle:lex:number+lex:token|indented|ACCOUNT error
+4	impl-fewer|oracle:lex:number+lex:token|indented|INDENT error
+4	impl-fewer|oracle:lex:number+syn:INDENT|indented|INDENT error
+4	impl-fewer|oracle:lex:token+syn:COMMA|top|COMMA error
+4	impl-fewer|oracle:lex:token+syn:DATE|indented|DATE error
+4	impl-fewer|oracle:lex:token+syn:LINK|top|LINK error
+4	impl-fewer|oracle:lex:token|indented|ACCOUNT error
+4	impl-fewer|oracle:lex:token|indented|FLAG error
+4	impl-fewer|oracle:lex:token|indented|STRING error
+4	impl-more|impl:P0012+P0015|indented|SLASH error
+4	impl-more|impl:P0012+P0024|top|FLAG error
+4	impl-more|impl:P0012+P0026|top|PRICE error
+4	impl-more|impl:P0012|indented|-
+4	impl-more|impl:P0012|indented|INDENT FLAG
+4	impl-more|impl:P0012|indented|MINUS error
+4	impl-more|impl:P0012|indented|TAG error
+4	impl-more|impl:P0012|top|DATE ACCOUNT
+4	impl-more|impl:P0012|top|DATE NUMBER
+4	impl-more|impl:P0012|top|NUMBER
+4	impl-more|impl:P0012|top|PRICE error
+4	impl-more|impl:P0012|top|PUSHMETA error
+4	impl-more|impl:P0012|top|PUSHTAG TAG
+4	impl-more|impl:P0012|top|TILDE error
+3	impl-fewer|oracle:ParserError|indented|INDENT ACCOUNT
+3	impl-fewer|oracle:lex:number+lex:token+syn:CURRENCY|top|COMMA error
+3	impl-fewer|oracle:lex:token+syn:ACCOUNT|top|COLON error
+3	impl-fewer|oracle:lex:token+syn:COMMA|top|COLON error
+3	impl-fewer|oracle:lex:token+syn:INDENT|indented|DATE error
+3	impl-fewer|oracle:lex:token+syn:LPAREN|top|LPAREN error
+3	impl-fewer|oracle:lex:token+syn:MINUS|top|NUMBER error
+3	impl-fewer|oracle:lex:token+syn:MINUS|top|SLASH error
+3	impl-fewer|oracle:lex:token+syn:PRICE|top|PRICE error
+3	impl-fewer|oracle:lex:token+syn:RPAREN|top|RPAREN error
+3	impl-fewer|oracle:lex:token+syn:TAG|top|TAG error
+3	impl-fewer|oracle:lex:token|indented|RPAREN error
+3	impl-fewer|oracle:syn:NUMBER|top|DATE NUMBER
+3	impl-more|impl:P0006+P0012+P0026|indented|ACCOUNT error
+3	impl-more|impl:P0006+P0012+P0026|top|HASH error
+3	impl-more|impl:P0006+P0012|top|HASH error
+3	impl-more|impl:P0006+P0012|top|NUMBER MINUS
+3	impl-more|impl:P0006+P0012|top|SLASH error
+3	impl-more|impl:P0012+P0015|indented|COMMA error
+3	impl-more|impl:P0012+P0015|indented|^ error
+3	impl-more|impl:P0012+P0015|top|CUSTOM error
+3	impl-more|impl:P0012+P0015|top|NUMBER error
+3	impl-more|impl:P0012+P0026|indented|CURRENCY error
+3	impl-more|impl:P0012+P0026|top|COMMA error
+3	impl-more|impl:P0012+P0026|top|EVENT error
+3	impl-more|impl:P0012|indented|INDENT CUSTOM
+3	impl-more|impl:P0012|indented|INDENT LCURLCURL
+3	impl-more|impl:P0012|indented|PUSHMETA KEY
+3	impl-more|impl:P0012|top|ACCOUNT
+3	impl-more|impl:P0012|top|ACCOUNT CAPITAL
+3	impl-more|impl:P0012|top|COMMA error
+3	impl-more|impl:P0012|top|POPTAG error
+3	impl-more|impl:P0012|top|PUSHMETA KEY
+3	impl-more|impl:P0012|top|RCURL error
+3	impl-more|impl:P0012|top|STRING
+3	impl-more|impl:P0026|top|DATE OPEN
+2	eof|oracle:ParserError|eof|-
+2	impl-fewer|oracle:ParserError+syn:MINUS|indented|INDENT ACCOUNT
+2	impl-fewer|oracle:ParserError|top|DATE CAPITAL
+2	impl-fewer|oracle:lex:date+lex:number+lex:token+syn:INDENT|indented|INDENT error
+2	impl-fewer|oracle:lex:number+lex:token+syn:COMMA|top|COMMA error
+2	impl-fewer|oracle:lex:number+lex:token+syn:LPAREN|top|LPAREN error
+2	impl-fewer|oracle:lex:number+lex:token|top|COMMA error
+2	impl-fewer|oracle:lex:token+syn:COMMA|indented|COMMA error
+2	impl-fewer|oracle:lex:token+syn:PIPE|indented|PIPE error
+2	impl-fewer|oracle:lex:token+syn:TAG|top|COMMA error
+2	impl-fewer|oracle:lex:token|top|NUMBER error
+2	impl-fewer|oracle:lex:token|top|SLASH error
+2	impl-more|impl:P0006+P0012+P0026|indented|INDENT error
+2	impl-more|impl:P0006+P0012+P0026|top|COLON error
+2	impl-more|impl:P0006+P0012+P0026|top|DATE error
+2	impl-more|impl:P0006+P0012|top|-
+2	impl-more|impl:P0006+P0012|top|ACCOUNT
+2	impl-more|impl:P0006|top|ACCOUNT COLON
+2	impl-more|impl:P0012+P0015+P0026|indented|INDENT error
+2	impl-more|impl:P0012+P0015|indented|LCURL error
+2	impl-more|impl:P0012+P0015|indented|MINUS error
+2	impl-more|impl:P0012+P0015|top|ACCOUNT error
+2	impl-more|impl:P0012+P0015|top|FLAG error
+2	impl-more|impl:P0012+P0024|top|HASH error
+2	impl-more|impl:P0012+P0026|indented|AT error
+2	impl-more|impl:P0012+P0026|indented|FLAG error
+2	impl-more|impl:P0012+P0026|indented|HASH error
+2	impl-more|impl:P0012+P0026|indented|OPTION error
+2	impl-more|impl:P0012+P0026|indented|PUSHTAG error
+2	impl-more|impl:P0012+P0026|top|ACCOUNT error
+2	impl-more|impl:P0012+P0026|top|DOCUMENT error
+2	impl-more|impl:P0012+P0026|top|NONE error
+2	impl-more|impl:P0012+P0026|top|OPEN error
+2	impl-more|impl:P0012+P0026|top|OPTION error
+2	impl-more|impl:P0012+P0026|top|PAD error
+2	impl-more|impl:P0012+P0026|top|QUERY error
+2	impl-more|impl:P0012+P0026|top|STRING error
+2	impl-more|impl:P0012+P0026|top|TAG error
+2	impl-more|impl:P0012|indented|COMMA error
+2	impl-more|impl:P0012|indented|INDENT
+2	impl-more|impl:P0012|indented|INDENT AT
+2	impl-more|impl:P0012|indented|INDENT CAPITAL
+2	impl-more|impl:P0012|indented|INDENT PAD
+2	impl-more|impl:P0012|indented|INDENT PUSHMETA
+2	impl-more|impl:P0012|indented|INDENT TAG
+2	impl-more|impl:P0012|indented|INDENT TILDE
+2	impl-more|impl:P0012|indented|OPEN error
+2	impl-more|impl:P0012|indented|RPAREN error
+2	impl-more|impl:P0012|top|ASTERISK
+2	impl-more|impl:P0012|top|AT error
+2	impl-more|impl:P0012|top|ATAT CAPITAL
+2	impl-more|impl:P0012|top|CAPITAL
+2	impl-more|impl:P0012|top|COLON NUMBER
+2	impl-more|impl:P0012|top|COMMODITY
+2	impl-more|impl:P0012|top|CURRENCY MINUS
+2	impl-more|impl:P0012|top|DATE NOTE
+2	impl-more|impl:P0012|top|DATE PRICE
+2	impl-more|impl:P0012|top|EVENT error
+2	impl-more|impl:P0012|top|INCLUDE
+2	impl-more|impl:P0012|top|INCLUDE STRING
+2	impl-more|impl:P0012|top|LINK FLAG
+2	impl-more|impl:P0012|top|NONE error
+2	impl-more|impl:P0012|top|NOTE error
+2	impl-more|impl:P0012|top|POPMETA error
+2	impl-more|impl:P0012|top|RCURL COLON
+2	impl-more|impl:P0012|top|RPAREN error
+2	impl-more|impl:P0012|top|TXN error
+2	impl-more|impl:P0026|indented|INDENT ACCOUNT
+1	impl-fewer|oracle:ParserError+lex:token|top|^ error
+1	impl-fewer|oracle:ParserSyntaxError+lex:token+syn:HASH|top|HASH error
+1	impl-fewer|oracle:ParserSyntaxError+lex:token|top|PIPE error
+1	impl-fewer|oracle:ParserSyntaxError+syn:HASH|top|DATE FLAG
+1	impl-fewer|oracle:ParserSyntaxError|top|DATE ASTERISK
+1	impl-fewer|oracle:lex:date+lex:number+lex:token|indented|INDENT error
+1	impl-fewer|oracle:lex:number+lex:token+syn:CLOSE|top|POPTAG error
+1	impl-fewer|oracle:lex:number+lex:token+syn:HASH|top|PLUS error
+1	impl-fewer|oracle:lex:number+lex:token+syn:INDENT|indented|EVENT error
+1	impl-fewer|oracle:lex:number+lex:token+syn:KEY|top|COLON error
+1	impl-fewer|oracle:lex:number+lex:token+syn:LPAREN|top|COMMA error
+1	impl-fewer|oracle:lex:number+lex:token+syn:PLUS|top|PLUS error
+1	impl-fewer|oracle:lex:number+lex:token+syn:RCURL|indented|RCURL error
+1	impl-fewer|oracle:lex:number+lex:token|indented|COLON error
+1	impl-fewer|oracle:lex:number+lex:token|indented|COMMA error
+1	impl-fewer|oracle:lex:number+lex:token|indented|FLAG error
+1	impl-fewer|oracle:lex:number+lex:token|indented|LPAREN error
+1	impl-fewer|oracle:lex:number+lex:token|top|DATE error
+1	impl-fewer|oracle:lex:number+syn:NOTE|top|PUSHTAG error
+1	impl-fewer|oracle:lex:number+syn:QUERY|top|TAG error
+1	impl-fewer|oracle:lex:number+syn:RCURLCURL|top|CLOSE error
+1	impl-fewer|oracle:lex:token+syn:ACCOUNT|top|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:ASTERISK|indented|ASTERISK error
+1	impl-fewer|oracle:lex:token+syn:ASTERISK|top|TAG error
+1	impl-fewer|oracle:lex:token+syn:AT|top|AT error
+1	impl-fewer|oracle:lex:token+syn:AT|top|MINUS error
+1	impl-fewer|oracle:lex:token+syn:AT|top|NUMBER error
+1	impl-fewer|oracle:lex:token+syn:CAPITAL|top|CAPITAL error
+1	impl-fewer|oracle:lex:token+syn:COLON|indented|COMMA error
+1	impl-fewer|oracle:lex:token+syn:COMMA|top|MINUS error
+1	impl-fewer|oracle:lex:token+syn:COMMA|top|RPAREN error
+1	impl-fewer|oracle:lex:token+syn:COMMODITY|top|PLUGIN error
+1	impl-fewer|oracle:lex:token+syn:CURRENCY|top|COLON error
+1	impl-fewer|oracle:lex:token+syn:CURRENCY|top|FLAG error
+1	impl-fewer|oracle:lex:token+syn:CURRENCY|top|LCURL error
+1	impl-fewer|oracle:lex:token+syn:CURRENCY|top|NUMBER error
+1	impl-fewer|oracle:lex:token+syn:CURRENCY|top|TXN error
+1	impl-fewer|oracle:lex:token+syn:FLAG|indented|PLUS error
+1	impl-fewer|oracle:lex:token+syn:FLAG|top|COLON error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|COLON error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|FLAG error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|MINUS error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|NUMBER error
+1	impl-fewer|oracle:lex:token+syn:INDENT|indented|RPAREN error
+1	impl-fewer|oracle:lex:token+syn:LCURL|top|ACCOUNT error
+1	impl-fewer|oracle:lex:token+syn:LCURL|top|COLON error
+1	impl-fewer|oracle:lex:token+syn:LINK|top|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:LPAREN|indented|LPAREN error
+1	impl-fewer|oracle:lex:token+syn:MINUS|top|ACCOUNT error
+1	impl-fewer|oracle:lex:token+syn:MINUS|top|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:MINUS|top|HASH error
+1	impl-fewer|oracle:lex:token+syn:NUMBER|indented|NUMBER error
+1	impl-fewer|oracle:lex:token+syn:NUMBER|top|AT error
+1	impl-fewer|oracle:lex:token+syn:NUMBER|top|OPEN error
+1	impl-fewer|oracle:lex:token+syn:NUMBER|top|PLUS error
+1	impl-fewer|oracle:lex:token+syn:NUMBER|top|TILDE error
+1	impl-fewer|oracle:lex:token+syn:PLUS|top|PLUS error
+1	impl-fewer|oracle:lex:token+syn:PLUS|top|TILDE error
+1	impl-fewer|oracle:lex:token+syn:RCURLCURL|top|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:RCURL|indented|RCURL error
+1	impl-fewer|oracle:lex:token+syn:RCURL|top|NUMBER error
+1	impl-fewer|oracle:lex:token+syn:RPAREN|indented|RPAREN error
+1	impl-fewer|oracle:lex:token+syn:RPAREN|top|ACCOUNT error
+1	impl-fewer|oracle:lex:token+syn:RPAREN|top|COLON error
+1	impl-fewer|oracle:lex:token+syn:RPAREN|top|FLAG error
+1	impl-fewer|oracle:lex:token+syn:RPAREN|top|LINK error
+1	impl-fewer|oracle:lex:token+syn:SLASH|top|CURRENCY error
+1	impl-fewer|oracle:lex:token+syn:TILDE|indented|TILDE error
+1	impl-fewer|oracle:lex:token+syn:TILDE|top|TILDE error
+1	impl-fewer|oracle:lex:token+syn:TXN|top|TXN error
+1	impl-fewer|oracle:lex:token|top|FLAG error
+1	impl-fewer|oracle:lex:token|top|STRING error
+1	impl-fewer|oracle:syn:DATE|top|DATE DATE
+1	impl-more|impl:P0006+P0012+P0015+P0026|top|^ error
+1	impl-more|impl:P0006+P0012+P0015|top|NUMBER error
+1	impl-more|impl:P0006+P0012+P0026|indented|COLON error
+1	impl-more|impl:P0006+P0012+P0026|indented|LCURL error
+1	impl-more|impl:P0006+P0012+P0026|indented|PRICE error
+1	impl-more|impl:P0006+P0012+P0026|top|CAPITAL error
+1	impl-more|impl:P0006+P0012+P0026|top|COMMA error
+1	impl-more|impl:P0006+P0012+P0026|top|LINK error
+1	impl-more|impl:P0006+P0012+P0026|top|RPAREN error
+1	impl-more|impl:P0006+P0012|indented|COLON error
+1	impl-more|impl:P0006+P0012|indented|DATE CLOSE
+1	impl-more|impl:P0006+P0012|indented|INDENT QUERY
+1	impl-more|impl:P0006+P0012|indented|INDENT error
+1	impl-more|impl:P0006+P0012|indented|NUMBER error
+1	impl-more|impl:P0006+P0012|indented|RPAREN error
+1	impl-more|impl:P0006+P0012|top|ACCOUNT AT
+1	impl-more|impl:P0006+P0012|top|ACCOUNT CLOSE
+1	impl-more|impl:P0006+P0012|top|COMMA error
+1	impl-more|impl:P0006+P0012|top|CURRENCY FLAG
+1	impl-more|impl:P0006+P0012|top|LINK error
+1	impl-more|impl:P0006+P0012|top|PIPE error
+1	impl-more|impl:P0006+P0012|top|TAG error
+1	impl-more|impl:P0006+P0015|top|ACCOUNT error
+1	impl-more|impl:P0006+P0026|top|PLUGIN error
+1	impl-more|impl:P0006|indented|ACCOUNT
+1	impl-more|impl:P0006|top|-
+1	impl-more|impl:P0006|top|ACCOUNT CAPITAL
+1	impl-more|impl:P0006|top|ACCOUNT OPEN
+1	impl-more|impl:P0006|top|COMMA ACCOUNT
+1	impl-more|impl:P0006|top|DATE OPEN
+1	impl-more|impl:P0006|top|OPTION OPTION
+1	impl-more|impl:P0006|top|TILDE DOCUMENT
+1	impl-more|impl:P0012+P0015+P0026|indented|CURRENCY error
+1	impl-more|impl:P0012+P0015+P0026|top|ASTERISK error
+1	impl-more|impl:P0012+P0015+P0026|top|NUMBER error
+1	impl-more|impl:P0012+P0015+P0026|top|QUERY error
+1	impl-more|impl:P0012+P0015|indented|CURRENCY error
+1	impl-more|impl:P0012+P0015|indented|INCLUDE error
+1	impl-more|impl:P0012+P0015|indented|PLUGIN error
+1	impl-more|impl:P0012+P0015|indented|PLUS error
+1	impl-more|impl:P0012+P0015|top|-
+1	impl-more|impl:P0012+P0015|top|AT error
+1	impl-more|impl:P0012+P0015|top|COLON error
+1	impl-more|impl:P0012+P0015|top|COMMODITY error
+1	impl-more|impl:P0012+P0015|top|DOCUMENT error
+1	impl-more|impl:P0012+P0015|top|OPEN error
+1	impl-more|impl:P0012+P0015|top|PAD error
+1	impl-more|impl:P0012+P0015|top|PIPE error
+1	impl-more|impl:P0012+P0015|top|PRICE error
+1	impl-more|impl:P0012+P0015|top|RCURLCURL error
+1	impl-more|impl:P0012+P0024+P0026|top|PIPE error
+1	impl-more|impl:P0012+P0024|top|CURRENCY error
+1	impl-more|impl:P0012+P0024|top|DATE ASTERISK
+1	impl-more|impl:P0012+P0024|top|DATE FLAG
+1	impl-more|impl:P0012+P0024|top|PIPE error
+1	impl-more|impl:P0012+P0024|top|STRING error
+1	impl-more|impl:P0012+P0026|indented|CLOSE error
+1	impl-more|impl:P0012+P0026|indented|COMMODITY error
+1	impl-more|impl:P0012+P0026|indented|DATE error
+1	impl-more|impl:P0012+P0026|indented|INDENT ACCOUNT
+1	impl-more|impl:P0012+P0026|indented|OPEN error
+1	impl-more|impl:P0012+P0026|indented|QUERY error
+1	impl-more|impl:P0012+P0026|indented|STRING error
+1	impl-more|impl:P0012+P0026|top|CAPITAL error
+1	impl-more|impl:P0012+P0026|top|CLOSE error
+1	impl-more|impl:P0012+P0026|top|COLON error
+1	impl-more|impl:P0012+P0026|top|INCLUDE error
+1	impl-more|impl:P0012+P0026|top|LCURLCURL error
+1	impl-more|impl:P0012+P0026|top|PIPE error
+1	impl-more|impl:P0012+P0026|top|PLUGIN error
+1	impl-more|impl:P0012+P0026|top|PLUS error
+1	impl-more|impl:P0012+P0026|top|POPTAG error
+1	impl-more|impl:P0012+P0026|top|TILDE error
+1	impl-more|impl:P0012+P0026|top|TXN error
+1	impl-more|impl:P0012|indented|ACCOUNT CURRENCY
+1	impl-more|impl:P0012|indented|ASTERISK error
+1	impl-more|impl:P0012|indented|BALANCE TILDE
+1	impl-more|impl:P0012|indented|BOOL error
+1	impl-more|impl:P0012|indented|CURRENCY INCLUDE
+1	impl-more|impl:P0012|indented|INDENT ASTERISK
+1	impl-more|impl:P0012|indented|INDENT ATAT
+1	impl-more|impl:P0012|indented|INDENT BOOL
+1	impl-more|impl:P0012|indented|INDENT COMMA
+1	impl-more|impl:P0012|indented|INDENT COMMODITY
+1	impl-more|impl:P0012|indented|INDENT CURRENCY
+1	impl-more|impl:P0012|indented|INDENT INCLUDE
+1	impl-more|impl:P0012|indented|INDENT LCURL
+1	impl-more|impl:P0012|indented|INDENT LINK
+1	impl-more|impl:P0012|indented|INDENT MINUS
+1	impl-more|impl:P0012|indented|INDENT NONE
+1	impl-more|impl:P0012|indented|INDENT OPEN
+1	impl-more|impl:P0012|indented|INDENT PLUGIN
+1	impl-more|impl:P0012|indented|INDENT PUSHTAG
+1	impl-more|impl:P0012|indented|INDENT RCURLCURL
+1	impl-more|impl:P0012|indented|INDENT SLASH
+1	impl-more|impl:P0012|indented|LCURL COMMA
+1	impl-more|impl:P0012|indented|LINK BOOL
+1	impl-more|impl:P0012|indented|LINK error
+1	impl-more|impl:P0012|indented|NUMBER COMMA
+1	impl-more|impl:P0012|indented|NUMBER NUMBER
+1	impl-more|impl:P0012|indented|OPTION error
+1	impl-more|impl:P0012|indented|PAD error
+1	impl-more|impl:P0012|indented|POPTAG error
+1	impl-more|impl:P0012|indented|PUSHMETA error
+1	impl-more|impl:P0012|indented|PUSHTAG error
+1	impl-more|impl:P0012|indented|QUERY ACCOUNT
+1	impl-more|impl:P0012|indented|STRING
+1	impl-more|impl:P0012|indented|TAG
+1	impl-more|impl:P0012|indented|TILDE error
+1	impl-more|impl:P0012|indented|^ error
+1	impl-more|impl:P0012|top|ACCOUNT ACCOUNT
+1	impl-more|impl:P0012|top|ASTERISK HASH
+1	impl-more|impl:P0012|top|ASTERISK PIPE
+1	impl-more|impl:P0012|top|ASTERISK TILDE
+1	impl-more|impl:P0012|top|AT
+1	impl-more|impl:P0012|top|AT CAPITAL
+1	impl-more|impl:P0012|top|AT PAD
+1	impl-more|impl:P0012|top|AT TAG
+1	impl-more|impl:P0012|top|ATAT error
+1	impl-more|impl:P0012|top|BALANCE
+1	impl-more|impl:P0012|top|BALANCE AT
+1	impl-more|impl:P0012|top|BALANCE PLUGIN
+1	impl-more|impl:P0012|top|BALANCE RPAREN
+1	impl-more|impl:P0012|top|CAPITAL ASTERISK
+1	impl-more|impl:P0012|top|CAPITAL KEY
+1	impl-more|impl:P0012|top|CAPITAL PAD
+1	impl-more|impl:P0012|top|CLOSE error
+1	impl-more|impl:P0012|top|COLON
+1	impl-more|impl:P0012|top|COMMA ASTERISK
+1	impl-more|impl:P0012|top|COMMA SLASH
+1	impl-more|impl:P0012|top|COMMODITY error
+1	impl-more|impl:P0012|top|CURRENCY BALANCE
+1	impl-more|impl:P0012|top|CURRENCY CURRENCY
+1	impl-more|impl:P0012|top|CURRENCY DOCUMENT
+1	impl-more|impl:P0012|top|CURRENCY HASH
+1	impl-more|impl:P0012|top|CURRENCY LCURLCURL
+1	impl-more|impl:P0012|top|CURRENCY PAD
+1	impl-more|impl:P0012|top|CURRENCY RPAREN
+1	impl-more|impl:P0012|top|CURRENCY STRING
+1	impl-more|impl:P0012|top|CUSTOM PLUS
+1	impl-more|impl:P0012|top|DATE
+1	impl-more|impl:P0012|top|DATE CLOSE
+1	impl-more|impl:P0012|top|DATE DOCUMENT
+1	impl-more|impl:P0012|top|DATE EVENT
+1	impl-more|impl:P0012|top|DATE STRING
+1	impl-more|impl:P0012|top|DOCUMENT EVENT
+1	impl-more|impl:P0012|top|EVENT FLAG
+1	impl-more|impl:P0012|top|EVENT LCURL
+1	impl-more|impl:P0012|top|EVENT PUSHTAG
+1	impl-more|impl:P0012|top|EVENT RCURLCURL
+1	impl-more|impl:P0012|top|FLAG DOCUMENT
+1	impl-more|impl:P0012|top|FLAG NUMBER
+1	impl-more|impl:P0012|top|FLAG POPMETA
+1	impl-more|impl:P0012|top|FLAG PRICE
+1	impl-more|impl:P0012|top|FLAG PUSHTAG
+1	impl-more|impl:P0012|top|FLAG RCURL
+1	impl-more|impl:P0012|top|FLAG STRING
+1	impl-more|impl:P0012|top|HASH
+1	impl-more|impl:P0012|top|HASH BALANCE
+1	impl-more|impl:P0012|top|INCLUDE CLOSE
+1	impl-more|impl:P0012|top|INCLUDE POPMETA
+1	impl-more|impl:P0012|top|INCLUDE TAG
+1	impl-more|impl:P0012|top|LCURL NUMBER
+1	impl-more|impl:P0012|top|LCURLCURL HASH
+1	impl-more|impl:P0012|top|LINK ATAT
+1	impl-more|impl:P0012|top|LINK INCLUDE
+1	impl-more|impl:P0012|top|LINK TAG
+1	impl-more|impl:P0012|top|LPAREN FLAG
+1	impl-more|impl:P0012|top|MINUS NUMBER
+1	impl-more|impl:P0012|top|NONE
+1	impl-more|impl:P0012|top|NOTE
+1	impl-more|impl:P0012|top|NOTE BALANCE
+1	impl-more|impl:P0012|top|NUMBER ACCOUNT
+1	impl-more|impl:P0012|top|NUMBER CAPITAL
+1	impl-more|impl:P0012|top|NUMBER CURRENCY
+1	impl-more|impl:P0012|top|NUMBER HASH
+1	impl-more|impl:P0012|top|NUMBER LINK
+1	impl-more|impl:P0012|top|NUMBER PUSHTAG
+1	impl-more|impl:P0012|top|OPEN
+1	impl-more|impl:P0012|top|OPEN KEY
+1	impl-more|impl:P0012|top|OPEN PRICE
+1	impl-more|impl:P0012|top|OPTION
+1	impl-more|impl:P0012|top|OPTION DATE
+1	impl-more|impl:P0012|top|OPTION HASH
+1	impl-more|impl:P0012|top|OPTION NUMBER
+1	impl-more|impl:P0012|top|OPTION PIPE
+1	impl-more|impl:P0012|top|OPTION PLUGIN
+1	impl-more|impl:P0012|top|OPTION error
+1	impl-more|impl:P0012|top|PAD
+1	impl-more|impl:P0012|top|PAD COMMODITY
+1	impl-more|impl:P0012|top|PAD LPAREN
+1	impl-more|impl:P0012|top|PAD PUSHMETA
+1	impl-more|impl:P0012|top|PIPE ATAT
+1	impl-more|impl:P0012|top|PIPE error
+1	impl-more|impl:P0012|top|PLUGIN LCURLCURL
+1	impl-more|impl:P0012|top|PLUGIN error
+1	impl-more|impl:P0012|top|PLUS TXN
+1	impl-more|impl:P0012|top|POPTAG ATAT
+1	impl-more|impl:P0012|top|POPTAG CAPITAL
+1	impl-more|impl:P0012|top|PRICE
+1	impl-more|impl:P0012|top|PUSHTAG CURRENCY
+1	impl-more|impl:P0012|top|PUSHTAG TILDE
+1	impl-more|impl:P0012|top|QUERY FLAG
+1	impl-more|impl:P0012|top|QUERY LINK
+1	impl-more|impl:P0012|top|RCURL MINUS
+1	impl-more|impl:P0012|top|RCURLCURL error
+1	impl-more|impl:P0012|top|RPAREN
+1	impl-more|impl:P0012|top|RPAREN STRING
+1	impl-more|impl:P0012|top|STRING ACCOUNT
+1	impl-more|impl:P0012|top|STRING BOOL
+1	impl-more|impl:P0012|top|STRING CLOSE
+1	impl-more|impl:P0012|top|STRING KEY
+1	impl-more|impl:P0012|top|TAG
+1	impl-more|impl:P0012|top|TAG COLON
+1	impl-more|impl:P0012|top|TAG PRICE
+1	impl-more|impl:P0012|top|TILDE BOOL
+1	impl-more|impl:P0012|top|TXN FLAG
+1	impl-more|impl:P0012|top|TXN LINK
+1	impl-more|impl:P0026|top|-
+1	impl-more|impl:P0026|top|ACCOUNT

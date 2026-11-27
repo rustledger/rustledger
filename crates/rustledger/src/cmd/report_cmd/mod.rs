@@ -1034,65 +1034,30 @@ fn resolve_window(
     window.resolve(fye, jiff::ZonedDateTime::now().date())
 }
 
-/// The single source of truth for "what does each account hold".
+/// What each account holds: every balance-computing report (`balances`,
+/// `balsheet`, `income`, …) is a *view* over this map, and none re-derives
+/// balances itself (#1726, where copies drifted between reports).
 ///
-/// Every balance-computing report (`balances`, `balsheet`, `income`, …) is a
-/// *view* over this map — none re-derives balances itself. That is the whole
-/// point: the same "what does each account hold" logic used to live copied
-/// across each report, and the copies drifted (reductions failing to net in
-/// `balances`/`balsheet` while `income` summed differently — #1726). One
-/// function, one behavior, no drift.
-///
-/// Realization goes through the **booking engine** ([`apply`]), so held
-/// commodities keep their lots at cost and reductions are matched against
-/// those lots by the account's booking method — the same machinery the
-/// loader's book phase uses. Each `Inventory` therefore carries cost, and
-/// reports render `5 AAPL {150.00 USD}` like beancount rather than a
-/// cost-less `5 AAPL`. Two lots at different costs stay separate
-/// (`10 AAPL {150}` + `10 AAPL {200}`), matching beancount.
-///
-/// `rustledger_returns::terminal_value` re-derives this realization loop (it is
-/// a leaf crate and cannot call this CLI-side helper), adding an `<= end_date`
-/// filter, to value a portfolio at the report date. If the realization here
-/// changes, update that copy in lockstep; the returns CLI PR should add a
-/// drift-guard test comparing the two on the same ledger.
-///
-/// [`apply`]: rustledger_booking::BookingEngine::apply
+/// The realization lives in [`rustledger_booking::account_balances`], so the
+/// semantic differential's snapshot (`rustledger-loader`'s
+/// `semantic_snapshot` example), which cannot reach this crate, reads the
+/// same one; see it for what it does and why.
 ///
 /// # Errors
 ///
-/// When a running balance leaves `rust_decimal`'s range (#1863). Reports print
-/// these inventories as exact totals, so an unrepresentable one must abort the
-/// report rather than render a clamped figure.
+/// When replaying a transaction fails, or a running balance leaves
+/// `rust_decimal`'s range (#1863). Reports print these inventories as exact
+/// totals, so an unrepresentable one must abort the report rather than
+/// render a clamped figure.
 pub(super) fn account_balances(
     directives: &[rustledger_core::Directive],
     booking_method: rustledger_core::BookingMethod,
 ) -> anyhow::Result<std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory>>
 {
-    use rustledger_core::Directive;
-    // Realize via the booking engine so held commodities carry their lots at
-    // cost and reductions match those lots (FIFO/LIFO/etc. per each account's
-    // booking method) — the same logic the loader's book phase uses, not a
-    // re-implementation. The input directives are already booked (costs
-    // resolved, interpolations applied), which is `apply`'s precondition.
-    //
-    // With the ledger's own default method, not STRICT: under a global
-    // `option "booking_method" "NONE"` a STRICT replay reads a booked
-    // augmentation as a reduction and fails (#2386).
-    let mut engine = rustledger_booking::BookingEngine::for_ledger(booking_method, directives);
-    for directive in directives {
-        if let Directive::Transaction(txn) = directive {
-            engine.apply(txn)?;
-        }
-    }
-    // FxHashMap has non-deterministic order; collect into a BTreeMap so report
-    // rows come out account-sorted and stable across runs.
-    //
-    // Presented, as `BALANCES` presents them: an AVERAGE account as its pools,
-    // before a sale as after one (#2543). Booking merges the lots only when a
-    // sale runs, so the bare realization listed separate dated lots until the
-    // first sale and one pool after it.
-    Ok(engine.into_presented_inventories()?.into_iter().collect())
+    Ok(rustledger_booking::account_balances(
+        directives,
+        booking_method,
+    )?)
 }
 
 // CSV/JSON escaping: single-sourced in core. `escape_json` is the RFC-8259

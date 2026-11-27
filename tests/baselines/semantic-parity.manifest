@@ -1,0 +1,964 @@
+# Semantic parity baseline: rledger against beancount 3.2.3, full pipeline.
+# Written by scripts/compat-semantic-parity.py --update; see its docstring.
+#
+# Ids are ptadiff content ids (sha256, first 12 hex digits).
+# `@ categories`: count<TAB>key, mismatching ledgers per ptadiff `sem` key.
+# `@ deviations`: count<TAB>name, ledgers a declared deliberate deviation
+# explains (scripts/semantic_parity_hooks.py).
+# `@ mismatches`: id<TAB>key, every generated ledger that does not match.
+# An unlisted generated ledger is pinned as matching (or a deviation).
+# `@ ledgers`: source<TAB>id<TAB>verdict<TAB>path, one row per compat file.
+
+#@ptadiff-rev b9ab374e5046d5cea79b3e19d4dc5f709e501d7a
+#@category-key sem
+#@generators s1:1:2500 s2:1:2500 s3:1:2500 s4:1:2500
+#@inputs compat 730
+#@inputs gen 10000
+@ categories
+173	options|display_precision|display_precision|-|-
+15	entries|extra-in-impl|close|-|-
+8	entries|extra-in-impl|open|-|-
+4	entries|postings.order|transaction|-|multi-currency
+2	balances|extra-in-impl|account|-|-
+2	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
+2	entries|postings.order|transaction|-|elided+multi-currency
+2	entries|postings.order|transaction|-|expr+multi-currency
+2	errors|impl-fewer|oracle:LoadError|-|-|-
+2	errors|impl-fewer|oracle:balance-failed|balance|-|-
+1	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
+1	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
+1	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
+1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
+1	errors|impl-more|impl:E1005|open|-|-
+@ deviations
+808	average-booking
+167	included-file-plugins
+120	currency-accounts-posting-order
+6	custom-display-precision
+5	cross-file-booking-order
+@ mismatches
+0064196f5b27	options|display_precision|display_precision|-|-
+0065d9a63d87	options|display_precision|display_precision|-|-
+00eb68bc286d	entries|extra-in-impl|close|-|-
+0111aec924af	options|display_precision|display_precision|-|-
+01fbf58d5f7b	options|display_precision|display_precision|-|-
+03033782c0d0	options|display_precision|display_precision|-|-
+0363af1effcd	options|display_precision|display_precision|-|-
+03b0c4cf0b31	entries|extra-in-impl|close|-|-
+0461f1ecd3f7	options|display_precision|display_precision|-|-
+08f602df8824	options|display_precision|display_precision|-|-
+0970f1667873	options|display_precision|display_precision|-|-
+0a20bbffb8d9	options|display_precision|display_precision|-|-
+0a2bd4ead623	options|display_precision|display_precision|-|-
+0adc85a042e8	options|display_precision|display_precision|-|-
+0ae6d4342fad	options|display_precision|display_precision|-|-
+0c74312fa660	options|display_precision|display_precision|-|-
+0d1ebfdff915	options|display_precision|display_precision|-|-
+0e1dc875e43c	options|display_precision|display_precision|-|-
+0efa55e8b392	options|display_precision|display_precision|-|-
+10ce2e2d51d8	entries|extra-in-impl|close|-|-
+11ce370d8493	options|display_precision|display_precision|-|-
+12989a467640	options|display_precision|display_precision|-|-
+130a7d27a250	options|display_precision|display_precision|-|-
+17f0aca09cdf	options|display_precision|display_precision|-|-
+1a0e279a065c	options|display_precision|display_precision|-|-
+1cd97ba3be08	options|display_precision|display_precision|-|-
+2027c4fc5d79	options|display_precision|display_precision|-|-
+225acd0edccb	options|display_precision|display_precision|-|-
+226daff956cc	options|display_precision|display_precision|-|-
+2533a8635e78	options|display_precision|display_precision|-|-
+28a8fdc836ae	options|display_precision|display_precision|-|-
+28f60ccde726	options|display_precision|display_precision|-|-
+293bcdbb695b	options|display_precision|display_precision|-|-
+29c55140f48a	options|display_precision|display_precision|-|-
+29fc0a148ce6	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
+2b2887694586	options|display_precision|display_precision|-|-
+2bb311334224	options|display_precision|display_precision|-|-
+2bcce072632b	options|display_precision|display_precision|-|-
+3052865564ca	options|display_precision|display_precision|-|-
+326fe5429ff5	options|display_precision|display_precision|-|-
+33dfeb4cffcf	entries|extra-in-impl|close|-|-
+351e552716ae	options|display_precision|display_precision|-|-
+355811632720	options|display_precision|display_precision|-|-
+35fa1b7cd5f8	options|display_precision|display_precision|-|-
+38896d63705e	options|display_precision|display_precision|-|-
+38e76617b85d	entries|extra-in-impl|close|-|-
+395709017879	options|display_precision|display_precision|-|-
+396a764c8e40	options|display_precision|display_precision|-|-
+3a2c454c58f7	options|display_precision|display_precision|-|-
+3d0090c862cd	options|display_precision|display_precision|-|-
+40cbd7790f52	options|display_precision|display_precision|-|-
+410ef95a84e3	options|display_precision|display_precision|-|-
+41acce1909b3	options|display_precision|display_precision|-|-
+41d04a89f122	options|display_precision|display_precision|-|-
+43112fd5703e	options|display_precision|display_precision|-|-
+44b92a0d471f	options|display_precision|display_precision|-|-
+44e304f0fab8	options|display_precision|display_precision|-|-
+47573fa6bed0	options|display_precision|display_precision|-|-
+486a8d296a0c	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
+4990dc12f64d	options|display_precision|display_precision|-|-
+4a85055ec76b	options|display_precision|display_precision|-|-
+4bda4551de21	options|display_precision|display_precision|-|-
+4c1d08927eee	options|display_precision|display_precision|-|-
+502241cf2551	options|display_precision|display_precision|-|-
+512450f9beaf	options|display_precision|display_precision|-|-
+530e8ed7a62c	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
+53193fef8c41	options|display_precision|display_precision|-|-
+53756636780a	options|display_precision|display_precision|-|-
+553a5cb9427e	options|display_precision|display_precision|-|-
+562e2fcd679b	options|display_precision|display_precision|-|-
+564d1ddb9b93	options|display_precision|display_precision|-|-
+58921779dfbd	options|display_precision|display_precision|-|-
+59c0449f962c	entries|extra-in-impl|open|-|-
+5ab4a00c4159	options|display_precision|display_precision|-|-
+5be1e081574c	options|display_precision|display_precision|-|-
+5d3dec775f03	options|display_precision|display_precision|-|-
+5e27c7f20628	options|display_precision|display_precision|-|-
+5e6af92b658e	options|display_precision|display_precision|-|-
+60a8a10f0ae9	options|display_precision|display_precision|-|-
+63056116e23b	options|display_precision|display_precision|-|-
+670831f9b569	options|display_precision|display_precision|-|-
+6aae998ac85c	options|display_precision|display_precision|-|-
+6da398a209bc	options|display_precision|display_precision|-|-
+6e5c29ea623d	options|display_precision|display_precision|-|-
+6f03fa5f3b49	options|display_precision|display_precision|-|-
+6fea4c2ea154	options|display_precision|display_precision|-|-
+70141ac49c3f	options|display_precision|display_precision|-|-
+70362b97b3b4	options|display_precision|display_precision|-|-
+707df34ac1ca	options|display_precision|display_precision|-|-
+713fff45de86	options|display_precision|display_precision|-|-
+7204df4c6d4e	entries|extra-in-impl|open|-|-
+72d63d766b10	options|display_precision|display_precision|-|-
+75478730bf5e	entries|extra-in-impl|close|-|-
+75d93e8e5baf	options|display_precision|display_precision|-|-
+76bc90073c59	options|display_precision|display_precision|-|-
+771d5bb2ebc8	options|display_precision|display_precision|-|-
+789bff609a96	options|display_precision|display_precision|-|-
+7950c46555ff	options|display_precision|display_precision|-|-
+798902efb1af	options|display_precision|display_precision|-|-
+7a4ce89ae83c	options|display_precision|display_precision|-|-
+7b9f6719e40f	options|display_precision|display_precision|-|-
+7dc591dfe3e0	options|display_precision|display_precision|-|-
+7e04cd73b1f5	options|display_precision|display_precision|-|-
+7e290a2067c8	options|display_precision|display_precision|-|-
+7ee9206f814b	options|display_precision|display_precision|-|-
+7fd1780f0805	options|display_precision|display_precision|-|-
+803e7bd1fc14	entries|extra-in-impl|open|-|-
+815d08a97a02	options|display_precision|display_precision|-|-
+82a5cc9ada9d	entries|extra-in-impl|close|-|-
+8440009f99a9	options|display_precision|display_precision|-|-
+8573563d80a0	options|display_precision|display_precision|-|-
+86d8c20d9b8e	entries|extra-in-impl|close|-|-
+8a842cb973f8	options|display_precision|display_precision|-|-
+9016f422b1ac	options|display_precision|display_precision|-|-
+9028d45b354e	options|display_precision|display_precision|-|-
+913f9635b8e4	options|display_precision|display_precision|-|-
+91a08625959a	options|display_precision|display_precision|-|-
+91ebff5d080f	entries|extra-in-impl|open|-|-
+938d205b52a2	options|display_precision|display_precision|-|-
+982bd9c85df6	options|display_precision|display_precision|-|-
+98aa606cb697	options|display_precision|display_precision|-|-
+9aae8b5c6c59	options|display_precision|display_precision|-|-
+9c38d6313837	options|display_precision|display_precision|-|-
+9c90868e496e	options|display_precision|display_precision|-|-
+a04d68558f80	options|display_precision|display_precision|-|-
+a65697d26dae	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
+a6aaa10f06ca	entries|extra-in-impl|close|-|-
+a91de40b3f30	options|display_precision|display_precision|-|-
+aa0e05c4f0ec	options|display_precision|display_precision|-|-
+af410e19dbad	options|display_precision|display_precision|-|-
+b32853496b9d	entries|extra-in-impl|close|-|-
+b4570cef2edc	options|display_precision|display_precision|-|-
+b4ee3bbcef9b	options|display_precision|display_precision|-|-
+b69979d019bc	options|display_precision|display_precision|-|-
+b758df48e518	options|display_precision|display_precision|-|-
+b7715c11ae73	options|display_precision|display_precision|-|-
+b8d5d6e92828	options|display_precision|display_precision|-|-
+b962cefbdfc6	options|display_precision|display_precision|-|-
+b9c4c2c72a50	options|display_precision|display_precision|-|-
+b9c6f8392b50	entries|extra-in-impl|open|-|-
+bc4534479c81	entries|extra-in-impl|close|-|-
+bc779acd5032	options|display_precision|display_precision|-|-
+bd9f1e075aed	entries|extra-in-impl|close|-|-
+be2dd8bd3cc4	options|display_precision|display_precision|-|-
+c0a64184839c	options|display_precision|display_precision|-|-
+c12206002c3a	options|display_precision|display_precision|-|-
+c2ac2c9711dd	options|display_precision|display_precision|-|-
+c30f88aadd34	options|display_precision|display_precision|-|-
+c4ec50576c8e	options|display_precision|display_precision|-|-
+c4f7ed5b5d9d	options|display_precision|display_precision|-|-
+c529637b4ff8	options|display_precision|display_precision|-|-
+c531b82bfee1	entries|extra-in-impl|open|-|-
+c60b6f1917e8	options|display_precision|display_precision|-|-
+c67a83af0742	options|display_precision|display_precision|-|-
+c77765f6f969	options|display_precision|display_precision|-|-
+c83915eb983f	options|display_precision|display_precision|-|-
+c87ddbdc16c2	options|display_precision|display_precision|-|-
+c88d695ce588	options|display_precision|display_precision|-|-
+ca47fc278b69	options|display_precision|display_precision|-|-
+ca4aa189f6a6	options|display_precision|display_precision|-|-
+cae16a2a50ea	options|display_precision|display_precision|-|-
+ccdc45784602	entries|extra-in-impl|open|-|-
+cd4e2ad82493	options|display_precision|display_precision|-|-
+ce21c953889a	options|display_precision|display_precision|-|-
+ced0a2d5dc11	options|display_precision|display_precision|-|-
+cf596b8e163d	options|display_precision|display_precision|-|-
+d06903fccdda	entries|extra-in-impl|open|-|-
+d0f0479ac418	options|display_precision|display_precision|-|-
+d6f7a6f9b8ac	options|display_precision|display_precision|-|-
+d9f35afb904a	options|display_precision|display_precision|-|-
+db4c2b5de7f7	entries|extra-in-impl|close|-|-
+dc4cc8c70657	options|display_precision|display_precision|-|-
+dc9bdf26fab5	options|display_precision|display_precision|-|-
+de6bba7f98fb	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
+dfa8ffe926bb	options|display_precision|display_precision|-|-
+e0cdebf8cfa5	options|display_precision|display_precision|-|-
+e0e74cd7d36b	options|display_precision|display_precision|-|-
+e2648c72474a	options|display_precision|display_precision|-|-
+e3348cd0fc07	options|display_precision|display_precision|-|-
+e4c3f798694b	options|display_precision|display_precision|-|-
+e8df574b0da1	options|display_precision|display_precision|-|-
+ed4659c84d32	options|display_precision|display_precision|-|-
+ed4668595e28	options|display_precision|display_precision|-|-
+ef54a3c553e1	options|display_precision|display_precision|-|-
+f323a4ff27d5	options|display_precision|display_precision|-|-
+f4ba3ebedfe8	options|display_precision|display_precision|-|-
+f5a8f759e3ef	options|display_precision|display_precision|-|-
+f88fb4956bb3	options|display_precision|display_precision|-|-
+fa3d02023e0b	entries|extra-in-impl|close|-|-
+fc244c59bb13	entries|extra-in-impl|close|-|-
+fd2033008e53	options|display_precision|display_precision|-|-
+fd318409294d	options|display_precision|display_precision|-|-
+fe4bdddf6940	options|display_precision|display_precision|-|-
+ff51c78d7293	options|display_precision|display_precision|-|-
+@ ledgers
+compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
+compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount
+compat	b7d2623b815a	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-03.beancount
+compat	b396756ab62a	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-04.beancount
+compat	01b7dd9667a6	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-05.beancount
+compat	5919010e4d5f	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-06.beancount
+compat	89ec7ab54fad	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-07.beancount
+compat	1d9c9e73cb14	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-08.beancount
+compat	7c836d7fe37d	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-09.beancount
+compat	9f64f792a0df	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-10.beancount
+compat	0a5dc0ff793e	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-11.beancount
+compat	5132f3d4d887	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-12.beancount
+compat	53f743fffd3c	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-01.beancount
+compat	7c5cfceac95e	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-02.beancount
+compat	09a77c1aa8b2	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-03.beancount
+compat	3eac9a4fc8dc	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-04.beancount
+compat	dbe18c4096b7	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-05.beancount
+compat	3763e2f33fad	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-06.beancount
+compat	b9a0f6ca5c55	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-07.beancount
+compat	d226c0a49da6	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-08.beancount
+compat	5e5a3e20f56f	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-09.beancount
+compat	79a6a6528f29	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-10.beancount
+compat	9518c5dae430	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-11.beancount
+compat	651de5a434df	match	tests/compatibility/files/apyb-financeiro/financeiro_2021-12.beancount
+compat	c58c2c6dfec3	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-01.beancount
+compat	cd7c05341473	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-02.beancount
+compat	5d431af3d2cd	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-03.beancount
+compat	6c8c94d6e2f3	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-04.beancount
+compat	fa9c324bb299	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-05.beancount
+compat	2f8ad202378f	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-06.beancount
+compat	77739dc5acd8	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-07.beancount
+compat	4f760107151f	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-08.beancount
+compat	37d2d38f4211	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-09.beancount
+compat	4158ba9f1861	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-10.beancount
+compat	6ec3eaead986	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-11.beancount
+compat	6531a28c773f	match	tests/compatibility/files/apyb-financeiro/financeiro_2022-12.beancount
+compat	8ba09b6e05bf	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-01.beancount
+compat	165efe4ef443	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-02.beancount
+compat	804664f5d97a	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-03.beancount
+compat	16b0b8bf5514	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-04.beancount
+compat	ac51c7c85805	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-05.beancount
+compat	4354e94bdd1b	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-06.beancount
+compat	311c25ba7018	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-07.beancount
+compat	f74557967eea	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-08.beancount
+compat	2cbcd47d7aa2	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-09.beancount
+compat	82390b9c9fd5	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-10.beancount
+compat	f6811442f974	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-11.beancount
+compat	dc82b80aa073	match	tests/compatibility/files/apyb-financeiro/financeiro_2023-12.beancount
+compat	418acccc2983	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-01.beancount
+compat	b66e29ef4346	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-02.beancount
+compat	25aaa9ec0037	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-03.beancount
+compat	9ad352f40ea1	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-04.beancount
+compat	529aa44ce619	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-05.beancount
+compat	120d52dbd81b	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-06.beancount
+compat	3e9617aba893	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-07.beancount
+compat	8de009f4a686	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-08.beancount
+compat	ded07e36d13d	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-09.beancount
+compat	9db8dc640ec8	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-10.beancount
+compat	a8b3d548ddca	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-11.beancount
+compat	ac30d7574241	match	tests/compatibility/files/apyb-financeiro/financeiro_2024-12.beancount
+compat	a36ddf0fe686	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-01.beancount
+compat	355c091b97fc	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-02.beancount
+compat	590cd0086b34	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-03.beancount
+compat	056e3795275b	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-04.beancount
+compat	847499ddba0b	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-05.beancount
+compat	0c6c95f32b5a	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-06.beancount
+compat	fdfec875e561	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-07.beancount
+compat	d378fc01c8f7	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-08.beancount
+compat	ca7fe0fd95d6	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-09.beancount
+compat	e9c4a0bb283a	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-10.beancount
+compat	c6e8b965b8fe	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-11.beancount
+compat	52969f3d7532	match	tests/compatibility/files/apyb-financeiro/financeiro_2025-12.beancount
+compat	9d660a6c6ee9	match	tests/compatibility/files/apyb-financeiro/financeiro_2026-01.beancount
+compat	d3728d9547ae	match	tests/compatibility/files/apyb-financeiro/financeiro_2026-02.beancount
+compat	38cdba326c68	match	tests/compatibility/files/apyb-financeiro/financeiro_eventos-concluídos.beancount
+compat	02e3b5dddacf	match	tests/compatibility/files/apyb-financeiro/financeiro_main.beancount
+compat	eaeb76489f8a	crash	tests/compatibility/files/beanahead/examples_defs__rx_def_INITIAL_COPY.beancount
+compat	11ee1ff2ff71	match	tests/compatibility/files/beanahead/examples_defs_ledger.beancount
+compat	b2d44ed52062	crash	tests/compatibility/files/beanahead/examples_defs_rx.beancount
+compat	f9f000fc0cbe	crash	tests/compatibility/files/beanahead/examples_defs_rx_def.beancount
+compat	07cfbace005b	crash	tests/compatibility/files/beanahead/examples_defs_rx_def_updated.beancount
+compat	3f261014669c	crash	tests/compatibility/files/beanahead/examples_defs_rx_updated.beancount
+compat	d88a187f26cb	match	tests/compatibility/files/beanahead/examples_defs_x.beancount
+compat	430a315a001c	crash	tests/compatibility/files/beanahead/examples_new_empty_files_rx_def.beancount
+compat	184129d23454	match	tests/compatibility/files/beanahead/examples_recon_expected_injection.beancount
+compat	72cc14787bf4	match	tests/compatibility/files/beanahead/examples_recon_extraction.beancount
+compat	1c170f343dec	crash	tests/compatibility/files/beanahead/examples_recon_rx_updated.beancount
+compat	e276b8ace42c	match	tests/compatibility/files/beanahead/examples_recon_x.beancount
+compat	a078f7dd02cc	match	tests/compatibility/files/beanahead/examples_recon_x_updated.beancount
+compat	c0f1528d1bc1	crash	tests/compatibility/files/beanahead/tests_resources_answers_example_rx_txns_rmvd.beancount
+compat	ba7b2c0c9bb5	crash	tests/compatibility/files/beanahead/tests_resources_defs_defs.beancount
+compat	bb06df16234a	crash	tests/compatibility/files/beanahead/tests_resources_defs_defs_230630.beancount
+compat	093adf7767bc	crash	tests/compatibility/files/beanahead/tests_resources_defs_defs_opts.beancount
+compat	8b276015da3f	crash	tests/compatibility/files/beanahead/tests_resources_defs_defs_opts_221231.beancount
+compat	30a490c93eef	crash	tests/compatibility/files/beanahead/tests_resources_defs_defs_repeat_payee.beancount
+compat	23d6d9400719	match	tests/compatibility/files/beanahead/tests_resources_defs_ledger.beancount
+compat	3a16163dc3cc	match	tests/compatibility/files/beanahead/tests_resources_defs_ledger_opts.beancount
+compat	f7b0b27d3b68	match	tests/compatibility/files/beanahead/tests_resources_defs_ledger_with_error.beancount
+compat	67dd503417f8	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_221231.beancount
+compat	deeb47f71e19	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_230630.beancount
+compat	781c82b9a2dc	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_opts.beancount
+compat	a695d3224beb	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_opts_221231.beancount
+compat	15c661a1763f	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/beanahead/tests_resources_example_ledger.beancount
+compat	dead86fb912b	match	tests/compatibility/files/beanahead/tests_resources_example_ledger_txns.beancount
+compat	4bae9595af68	crash	tests/compatibility/files/beanahead/tests_resources_example_rx.beancount
+compat	6c60f36334d4	crash	tests/compatibility/files/beanahead/tests_resources_expired_expected_rx.beancount
+compat	2e96033dc88c	match	tests/compatibility/files/beanahead/tests_resources_expired_expected_x.beancount
+compat	d99569f5b2af	crash	tests/compatibility/files/beanahead/tests_resources_expired_rx.beancount
+compat	3f004a0fc8b9	match	tests/compatibility/files/beanahead/tests_resources_expired_x.beancount
+compat	648a34382dbe	match	tests/compatibility/files/beanahead/tests_resources_recon_expected_injection.beancount
+compat	3e10eddfbd29	match	tests/compatibility/files/beanahead/tests_resources_recon_expected_injection_ascending.beancount
+compat	2c4b6b1eee60	match	tests/compatibility/files/beanahead/tests_resources_recon_expected_x.beancount
+compat	6e402cfc3b97	match	tests/compatibility/files/beanahead/tests_resources_recon_extraction.beancount
+compat	f258b2116d3f	crash	tests/compatibility/files/beanahead/tests_resources_recon_rx.beancount
+compat	ba91c1349f1b	match	tests/compatibility/files/beanahead/tests_resources_recon_x.beancount
+compat	807af72c8dbc	match	tests/compatibility/files/beanbot/accounts.beancount
+compat	5407ecf28272	crash	tests/compatibility/files/beancount-blog-examples/chapter-2_journal.beancount
+compat	e0b8c228bc05	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_accounts.beancount
+compat	af36162f4b54	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_balance.beancount
+compat	cd000082be00	match	tests/compatibility/files/beancount-blog-examples/chapter-2_src_transactions.beancount
+compat	191f3311a8e6	match	tests/compatibility/files/beancount-blog-examples/chapter-3_journal.beancount
+compat	3ffb5d150a19	match	tests/compatibility/files/beancount-blog-examples/chapter-3_src_accounts.beancount
+compat	1b4e5bfde46c	match	tests/compatibility/files/beancount-blog-examples/chapter-3_src_balance.beancount
+compat	40b98c88cf24	match	tests/compatibility/files/beancount-blog-examples/chapter-3_src_ignored.beancount
+compat	00082cbfd8ee	match	tests/compatibility/files/beancount-blog-examples/chapter-3_src_transactions.beancount
+compat	c09b6c4f6b66	match	tests/compatibility/files/beancount-blog-examples/chapter-4_journal.beancount
+compat	f72e8afe3b62	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_accounts.beancount
+compat	c03179661f08	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_commodities.beancount
+compat	94a79f7b19de	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_prices.beancount
+compat	93d94d43aa8e	match	tests/compatibility/files/beancount-blog-examples/chapter-4_src_transactions.beancount
+compat	1cb5a5ad222d	match	tests/compatibility/files/beancount-blog-examples/chapter-5_journal-gross.beancount
+compat	d23be2176e48	crash	tests/compatibility/files/beancount-blog-examples/chapter-5_journal-net.beancount
+compat	3dd35b73d46f	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_accounts.beancount
+compat	02d1d5d3fcda	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_prices.beancount
+compat	c3f076210f9f	match	tests/compatibility/files/beancount-blog-examples/chapter-5_src_transactions.beancount
+compat	8ad0c464b2a8	match	tests/compatibility/files/beancount-blog-examples/chapter-6_common_src_accounts.beancount
+compat	6221cb873687	match	tests/compatibility/files/beancount-blog-examples/chapter-6_common_src_commodities.beancount
+compat	4a73e48383bc	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_journal-net.beancount
+compat	4e6e916a86c2	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_accounts.beancount
+compat	8f4897d69323	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_journal.beancount
+compat	f8ce508067ec	match	tests/compatibility/files/beancount-blog-examples/chapter-6_lalit_src_transactions.beancount
+compat	6e25a8e0afb1	crash	tests/compatibility/files/beancount-blog-examples/chapter-6_total_journal-net.beancount
+compat	3546f7c0b4fd	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_journal-net.beancount
+compat	455652f96e94	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_src_accounts.beancount
+compat	517391e99d1b	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_src_journal.beancount
+compat	3e8d2e3535a4	match	tests/compatibility/files/beancount-blog-examples/chapter-6_wife_src_transactions.beancount
+compat	84c7797a6557	match	tests/compatibility/files/beancount-blog-examples/demo_journal.beancount
+compat	fe1a41ec029d	match	tests/compatibility/files/beancount-blog-examples/demo_prices.beancount
+compat	81a07070a874	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_account.beancount
+compat	0557b05549a3	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_commodity.beancount
+compat	71114a2df7d7	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_cryptocoin.beancount
+compat	226c36ea2273	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_daily_2019.beancount
+compat	b8f3add27fbb	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_daily_2019_2019-06-03-other.beancount
+compat	a24880fb6e29	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_daily_2019_2019-06-03-settle.beancount
+compat	f8604307fd96	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_daily_2019_2019-06-03-spdbcc.beancount
+compat	36d627d4d44b	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_init.beancount
+compat	86bf364d2c42	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_invest.beancount
+compat	2db7e6c0bbbc	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_latest-prices.beancount
+compat	2b3949bd1ca5	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_main.beancount
+compat	79fa6d57b47b	options|display_precision|display_precision|-|-	tests/compatibility/files/beancount-boilerplate-cn/ledger_prices.beancount
+compat	9f474ed5b272	match	tests/compatibility/files/beancount-boilerplate-cn/ledger_salary.beancount
+compat	50bc54df239f	match	tests/compatibility/files/beancount-import/examples_fresh_accounts.beancount
+compat	e3b0c44298fc	match	tests/compatibility/files/beancount-import/examples_fresh_ignored.beancount
+compat	e96a0aa841ce	match	tests/compatibility/files/beancount-import/examples_fresh_journal.beancount
+compat	f157353eb580	match	tests/compatibility/files/beancount-import/examples_manually_entered_accounts.beancount
+compat	b8187a8e4223	match	tests/compatibility/files/beancount-import/examples_manually_entered_transactions.beancount
+compat	db3bc18fe19b	match	tests/compatibility/files/beancount-import/testdata_matching_test_match_many_merged_matches.beancount
+compat	661b898a950f	match	tests/compatibility/files/beancount-import/testdata_matching_test_match_many_merged_pending.beancount
+compat	2bda4040523a	match	tests/compatibility/files/beancount-import/testdata_matching_test_match_many_merged_pending_candidate.beancount
+compat	21af953edc42	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount
+compat	2fe05ab66985	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_amazon_large_0_pending.beancount
+compat	1df9ffea1bd5	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_0_journal.beancount
+compat	16482e0b296e	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_0_pending.beancount
+compat	2851be3c5694	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_1_journal.beancount
+compat	1ab7fd002813	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_1_pending.beancount
+compat	898d82349297	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_2_journal.beancount
+compat	01ba4719c80b	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_basic_2_pending.beancount
+compat	7926586f2cd0	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ignore_1_ignore.beancount
+compat	ffd1b1148e26	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ignore_1_pending.beancount
+compat	06df2217fdc6	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ignore_2_ignore.beancount
+compat	1294e5565c3c	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ignore_3_ignore.beancount
+compat	19dbffe9d20d	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount
+compat	7d7a5d128662	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_basic_0_pending.beancount
+compat	86f44b9402c0	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount
+compat	11d80b0b7837	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_ignore.beancount
+compat	a2a69ba53afa	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_pending.beancount
+compat	6af8357e781e	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount
+compat	410244cbaf50	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount
+compat	bb67e47cf468	match	tests/compatibility/files/beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount
+compat	0e62e6bee0d8	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_basic_import_results.beancount
+compat	562f10f0d851	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_cleared_and_invalid_import_results.beancount
+compat	a46a24cd11c3	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount
+compat	5ab0f6cdff7c	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_credit_card_transactions_import_results.beancount
+compat	86a439ac6183	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount
+compat	67c74df7a883	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_prediction_import_results.beancount
+compat	0b2cadce7fe8	match	tests/compatibility/files/beancount-import/testdata_source_amazon_test_prediction_journal.beancount
+compat	c45970a5c31e	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_basic_import_results.beancount
+compat	ca1de8709d57	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_basic_journal.beancount
+compat	92b0423be823	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_cost_import_results.beancount
+compat	9cdc48efb827	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_cost_input_generic_statement.beancount
+compat	3f9d59cb3f88	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount
+compat	df6630e044b5	match	tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount
+compat	58f132248a81	match	tests/compatibility/files/beancount-import/testdata_source_google_purchases_test_basic_import_results.beancount
+compat	9151d78ec68b	match	tests/compatibility/files/beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount
+compat	2fd0731cf025	match	tests/compatibility/files/beancount-import/testdata_source_google_purchases_test_matching_journal.beancount
+compat	65634a780e08	match	tests/compatibility/files/beancount-import/testdata_source_healthequity_test_basic_import_results.beancount
+compat	9df57269040b	match	tests/compatibility/files/beancount-import/testdata_source_healthequity_test_basic_journal.beancount
+compat	ad73f322ca42	match	tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_import_results.beancount
+compat	d4fe8da720cf	match	tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_journal.beancount
+compat	5968d76df7fd	match	tests/compatibility/files/beancount-import/testdata_source_healthequity_test_matching_journal.beancount
+compat	8bbf561f5a7d	match	tests/compatibility/files/beancount-import/testdata_source_mint_test_basic_import_results.beancount
+compat	0e16ca8535b3	match	tests/compatibility/files/beancount-import/testdata_source_mint_test_currency_import_results.beancount
+compat	8be03827fc0e	match	tests/compatibility/files/beancount-import/testdata_source_mint_test_currency_journal.beancount
+compat	1eec87e92a6d	match	tests/compatibility/files/beancount-import/testdata_source_mint_test_invalid_journal.beancount
+compat	568b8c3ca37e	match	tests/compatibility/files/beancount-import/testdata_source_mint_test_training_examples_journal.beancount
+compat	6e6ef46b590c	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_amex_import_results.beancount
+compat	585ca01ccb3d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_amex_journal.beancount
+compat	943e86586ea1	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_anzcc_import_results.beancount
+compat	cfb4f442e4f2	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_anzcc_journal.beancount
+compat	5ebf5cadbfbc	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_bank_medium_import_results.beancount
+compat	269f93564b6e	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount
+compat	f890ec2cddde	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking2_import_results.beancount
+compat	518b5cccc69b	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking2_journal.beancount
+compat	3090d2326325	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking2_matching_import_results.beancount
+compat	2c8d4167a07a	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount
+compat	a82532a2fba9	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_import_results.beancount
+compat	21375dd7d74b	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount
+compat	88cbbca75fd2	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking_import_results.beancount
+compat	0a077fa9c453	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_import_results.beancount
+compat	f54e72992bac	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount
+compat	78c22c7a2454	entries|postings.order|transaction|-|elided+multi-currency	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_journal.beancount
+compat	1ae69b21da8d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_savings_import_results.beancount
+compat	48569d75b20a	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount
+compat	448ac2c22951	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_treasury_import_results.beancount
+compat	183d3f654713	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount
+compat	e3034a40519f	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_investment_401k_import_results.beancount
+compat	888b27c9cb6d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount
+compat	5fa33e48c4bc	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_investment_buy_sell_income_import_results.beancount
+compat	797ed6853c0f	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount
+compat	e92fcbd2110b	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_multiple_accounts_import_results.beancount
+compat	b28de5e7656c	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount
+compat	374993fea94c	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_import_results.beancount
+compat	fcfb281d9b42	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount
+compat	8e0ba6b4b1be	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_suncorp_import_results.beancount
+compat	29803456f79c	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_suncorp_journal.beancount
+compat	b43687429572	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_td_ameritrade_import_results.beancount
+compat	63345072ac36	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_td_ameritrade_journal.beancount
+compat	04df8118ec1d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard401k_import_results.beancount
+compat	93000905277b	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard401k_journal.beancount
+compat	4b2e2f71b106	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_401k_matching_import_results.beancount
+compat	e3f27f1e0aea	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_401k_matching_journal.beancount
+compat	b5d389d7bda5	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_basic_import_results.beancount
+compat	91eae82eae35	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_basic_journal.beancount
+compat	9600119d041a	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_invalid_import_results.beancount
+compat	f164a0a42d41	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_invalid_journal.beancount
+compat	419fe0148c3d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_matching_journal.beancount
+compat	d9bfd5d33ad8	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_roth_ira_import_results.beancount
+compat	aa867d185329	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_roth_ira_journal.beancount
+compat	3ef2f7f646e3	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_roth_ira_matching_import_results.beancount
+compat	3daf658cd1c9	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_roth_ira_matching_journal.beancount
+compat	f45c483b9350	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_import_results.beancount
+compat	fbf39ceba3c1	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_journal.beancount
+compat	b0cef524518f	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_import_results.beancount
+compat	c6a59faebf7d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_journal.beancount
+compat	a46ce0bf1ffd	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_transfer_import_results.beancount
+compat	08f840e233a8	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_transfer_journal.beancount
+compat	77aa8d6373ae	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_xfer_in_import_results.beancount
+compat	5b0005000bdf	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_vanguard_xfer_in_journal.beancount
+compat	d80359ffce77	match	tests/compatibility/files/beancount-import/testdata_source_paypal_de_DE_test_basic_import_results.beancount
+compat	a0e589cbfa7a	match	tests/compatibility/files/beancount-import/testdata_source_paypal_test_basic_import_results.beancount
+compat	f96b1f17af83	match	tests/compatibility/files/beancount-import/testdata_source_paypal_test_matching_import_results.beancount
+compat	7c9fb67708a4	match	tests/compatibility/files/beancount-import/testdata_source_paypal_test_matching_journal.beancount
+compat	f875e0b764c8	match	tests/compatibility/files/beancount-import/testdata_source_schwab_csv_test_basic_import_results.beancount
+compat	ea3412177d63	match	tests/compatibility/files/beancount-import/testdata_source_schwab_csv_test_basic_journal.beancount
+compat	885d900a6557	match	tests/compatibility/files/beancount-import/testdata_source_schwab_csv_test_lots_import_results.beancount
+compat	addfd4ba5663	match	tests/compatibility/files/beancount-import/testdata_source_schwab_csv_test_lots_journal.beancount
+compat	9fac5e7deac2	match	tests/compatibility/files/beancount-import/testdata_source_ultipro_google_test_20211223_import_results.beancount
+compat	db424ce1a56c	match	tests/compatibility/files/beancount-import/testdata_source_ultipro_google_test_20220107_import_results.beancount
+compat	4cfb793854f4	match	tests/compatibility/files/beancount-import/testdata_source_ultipro_google_test_basic_import_results.beancount
+compat	22786bf650b9	match	tests/compatibility/files/beancount-import/testdata_source_venmo_test_basic_import_results.beancount
+compat	86d5216f7866	match	tests/compatibility/files/beancount-import/testdata_source_venmo_test_invalid_references_import_results.beancount
+compat	654c1d1d832f	match	tests/compatibility/files/beancount-import/testdata_source_venmo_test_invalid_references_journal.beancount
+compat	6b7d5f57b1d5	match	tests/compatibility/files/beancount-import/testdata_source_venmo_test_matching_journal.beancount
+compat	c44b915cc48e	match	tests/compatibility/files/beancount-import/testdata_source_waveapps_test_basic_import_results.beancount
+compat	6f5e7b80f150	match	tests/compatibility/files/beancount-import/testdata_source_waveapps_test_matching_import_results.beancount
+compat	2762850e6b05	match	tests/compatibility/files/beancount-import/testdata_source_waveapps_test_matching_journal.beancount
+compat	6206acd10332	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_0_journal.beancount
+compat	91e9bebaf22c	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_0_transactions.beancount
+compat	c5f3dd1299d5	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_1_transactions.beancount
+compat	a0206bb45259	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_2_additional_transactions.beancount
+compat	918ca2ca2828	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_2_journal.beancount
+compat	ef3a9f1389a4	match	tests/compatibility/files/beancount-import/testdata_webserver_test_check_modification_3_additional_transactions.beancount
+compat	75c4511ec195	crash	tests/compatibility/files/beancount-lazy-plugins/tests_data_balance_extended_example.beancount
+compat	ac10ecc9594c	crash	tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount
+compat	a20d22db1041	crash	tests/compatibility/files/beancount-lazy-plugins/tests_data_currencies_used_example.beancount
+compat	a783707a39a7	deviation:custom-display-precision	tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_example_output.beancount
+compat	7f67615759fe	deviation:custom-display-precision	tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount
+compat	972e48fb5f59	deviation:custom-display-precision	tests/compatibility/files/beancount-lazy-plugins/tests_data_output_some_fund_output.beancount
+compat	f27caacedbe6	crash	tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount
+compat	2dba79e9bfb0	crash	tests/compatibility/files/beancount-lazy-plugins/tests_data_tag_from_continuous_events_example.beancount
+compat	25954db3263f	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_account_based_asset_class.beancount
+compat	3c6663041c73	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_missing_prices.beancount
+compat	7e8f09abe5ef	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_no-main-currency.beancount
+compat	4bc84780b73b	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_portfolio.beancount
+compat	9f7b5d60e488	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_zero-position.beancount
+compat	e76bfb3c7e8d	match	tests/compatibility/files/beancount-staging/docs_examples_journal.beancount
+compat	4c53c4037216	match	tests/compatibility/files/beancount-staging/docs_examples_staging.beancount
+compat	6b8186ccd521	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/beancount-v3/examples_example.beancount
+compat	fca081a81af7	entries|postings.order|transaction|-|elided+multi-currency	tests/compatibility/files/beancount-v3/examples_simple_basic.beancount
+compat	8827e45ecac0	match	tests/compatibility/files/beancount-v3/examples_simple_starter.beancount
+compat	4613fab30ae2	match	tests/compatibility/files/beancount-v3/examples_vesting_vesting.beancount
+compat	86ee96d867bc	match	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_entry_already_exists_expected.beancount
+compat	386f18bcb972	crash	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_entry_already_exists_input.beancount
+compat	92c4875d651f	match	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_issue122_expected.beancount
+compat	1c3717651d02	crash	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_issue122_input.beancount
+compat	734093a1bdc9	match	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_missing_fx_expected.beancount
+compat	58a9aed8af19	crash	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_missing_fx_input.beancount
+compat	fc6c1bb9b9c3	match	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_normal_expected.beancount
+compat	71d8ec030262	crash	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_normal_input.beancount
+compat	412c50378f72	match	tests/compatibility/files/beangrow/example_ledger.beancount
+compat	7278c8565f0d	match	tests/compatibility/files/beangulp/examples_ledger_ledger.beancount
+compat	dd415c1d376c	match	tests/compatibility/files/beangulp/examples_tests_acme_acmebank1.pdf.beancount
+compat	423388defef6	match	tests/compatibility/files/beangulp/examples_tests_csvbank_statement.csv.beancount
+compat	53df7597fb09	match	tests/compatibility/files/beangulp/examples_tests_ofx_ofxdownload.ofx.beancount
+compat	3d9c7e9215e5	match	tests/compatibility/files/beangulp/examples_tests_utrade_UTrade20140713.csv.beancount
+compat	709e0b0d5e2a	match	tests/compatibility/files/beangulp/examples_tests_utrade_UTrade20150225.csv.beancount
+compat	b442b291705d	match	tests/compatibility/files/beangulp/examples_tests_utrade_UTrade20150720.csv.beancount
+compat	de5e3dcf4fb9	match	tests/compatibility/files/beanpost/tests_test.beancount
+compat	ed14a292394c	match	tests/compatibility/files/bql/balances_account_order.beancount
+compat	bca2d75e9a73	match	tests/compatibility/files/bql/balances_renamed_roots.beancount
+compat	30afb01bdfbf	crash	tests/compatibility/files/community-wileykestner/plugin-example.beancount
+compat	e9246b58cae6	match	tests/compatibility/files/cookbook-beancount-llm/bc_scripts_my_accounts.beancount
+compat	3efd7d2cea9c	match	tests/compatibility/files/costs/compound_hash.beancount
+compat	c15ce763e5dd	match	tests/compatibility/files/donearm-ledger/accounts.beancount
+compat	df216c276f5e	match	tests/compatibility/files/donearm-ledger/all.beancount
+compat	079c8d1b7e6f	match	tests/compatibility/files/donearm-ledger/prices_commodities.beancount
+compat	6ad6602ccc84	match	tests/compatibility/files/double-entry-generator/example_abc_debit_example-abc_debit-output.beancount
+compat	f370bea98261	match	tests/compatibility/files/double-entry-generator/example_alipay_example-alipay-output.beancount
+compat	f6d8acf73485	match	tests/compatibility/files/double-entry-generator/example_bmo_credit_example-bmo-credit-output.beancount
+compat	520463775c1d	match	tests/compatibility/files/double-entry-generator/example_bmo_debit_example-bmo-debit-output.beancount
+compat	f5c877176357	match	tests/compatibility/files/double-entry-generator/example_boc_credit_example-boc-credit-output.beancount
+compat	967b8b2714ec	match	tests/compatibility/files/double-entry-generator/example_boc_debit_example-boc-debit-output.beancount
+compat	ab7e287ec4dc	match	tests/compatibility/files/double-entry-generator/example_bocom_credit_example-bocom_credit-output.beancount
+compat	c5522023315b	match	tests/compatibility/files/double-entry-generator/example_bocom_debit_example-bocom_debit-output.beancount
+compat	cfc1919167df	match	tests/compatibility/files/double-entry-generator/example_ccb_example-ccb-output.beancount
+compat	524903bb5516	match	tests/compatibility/files/double-entry-generator/example_citic_credit_example-citic-credit-output.beancount
+compat	1d72e87eacec	match	tests/compatibility/files/double-entry-generator/example_cmb_credit_example-cmb-credit-output.beancount
+compat	5fc2024dd3fe	match	tests/compatibility/files/double-entry-generator/example_cmb_debit_example-cmb-debit-output.beancount
+compat	b3ef9a317b3f	match	tests/compatibility/files/double-entry-generator/example_hsbchk_credit_example-hsbchk-credit-output.beancount
+compat	ea1cee6003d8	match	tests/compatibility/files/double-entry-generator/example_hsbchk_debit_example-hsbchk-debit-output.beancount
+compat	4f68198da9f0	match	tests/compatibility/files/double-entry-generator/example_htsec_example-htsec-output.beancount
+compat	4112237eba6b	match	tests/compatibility/files/double-entry-generator/example_huobi_example-huobi-output.beancount
+compat	c256a994a731	match	tests/compatibility/files/double-entry-generator/example_hxsec_example-hxsec-output.beancount
+compat	d8fdb06cb306	match	tests/compatibility/files/double-entry-generator/example_icbc_credit_example-icbc-credit-output.beancount
+compat	3d8605de1957	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v1_example-icbc-debit-v1-output.beancount
+compat	ec9e704870be	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v2_example-icbc-debit-v2-output.beancount
+compat	14d4aca7aa35	match	tests/compatibility/files/double-entry-generator/example_jd_example-jd-output.beancount
+compat	d5bfd0dd43e8	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
+compat	848812ae9735	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_oklink_example-oklink-output.beancount
+compat	e16a6ce3e57a	match	tests/compatibility/files/double-entry-generator/example_spdb_debit_example-spdb_debit-output.beancount
+compat	975aaf485c5f	match	tests/compatibility/files/double-entry-generator/example_td_example-td-output.beancount
+compat	10d996866733	match	tests/compatibility/files/double-entry-generator/example_wechat_example-wechat-output.beancount
+compat	fe048f4de4d3	crash	tests/compatibility/files/fava-budget-freedom/example.beancount
+compat	4b38b543d3be	match	tests/compatibility/files/fava-dashboards/example_example.beancount
+compat	cfff482cc9c8	match	tests/compatibility/files/fava-dashboards/example_multiple-files-example_example.beancount
+compat	fa7440b2b19d	match	tests/compatibility/files/fava-dashboards/example_portfolio.beancount
+compat	66900bc1f9ef	match	tests/compatibility/files/fava-dashboards/frontend_tests_dashboards__testdata.beancount
+compat	3c2cdfa6b33d	match	tests/compatibility/files/fava-dashboards/frontend_tests_dashboards_features.beancount
+compat	2b91565cb205	match	tests/compatibility/files/fava-dashboards/frontend_tests_dashboards_themes.beancount
+compat	f9597d9e11f7	match	tests/compatibility/files/fava-dashboards/frontend_tests_dashboards_v1.beancount
+compat	f006c0aca22c	match	tests/compatibility/files/fava-envelope/example.beancount
+compat	3478d7e27ed6	match	tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount
+compat	663b9be7fd93	match	tests/compatibility/files/fava-investor/fava_investor_examples_huge-example.beancount
+compat	4e4a1f3e4a1f	match	tests/compatibility/files/fava-investor/fava_investor_modules_assetalloc_class_example.beancount
+compat	e5a8c90acbb8	match	tests/compatibility/files/fava-investor/fava_investor_modules_assetalloc_class_multicurrency.beancount
+compat	ad79ac245ed0	match	tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount
+compat	d38e0bab138e	match	tests/compatibility/files/fava-investor/fava_investor_modules_summarizer_example.beancount
+compat	48e601dd86cf	match	tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount
+compat	ac78aa273a0e	match	tests/compatibility/files/fava-investor/fava_investor_modules_tlh_wash_substantially_identical.beancount
+compat	3884cab6d3f2	match	tests/compatibility/files/fava-investor/fava_investor_pythonanywhere_commodities.beancount
+compat	56455a3be618	match	tests/compatibility/files/fava-investor/fava_investor_pythonanywhere_example.beancount
+compat	650569109f85	match	tests/compatibility/files/fava-investor/fava_investor_pythonanywhere_fava_config.beancount
+compat	a72f4e0c8a7d	match	tests/compatibility/files/fava-portfolio-returns/example_example.beancount
+compat	85612c5dfb4c	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_annualized.beancount
+compat	abb93e34f5fc	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_example_stock.beancount
+compat	5cd71e370506	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_linear_growth_stock.beancount
+compat	b9c4c5536660	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_portfolio_vs_currency.beancount
+compat	1fc4396ddb90	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_savings_plan.beancount
+compat	38e31c6f04dd	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_savings_plan_daily.beancount
+compat	629252fd6f76	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_stock_split.beancount
+compat	8b7f9ee75db9	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_target_currency.beancount
+compat	506036b98e4e	match	tests/compatibility/files/fava-portfolio-returns/src_fava_portfolio_returns_test_ledger_unicode.beancount
+compat	d46b303d3b8e	match	tests/compatibility/files/fava-portfolio-summary/example_example.beancount
+compat	d99340b20fe1	match	tests/compatibility/files/fava/contrib_examples_budgets-example.beancount
+compat	673efbe1493c	match	tests/compatibility/files/fava/contrib_examples_example.beancount
+compat	f0a98de4d601	match	tests/compatibility/files/fava/contrib_examples_huge-example.beancount
+compat	8663f6d28ecd	match	tests/compatibility/files/fava/tests_data_edit-example.beancount
+compat	66015c1e5d54	match	tests/compatibility/files/fava/tests_data_errors.beancount
+compat	a0536c118513	deviation:custom-display-precision	tests/compatibility/files/fava/tests_data_example.beancount
+compat	554c53091079	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/fava/tests_data_extension-report-example.beancount
+compat	c1b74c27dfdc	match	tests/compatibility/files/fava/tests_data_import.beancount
+compat	bc52cd9ba381	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/fava/tests_data_long-example.beancount
+compat	3dae8729c40c	match	tests/compatibility/files/fava/tests_data_off-by-one.beancount
+compat	21499f28b888	match	tests/compatibility/files/fava/tests_data_query-example.beancount
+compat	411b9aca35f3	match	tests/compatibility/files/gnucash-to-beancount/data_sample-west.beancount
+compat	aa5406e1825c	match	tests/compatibility/files/gnucash-to-beancount/data_sample.beancount
+compat	7e72b5313683	match	tests/compatibility/files/henriquebastos-gnucash/data_sample.beancount
+compat	4cdb61440fd2	match	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Comment.beancount
+compat	900c0ef0ceb7	match	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Option.beancount
+compat	55f4bf57a3fe	crash	tests/compatibility/files/intellij-beancount/resources-test_testData_parsing_Simple.beancount
+compat	14fe10edac0a	match	tests/compatibility/files/interpolation/e01_augment_empty.beancount
+compat	a17cdbb0d8e4	match	tests/compatibility/files/interpolation/e02_reduce_empty_auto.beancount
+compat	ab12195a53df	match	tests/compatibility/files/interpolation/e03_augment_currency_only.beancount
+compat	80c911db51cc	match	tests/compatibility/files/interpolation/e04_augment_date_only.beancount
+compat	19b3f85774d2	match	tests/compatibility/files/interpolation/e05_two_empty_augments.beancount
+compat	45a71142889a	match	tests/compatibility/files/interpolation/e06_empty_plus_auto.beancount
+compat	b5be31514f8b	match	tests/compatibility/files/interpolation/e07_empty_plus_price.beancount
+compat	c5097724afd8	match	tests/compatibility/files/interpolation/e08_none_augment_empty.beancount
+compat	9ee0c8b33f4c	match	tests/compatibility/files/interpolation/e09_none_reduce_empty.beancount
+compat	0cf7cbcea771	match	tests/compatibility/files/interpolation/e10_strict_reduce_empty_ambiguous.beancount
+compat	e358c4df11fe	match	tests/compatibility/files/interpolation/e11_fifo_reduce_empty_two_lots.beancount
+compat	c04c96c95e86	match	tests/compatibility/files/interpolation/e12_double_broken.beancount
+compat	1db68001529e	match	tests/compatibility/files/interpolation/e13_missing_units.beancount
+compat	1eae93873d1d	match	tests/compatibility/files/interpolation/e14_negative_residual.beancount
+compat	cf6d641ad585	match	tests/compatibility/files/interpolation/e15_multicurrency_residual.beancount
+compat	02237c79390a	match	tests/compatibility/files/interpolation/e16_price_vs_residual.beancount
+compat	76fb05471178	match	tests/compatibility/files/interpolation/e17_price_plus_auto.beancount
+compat	37321c6d3eff	match	tests/compatibility/files/jcornaz-parser/tests_samples_comments.beancount
+compat	033b436dbbab	match	tests/compatibility/files/jcornaz-parser/tests_samples_cycle.beancount
+compat	dc17fe8eab1a	match	tests/compatibility/files/jcornaz-parser/tests_samples_includes.beancount
+compat	70bc2f2a8102	match	tests/compatibility/files/jcornaz-parser/tests_samples_official.beancount
+compat	472135af2b27	match	tests/compatibility/files/jcornaz-parser/tests_samples_simple.beancount
+compat	93f70896b601	match	tests/compatibility/files/ledger2beancount/tests_accounts.beancount
+compat	3a4f9acd8817	entries|postings.order|transaction|-|expr+multi-currency	tests/compatibility/files/ledger2beancount/tests_amounts-decimal-comma.beancount
+compat	49e8e76730d9	match	tests/compatibility/files/ledger2beancount/tests_amounts-plus-sign-decimal-comma.beancount
+compat	9ca265635d40	match	tests/compatibility/files/ledger2beancount/tests_amounts-plus-sign.beancount
+compat	2a4ef8f477e3	entries|postings.order|transaction|-|expr+multi-currency	tests/compatibility/files/ledger2beancount/tests_amounts.beancount
+compat	8998fb77bde2	match	tests/compatibility/files/ledger2beancount/tests_aux-date.beancount
+compat	c3f1779b4fea	match	tests/compatibility/files/ledger2beancount/tests_balance-assertion.beancount
+compat	905eb6e37076	match	tests/compatibility/files/ledger2beancount/tests_bug214.beancount
+compat	b99e39b57845	match	tests/compatibility/files/ledger2beancount/tests_bug237.beancount
+compat	a2b014655482	match	tests/compatibility/files/ledger2beancount/tests_bug245.beancount
+compat	958624196cd6	match	tests/compatibility/files/ledger2beancount/tests_code.beancount
+compat	6ba035f69e2f	match	tests/compatibility/files/ledger2beancount/tests_comments.beancount
+compat	c2d25faf037b	match	tests/compatibility/files/ledger2beancount/tests_commodities.beancount
+compat	f1833e59462d	match	tests/compatibility/files/ledger2beancount/tests_dates-month.beancount
+compat	744d393b7196	match	tests/compatibility/files/ledger2beancount/tests_dates.beancount
+compat	56ef85d7f3d3	match	tests/compatibility/files/ledger2beancount/tests_directives.beancount
+compat	5ff9090855f5	match	tests/compatibility/files/ledger2beancount/tests_fixated.beancount
+compat	b37c644a740a	match	tests/compatibility/files/ledger2beancount/tests_flags.beancount
+compat	7e27d5276174	match	tests/compatibility/files/ledger2beancount/tests_hledger.beancount
+compat	1d1d0a295031	match	tests/compatibility/files/ledger2beancount/tests_ignore.beancount
+compat	4a384c83d3bc	match	tests/compatibility/files/ledger2beancount/tests_include1.beancount
+compat	dca14ffdaa34	match	tests/compatibility/files/ledger2beancount/tests_include2.beancount
+compat	6885967b6999	match	tests/compatibility/files/ledger2beancount/tests_include3.beancount
+compat	07333e1f61be	options|display_precision|display_precision|-|-	tests/compatibility/files/ledger2beancount/tests_lots.beancount
+compat	5ef44eaef899	match	tests/compatibility/files/ledger2beancount/tests_metadata.beancount
+compat	b42c7ab2d122	match	tests/compatibility/files/ledger2beancount/tests_narration.beancount
+compat	fb73616b8056	match	tests/compatibility/files/ledger2beancount/tests_no-config.beancount
+compat	8a2b27424858	match	tests/compatibility/files/ledger2beancount/tests_non-standard-account-root.beancount
+compat	e06988e4af32	match	tests/compatibility/files/ledger2beancount/tests_option-move_posting_tags.beancount
+compat	99a40e9de6c3	match	tests/compatibility/files/ledger2beancount/tests_payee.beancount
+compat	ca15206574cb	match	tests/compatibility/files/ledger2beancount/tests_prices.beancount
+compat	88dcddf50336	match	tests/compatibility/files/ledger2beancount/tests_spacing.beancount
+compat	8a20867e0826	match	tests/compatibility/files/ledger2beancount/tests_tags.beancount
+compat	a0c0a6402c58	match	tests/compatibility/files/ledger2beancount/tests_transactions.beancount
+compat	92104f257751	match	tests/compatibility/files/ledger2beancount/tests_virtual-postings.beancount
+compat	8898cd396737	errors|impl-more|impl:E1005|open|-|-	tests/compatibility/files/parser-lima/examples_data_account-types.beancount
+compat	a927056aea3c	deviation:custom-display-precision	tests/compatibility/files/parser-lima/examples_data_custom.beancount
+compat	f20b677a05fc	match	tests/compatibility/files/parser-lima/examples_data_error-account-types.beancount
+compat	1b70c43ec348	match	tests/compatibility/files/parser-lima/examples_data_error-duplicate-options.beancount
+compat	7b8725c6943b	errors|impl-fewer|oracle:account-inactive|transaction|-|elided	tests/compatibility/files/parser-lima/examples_data_error-duplicates.beancount
+compat	c9768d423226	match	tests/compatibility/files/parser-lima/examples_data_error-include-cycle.beancount
+compat	407e2349cb8b	match	tests/compatibility/files/parser-lima/examples_data_error-include-cycle_included.beancount
+compat	c1a0fb4c9fcd	match	tests/compatibility/files/parser-lima/examples_data_error-include-duplicate.beancount
+compat	08007f029de4	match	tests/compatibility/files/parser-lima/examples_data_error-include-duplicate_included.beancount
+compat	3237e1b9f1e1	match	tests/compatibility/files/parser-lima/examples_data_error-include-no-such-file.beancount
+compat	7bceb85a5eea	match	tests/compatibility/files/parser-lima/examples_data_error-includes.beancount
+compat	872a3642c073	match	tests/compatibility/files/parser-lima/examples_data_error-includes_simple-errors.beancount
+compat	9b2a0b6cb9e5	match	tests/compatibility/files/parser-lima/examples_data_error-options.beancount
+compat	d75de8c6acab	match	tests/compatibility/files/parser-lima/examples_data_error-parse.beancount
+compat	83e37127a56f	match	tests/compatibility/files/parser-lima/examples_data_error-post-balancing.beancount
+compat	a74e4f93ef4d	match	tests/compatibility/files/parser-lima/examples_data_error-validation.beancount
+compat	40577c08d9f0	crash	tests/compatibility/files/parser-lima/examples_data_full.beancount
+compat	8783901bcefe	match	tests/compatibility/files/parser-lima/examples_data_includes.beancount
+compat	1e88a253b97a	match	tests/compatibility/files/parser-lima/examples_data_includes_included.beancount
+compat	1ce3bde55771	match	tests/compatibility/files/parser-lima/examples_data_long_string.beancount
+compat	4d27e8bb1917	match	tests/compatibility/files/parser-lima/examples_data_options.beancount
+compat	0ca0d6fca39b	match	tests/compatibility/files/parser-lima/examples_data_simple.beancount
+compat	d79be381ef8e	match	tests/compatibility/files/parser-lima/test-cases-unsupported_ParserOptions.UnaryOption.beancount
+compat	12da1937e83f	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprAdd.beancount
+compat	a4b98d30090b	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprDifferentPlaces.beancount
+compat	5fbe147affb7	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprDifferentPlaces2.beancount
+compat	b6dec754ad9d	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprDivide.beancount
+compat	d75b590f2ba0	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprGroups.beancount
+compat	d06275b1e6f2	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprMultiply.beancount
+compat	ef240928df0d	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprNegative.beancount
+compat	57aa9bd043a1	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprPositive.beancount
+compat	4c5358e5299a	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprPrecedence.beancount
+compat	adb7d3b869c7	match	tests/compatibility/files/parser-lima/test-cases_Arithmetic.NumberExprSubtract.beancount
+compat	1012d6fb0b22	match	tests/compatibility/files/parser-lima/test-cases_Balance.TotalCost.beancount
+compat	eca7aabc5d69	match	tests/compatibility/files/parser-lima/test-cases_Balance.TotalPrice.beancount
+compat	a5648f124c2f	match	tests/compatibility/files/parser-lima/test-cases_Comment.CommentAfterPostings.beancount
+compat	a8f65ca5eb97	match	tests/compatibility/files/parser-lima/test-cases_Comment.CommentAfterTransaction.beancount
+compat	9c442edb5fc8	match	tests/compatibility/files/parser-lima/test-cases_Comment.CommentAfterTransactionStart.beancount
+compat	3eeeea3b8a9b	match	tests/compatibility/files/parser-lima/test-cases_Comment.CommentBeforeTransaction.beancount
+compat	c3b58b19f596	match	tests/compatibility/files/parser-lima/test-cases_Comment.CommentBetweenPostings.beancount
+compat	9ce3de451312	match	tests/compatibility/files/parser-lima/test-cases_Currencies.DifferentCostAndPriceCurrency.beancount
+compat	e92be9994ab2	match	tests/compatibility/files/parser-lima/test-cases_Currencies.ParseCurrencies.beancount
+compat	640ef2fa9a32	match	tests/compatibility/files/parser-lima/test-cases_DeprecatedOptions.DeprecatedOption.beancount
+compat	0d0cb9d91ea8	match	tests/compatibility/files/parser-lima/test-cases_DeprecatedOptions.DeprecatedPlugin.beancount
+compat	22698348cae5	match	tests/compatibility/files/parser-lima/test-cases_DisplayContextOptions.RenderCommasError.beancount
+compat	0ea7bed3f4cd	match	tests/compatibility/files/parser-lima/test-cases_DisplayContextOptions.RenderCommasNo.beancount
+compat	69af91c2dd2b	match	tests/compatibility/files/parser-lima/test-cases_DisplayContextOptions.RenderCommasYes.beancount
+compat	22ec77ea6e01	match	tests/compatibility/files/parser-lima/test-cases_DisplayContextOptions.RenderCommasYes2.beancount
+compat	b56e496a5dac	match	tests/compatibility/files/parser-lima/test-cases_Document.DocumentLinks.beancount
+compat	0df55e403854	match	tests/compatibility/files/parser-lima/test-cases_Document.DocumentNoTagsLinks.beancount
+compat	0d8e9b4b7986	match	tests/compatibility/files/parser-lima/test-cases_Document.DocumentTags.beancount
+compat	581edae591ec	match	tests/compatibility/files/parser-lima/test-cases_Expressions.ExplicitPrecision.beancount
+compat	e10c760f1f43	match	tests/compatibility/files/parser-lima/test-cases_Expressions.ExplicitPrecision2.beancount
+compat	ed9f0ce74b7e	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostAverage.beancount
+compat	87070cd50c52	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostAverageMissingBasis.beancount
+compat	046ff12a38d5	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostAverageWithOther.beancount
+compat	a833aa01c377	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostEmpty.beancount
+compat	cd43f68c4d8d	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostEmptyWithOther.beancount
+compat	a3aaeb85d03a	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostFull.beancount
+compat	685d3d185189	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingCurrency.beancount
+compat	0bd32e53700f	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingNumberPer.beancount
+compat	ab20ae0b8c73	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingNumberTotal.beancount
+compat	92cf83e6bc85	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingNumbers.beancount
+compat	c662bc004ffa	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostNoNumberTotal.beancount
+compat	7a117303a324	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.PriceMissing.beancount
+compat	c9b7350fb418	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.PriceMissingCurrency.beancount
+compat	4580a7f847cb	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.PriceMissingNumber.beancount
+compat	381a134e5ecc	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.PriceNone.beancount
+compat	81f67f30e0d5	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsFull.beancount
+compat	89ff1af47239	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissing.beancount
+compat	03e086b97398	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingCurrency.beancount
+compat	f92712e9e73c	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingCurrencyWithCost.beancount
+compat	1ce9dc9ac6a2	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingCurrencyWithPrice.beancount
+compat	f0e39f42e285	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingNumber.beancount
+compat	5f77c6445dc0	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingNumberWithCost.beancount
+compat	ff8531df78b3	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingNumberWithPrice.beancount
+compat	c1ab120c6336	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingWithCost.beancount
+compat	80a4dfb0a1f8	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.UnitsMissingWithPrice.beancount
+compat	e774fe2acd26	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsAmount.beancount
+compat	791a9f8fdf57	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsBalance.beancount
+compat	15378992ad6c	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsClose.beancount
+compat	ae6cc29f2eae	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsCommodity.beancount
+compat	1018ef337ac9	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsCompoundAmount.beancount
+compat	5f754a9340d6	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsDocument.beancount
+compat	90a540b0ada0	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsEvent.beancount
+compat	ac327cccc01c	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsInclude.beancount
+compat	a1ba6be1747b	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsInclude_Included.beancount
+compat	2db2e688b708	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsKeyValue.beancount
+compat	8cefb25b6378	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsLotCostDate.beancount
+compat	92997ffa0c95	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsNote.beancount
+compat	fe214b295fc7	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsOpen.beancount
+compat	ccec2d19d137	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsOption.beancount
+compat	0b4f1bd8c2e0	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPad.beancount
+compat	9290441c41fa	crash	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPlugin.beancount
+compat	6106485bc155	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPoptag.beancount
+compat	1cbc267f004b	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPosting.beancount
+compat	e432bcb0f7a1	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPrice.beancount
+compat	52dec32ba5dd	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsPushtag.beancount
+compat	6527f0c868d8	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsTagLinkLink.beancount
+compat	6ef1ee8db76a	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsTagLinkNew.beancount
+compat	2897bf2e0628	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarExceptionsTagLinkTag.beancount
+compat	98c75fe1ae67	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarSyntaxError.beancount
+compat	a37d69365801	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarSyntaxErrorMultiple.beancount
+compat	1888850a7fc2	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarSyntaxErrorRecovery.beancount
+compat	5dc3309d1b15	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.GrammarSyntaxErrorRecovery2.beancount
+compat	6ceccb498423	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.LexerErrorsInPostings.beancount
+compat	7d13c5fc3b06	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.LexerException.beancount
+compat	bdfe8a0713c4	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.LexerExceptionRecovery.beancount
+compat	f62b04ba515d	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.LexerInvalidToken.beancount
+compat	76b7e8fd2eae	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.LexerInvalidTokenRecovery.beancount
+compat	fd0b0f2a5216	match	tests/compatibility/files/parser-lima/test-cases_LexerAndParserErrors.ParsingErrorAtRoot.beancount
+compat	2298b148f8d7	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataDataTypes.beancount
+compat	2c54d860a457	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataEmpty.beancount
+compat	8fc17b235407	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataKeySyntax.beancount
+compat	1261bd8a43c6	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataOther.beancount
+compat	85d3facd269d	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionBegin.beancount
+compat	c408c328fdfa	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionEnd.beancount
+compat	04830d923e7b	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionIndented.beancount
+compat	1836546cc24a	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionMany.beancount
+compat	9005366ab271	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionMiddle.beancount
+compat	8d20b7070c66	match	tests/compatibility/files/parser-lima/test-cases_MetaData.MetadataTransactionRepeated2.beancount
+compat	9844628c5eeb	match	tests/compatibility/files/parser-lima/test-cases_Misc.CommentInPostings.beancount
+compat	4b9013e597cf	match	tests/compatibility/files/parser-lima/test-cases_Misc.CommentInPostingsInvalid.beancount
+compat	a0f3bd3c0f72	match	tests/compatibility/files/parser-lima/test-cases_MiscOptions.PluginProcessingModeDefault.beancount
+compat	93c3fa942c7b	match	tests/compatibility/files/parser-lima/test-cases_MiscOptions.PluginProcessingModeInvalid.beancount
+compat	854f0375d1df	match	tests/compatibility/files/parser-lima/test-cases_MiscOptions.PluginProcessingModeRaw.beancount
+compat	c4561c6580fc	match	tests/compatibility/files/parser-lima/test-cases_MultipleLines.MultilineNarration.beancount
+compat	39386b5ef126	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostAmount.beancount
+compat	b21343fe62f3	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostBothCosts.beancount
+compat	a3beb55c4d70	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostDate.beancount
+compat	ad834aa0b523	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostEmpty.beancount
+compat	1f5204729f33	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostEmptyComponents.beancount
+compat	55ac5fba953e	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostLabel.beancount
+compat	efde0a8a2b6a	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostMerge.beancount
+compat	3f5d6241413e	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostNone.beancount
+compat	a5d40b2eb587	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostRepeated.beancount
+compat	23925d9d557f	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostRepeatedDate.beancount
+compat	86edf009063c	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostRepeatedLabel.beancount
+compat	1e3cf19065fd	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostRepeatedMerge.beancount
+compat	c95227d02122	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostThreeComponents.beancount
+compat	378782f25c16	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostTotalCostOnly.beancount
+compat	a6c8cb065b4b	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostTotalEmptyTotal.beancount
+compat	4ae09ed58b84	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostTotalJustCurrency.beancount
+compat	f27aa076e247	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostTwoComponents.beancount
+compat	8a6567ea5dd1	match	tests/compatibility/files/parser-lima/test-cases_ParseLots.CostWithSlashes.beancount
+compat	6cba6f3f68c5	match	tests/compatibility/files/parser-lima/test-cases_Parser.BasicTesting.beancount
+compat	5fee2227b14b	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.Comment.beancount
+compat	67c945aeaa20	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.CommentEOF.beancount
+compat	ef443355af97	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.ExtraWhitespaceComment.beancount
+compat	baa0554fa2bd	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.ExtraWhitespaceCommentIndented.beancount
+compat	147c3b1a3320	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.ExtraWhitespaceNote.beancount
+compat	d6e1e0151ac0	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.ExtraWhitespaceTransaction.beancount
+compat	2b4c342f5433	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.IndentEOF.beancount
+compat	f9f66919b429	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.NoEmptyLines.beancount
+compat	d75c68131499	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.TransactionImbalanceFromSinglePosting.beancount
+compat	e71c5083694e	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.TransactionSinglePostingAtZero.beancount
+compat	03123272e192	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Balance.beancount
+compat	3a00486fc302	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.BalanceWithCost.beancount
+compat	e4c25402a175	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Close.beancount
+compat	244b5089c187	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Commodity.beancount
+compat	4b13165c8502	deviation:custom-display-precision	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Custom.beancount
+compat	c8fcba45ff9b	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Event.beancount
+compat	c89f77d7574f	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Note.beancount
+compat	caeb56961d86	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Open1.beancount
+compat	d2e584d8307a	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Open2.beancount
+compat	e9af9386dd26	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Open3.beancount
+compat	7097f4cd69e7	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Open4.beancount
+compat	f5c640930256	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Open5.beancount
+compat	577907f7856b	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Pad.beancount
+compat	6e256975971e	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Price.beancount
+compat	c4bbb1b90d2d	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Query.beancount
+compat	3a1e96c624e5	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.TransactionOneString.beancount
+compat	022b0ff2d183	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.TransactionThreeStrings.beancount
+compat	e8eef6de58ef	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.TransactionTwoStrings.beancount
+compat	b456614709e8	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.TransactionWithTxnKeyword.beancount
+compat	46d20f836588	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeAbsolute.beancount
+compat	667b03f9c319	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeChain.beancount
+compat	ca2d7e885ad4	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeChain_Included1.beancount
+compat	eca84cfdf791	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeChain_subdir_Included2.beancount
+compat	eccd7b024c3b	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeCycle.beancount
+compat	2db08288d3eb	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeCycle_Included1.beancount
+compat	a1fe98946ab8	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeDuplicateDifferentContext.beancount
+compat	ae655d70b1ee	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeDuplicateSameContext.beancount
+compat	000ea9227100	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeGlob.beancount
+compat	48559046898b	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeMultiple.beancount
+compat	e646b34dc653	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeMultiple_Included1.beancount
+compat	2485a2bf8696	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeMultiple_Included2.beancount
+compat	75bd18630d5e	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeMultiple_IncludedCommon.beancount
+compat	25733ee66f01	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeRelative.beancount
+compat	ca4a7e3b182c	match	tests/compatibility/files/parser-lima/test-cases_ParserInclude.IncludeRelativeFromString.beancount
+compat	ced712c65c3c	match	tests/compatibility/files/parser-lima/test-cases_ParserLinks.ParseLinks.beancount
+compat	06f65da44597	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.InvalidAccountNames.beancount
+compat	47ed30839922	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.InvalidOption.beancount
+compat	1679b49c001b	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.LegacyTranslations.beancount
+compat	f231ef6f9174	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.OptionListValue.beancount
+compat	a8115ef2d4a3	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.OptionSingleValue.beancount
+compat	151b7369899c	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.ReadonlyOption.beancount
+compat	9244b4dcbd07	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.ToleranceMapValue.beancount
+compat	0108326315de	errors|impl-fewer|oracle:LoadError|-|-|-	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.Plugin.beancount
+compat	c68f893d2998	match	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.PluginAsOption.beancount
+compat	369ac5337d75	errors|impl-fewer|oracle:LoadError|-|-|-	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.PluginWithConfig.beancount
+compat	5a51f8166267	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaForgotten.beancount
+compat	5dcfa0c9e4f7	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaInvalidPop.beancount
+compat	f89be2a7ccec	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaNormal.beancount
+compat	442e0fa034d6	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaOverride.beancount
+compat	6907d4f42a35	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaShadow.beancount
+compat	3b1391f1aecf	match	tests/compatibility/files/parser-lima/test-cases_PushPopTag.Multiple.beancount
+compat	e875f66a547f	match	tests/compatibility/files/parser-lima/test-cases_PushPopTag.PopInvalidTag.beancount
+compat	7eef4f1a9d0b	match	tests/compatibility/files/parser-lima/test-cases_PushPopTag.TagLeftUnclosed.beancount
+compat	c87b568f1150	match	tests/compatibility/files/parser-lima/test-cases_Simple.CRLF.beancount
+compat	664f96bcaa26	match	tests/compatibility/files/parser-lima/test-cases_Simple.beancount
+compat	8673c3bc5e36	match	tests/compatibility/files/parser-lima/test-cases_Sort.OpenBeforeTransactionSameDate.beancount
+compat	8c9b9914c14b	errors|impl-fewer|oracle:balance-failed|balance|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInPosting.beancount
+compat	0caba17429d5	errors|impl-fewer|oracle:balance-failed|balance|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInTransactionLine.beancount
+compat	a6c37b6770f5	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.NoFinalNewline.beancount
+compat	20922ecbd2ad	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.SingleErrorTokenAtTopLevel.beancount
+compat	3e8066f07408	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.CostNegative.beancount
+compat	9fd6ded22de2	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.PriceNegative.beancount
+compat	9832f5a035fb	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalCost.beancount
+compat	d05a0f168b3c	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalCostInvalid.beancount
+compat	abb9f6b821df	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalCostNegative.beancount
+compat	8d572d346b45	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalPriceInverted.beancount
+compat	8260857c7b2d	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalPriceNegative.beancount
+compat	e1b4e643f065	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalPricePositive.beancount
+compat	a1efa60a024f	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.TotalPriceWithMissing2.beancount
+compat	e41932cfbf01	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.ZeroAmount.beancount
+compat	ec433a206793	match	tests/compatibility/files/parser-lima/test-cases_TotalsAndSigns.ZeroCost.beancount
+compat	1c1a62456357	match	tests/compatibility/files/parser-lima/test-cases_Transactions.BlankLineNotAllowed.beancount
+compat	d8343eaa2e8e	match	tests/compatibility/files/parser-lima/test-cases_Transactions.BlankLineWithSpacesNotAllowed.beancount
+compat	5c90e32eda90	match	tests/compatibility/files/parser-lima/test-cases_Transactions.EmptyNarration.beancount
+compat	c0c2f62f9cfc	match	tests/compatibility/files/parser-lima/test-cases_Transactions.Imbalance.beancount
+compat	fa15bb860ae1	match	tests/compatibility/files/parser-lima/test-cases_Transactions.LinkAndThenTag.beancount
+compat	6e038ce89969	match	tests/compatibility/files/parser-lima/test-cases_Transactions.MultipleTagsLinksOnMetadataLine.beancount
+compat	b38ee5f6f8e7	match	tests/compatibility/files/parser-lima/test-cases_Transactions.NoNarration.beancount
+compat	c469eceff71c	match	tests/compatibility/files/parser-lima/test-cases_Transactions.NoPostings.beancount
+compat	aab034f0ae3f	match	tests/compatibility/files/parser-lima/test-cases_Transactions.PayeeNoNarration.beancount
+compat	853b079e11c7	match	tests/compatibility/files/parser-lima/test-cases_Transactions.Simple2.beancount
+compat	2eee78f75724	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_Transactions.TagThenLink.beancount
+compat	77f44085e690	match	tests/compatibility/files/parser-lima/test-cases_Transactions.TagsAfterFirstLine.beancount
+compat	fdd07000a267	match	tests/compatibility/files/parser-lima/test-cases_Transactions.TagsAfterFirstPosting.beancount
+compat	37f03ca43f1e	match	tests/compatibility/files/parser-lima/test-cases_Transactions.TooManyStrings.beancount
+compat	c85f7b8e8f52	match	tests/compatibility/files/parser-lima/test-cases_Transactions.ZeroCosts.beancount
+compat	3285006dae9e	match	tests/compatibility/files/parser-lima/test-cases_Transactions.ZeroPrices.beancount
+compat	bea40a4f8c4d	match	tests/compatibility/files/parser-lima/test-cases_Transactions.ZeroUnits.beancount
+compat	cb4089986c52	match	tests/compatibility/files/parser-lima/test-cases_Whitespace.IndentError0.beancount
+compat	980ba745b8a8	match	tests/compatibility/files/parser-lima/test-cases_Whitespace.IndentError1.beancount
+compat	f492af68e93c	match	tests/compatibility/files/pinto-reports/example.beancount
+compat	dd8e71532396	match	tests/compatibility/files/plugins/implicit_prices/annotation_and_cost.beancount
+compat	b421cc2b846c	match	tests/compatibility/files/plugins/implicit_prices/cost_only.beancount
+compat	2dd12dd42e5b	match	tests/compatibility/files/plugins/implicit_prices/total_annotation.beancount
+compat	579751e9c2d5	match	tests/compatibility/files/portfolio-eidorb/cdk_demo-function_demo-portfolio.beancount
+compat	b7beddf4cb97	match	tests/compatibility/files/pynomina/nomina_examples_example.beancount
+compat	a7add6e5543e	match	tests/compatibility/files/reds-importers/beancount_reds_importers_example_my.beancount
+compat	9535314fe103	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_box_accrual_test.beancount
+compat	a363d4bdf22b	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.gain_loss.beancount
+compat	301578cc8749	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount
+compat	375372cbd5ae	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_effective_date_examples.beancount
+compat	f538da85f831	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zerosum-example.beancount
+compat	c315b0b4d17c	crash	tests/compatibility/files/reds-plugins/beancount_reds_plugins_zerosum_zs_test.beancount
+compat	2e70c3e68bd7	match	tests/compatibility/files/smart-importer/tests_data_chinese.beancount
+compat	9053a99daaa7	match	tests/compatibility/files/smart-importer/tests_data_multiaccounts.beancount
+compat	759daca66aed	match	tests/compatibility/files/smart-importer/tests_data_simple.beancount
+compat	dd8a00362083	match	tests/compatibility/files/smart-importer/tests_data_single-account.beancount

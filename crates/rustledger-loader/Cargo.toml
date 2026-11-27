@@ -62,5 +62,11 @@ jiff.workspace = true
 # Counting global allocator for `tests/option_number_allocation.rs`.
 dhat.workspace = true
 
+# The semantic differential's snapshot runs the whole pipeline: plugins and
+# validation included.
+[[example]]
+name = "semantic_snapshot"
+required-features = ["full"]
+
 [lints]
 workspace = true

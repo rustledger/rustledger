@@ -203,7 +203,7 @@ fn test_include_cycle_display_contains_duplicate_filename_issue_765() {
 }
 
 /// #2959: an include cycle carries the `include` that closed it (in
-/// `cycle_b`, the include of `cycle_a`), and the ledger's `LOAD` error is
+/// `cycle_b`, the include of `cycle_a`), and the ledger's `E0002` error is
 /// located there, as an unreadable include's is, so every surface can show
 /// it on that line.
 #[test]
@@ -228,8 +228,9 @@ fn test_include_cycle_is_located_at_the_include_that_closes_it() {
     let load_error = ledger
         .errors
         .iter()
-        .find(|e| e.code == "LOAD")
-        .expect("the LOAD error");
+        .find(|e| e.code == "E0002")
+        .expect("the E0002 error");
+    assert!(load_error.is_load_error());
     let location = load_error.location.as_ref().expect("located");
     assert_eq!(
         location.file.file_name(),

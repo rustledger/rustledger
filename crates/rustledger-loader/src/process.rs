@@ -554,6 +554,8 @@ pub struct LedgerError {
     /// Whether this is a load error that stops a query from answering
     /// ([`LoadError::blocks_queries`]). See [`Self::blocks_queries`].
     blocking_load: bool,
+    /// Whether this is a load error. See [`Self::is_load_error`].
+    load_error: bool,
     /// Whether this is [`Ledger::query_refusal`]: a rejected option that
     /// would change the ledger's figures. See [`Self::blocks_queries`].
     option_refusal: bool,
@@ -603,6 +605,7 @@ impl LedgerError {
             booking_failure: false,
             plugin_failure: false,
             blocking_load: false,
+            load_error: false,
             option_refusal: false,
             validation_finding: false,
             restates_e3002: false,
@@ -623,6 +626,7 @@ impl LedgerError {
             booking_failure: false,
             plugin_failure: false,
             blocking_load: false,
+            load_error: false,
             option_refusal: false,
             validation_finding: false,
             restates_e3002: false,
@@ -732,6 +736,15 @@ impl LedgerError {
         self.blocking_load || self.booking_failure || self.option_refusal
     }
 
+    /// Whether this is a load error ([`load_error_to_ledger_error`]): a file
+    /// or include the loader could not read (E0001-E0007), or a file's parse
+    /// errors folded into one (`LOAD`). Tells them apart from the other
+    /// parse-phase errors, which a code prefix cannot do reliably.
+    #[must_use]
+    pub const fn is_load_error(&self) -> bool {
+        self.load_error
+    }
+
     /// Set the processing phase for this error.
     #[must_use]
     pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
@@ -744,6 +757,80 @@ impl LedgerError {
     pub fn with_location(mut self, location: ErrorLocation) -> Self {
         self.location = Some(location);
         self
+    }
+}
+
+/// A load error as every surface reports it: `rledger check`, the LSP, WASM
+/// and the FFI component all take it from here, so its code, wording, hint and
+/// place are decided once.
+///
+/// The code is [`LoadError::code`], the one `rledger explain` documents
+/// (E0001 an unreadable file, E0002 an include cycle, E0003 a confined
+/// include path, E0004 a duplicate include or a file that cannot be
+/// decrypted, E0005 a glob without a match, E0006 a glob that cannot be
+/// expanded, E0007 too many files). It is placed:
+///
+/// - an unreadable include, and an include cycle, on the `include` line that
+///   caused it, in the file that holds it (#2959); an unreadable file with no
+///   include site on line 1 of that file, and a cycle with no site on line 1
+///   of its first file;
+/// - a duplicate include on line 1 of the file included twice, the file the
+///   message names;
+/// - a file that cannot be decrypted on line 1 of that file;
+/// - the others nowhere, which a surface shows in the main file.
+///
+/// Until this was the one renderer, `check` rendered load errors itself, with
+/// these codes, while `process` gave every one the code `LOAD` and placed a
+/// duplicate include nowhere, so the editor and the libraries disagreed with
+/// `check` (found by `rustledger-surface-parity-tests`). The folded `parse
+/// errors in <path>` of a file whose parse errors a surface did not take out
+/// ([`LoadResult::take_parse_errors`]) keeps the code `LOAD`: its errors are
+/// each reported with their own `P` code by every surface.
+#[must_use]
+pub fn load_error_to_ledger_error(load_err: &LoadError, source_map: &SourceMap) -> LedgerError {
+    let at_line_one = |file: &std::path::Path| ErrorLocation {
+        file: file.to_path_buf(),
+        line: 1,
+        column: 1,
+    };
+    let message = match load_err {
+        LoadError::Io {
+            path,
+            error,
+            include_site: Some(_),
+        } => format!("failed to read included file {}: {error}", path.display()),
+        LoadError::Io { error, .. } => format!("failed to read file: {error}"),
+        LoadError::Decryption { message, .. } => format!("failed to decrypt: {message}"),
+        other => other.to_string(),
+    };
+    let mut err = LedgerError::error(load_err.code(), message).with_phase("parse");
+    err.blocking_load = load_err.blocks_queries();
+    err.load_error = true;
+    err.hint = load_err.hint().map(str::to_string);
+    if let Some(site) = load_err.include_site() {
+        // Prefer the source map for line/col so byte spans stay
+        // authoritative, located by the rule every surface shares.
+        if let Some(location) = source_map.locate(site.file_id, site.span.start) {
+            err = err
+                .with_location(location)
+                .with_source_span((site.span.start, site.span.end), site.file_id);
+        } else {
+            err = err.with_location(at_line_one(&site.file));
+        }
+        return err;
+    }
+    match load_err {
+        LoadError::Io { path, .. } | LoadError::Decryption { path, .. } => {
+            err.with_location(at_line_one(path))
+        }
+        LoadError::IncludeCycle { cycle, .. } => match cycle.first() {
+            Some(first) => err.with_location(at_line_one(std::path::Path::new(first))),
+            None => err,
+        },
+        LoadError::DuplicateInclude { path } => {
+            err.with_location(at_line_one(std::path::Path::new(path)))
+        }
+        _ => err,
     }
 }
 
@@ -766,28 +853,12 @@ impl LedgerError {
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
     let mut errors: Vec<LedgerError> = Vec::new();
 
-    // Convert load errors to ledger errors (parse phase). Iterate by
-    // reference so `raw` stays borrowable for the rest of the pipeline
-    // (the phase transitions and validator setup below borrow it).
+    // Convert load errors to ledger errors (parse phase), through the one
+    // renderer every surface shares. Iterate by reference so `raw` stays
+    // borrowable for the rest of the pipeline (the phase transitions and
+    // validator setup below borrow it).
     for load_err in &raw.errors {
-        let mut err = LedgerError::error("LOAD", load_err.to_string()).with_phase("parse");
-        err.blocking_load = load_err.blocks_queries();
-        if let Some(site) = load_err.include_site() {
-            // Prefer the source map for line/col so byte spans stay
-            // authoritative, located by the rule every surface shares.
-            if let Some(location) = raw.source_map.locate(site.file_id, site.span.start) {
-                err = err
-                    .with_location(location)
-                    .with_source_span((site.span.start, site.span.end), site.file_id);
-            } else {
-                err = err.with_location(ErrorLocation {
-                    file: site.file.clone(),
-                    line: 1,
-                    column: 1,
-                });
-            }
-        }
-        errors.push(err);
+        errors.push(load_error_to_ledger_error(load_err, &raw.source_map));
     }
 
     // Phase-typed pipeline (issue #1166). The phantom-typed
@@ -2615,6 +2686,7 @@ pub fn validation_error_to_ledger_error(
         booking_failure: false,
         plugin_failure: false,
         blocking_load: false,
+        load_error: false,
         option_refusal: false,
         validation_finding: true,
         restates_e3002: false,

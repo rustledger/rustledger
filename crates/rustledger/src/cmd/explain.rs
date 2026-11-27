@@ -74,7 +74,7 @@ impl Group {
 /// reuses for "plugin not found") is shown after the validator's text as a
 /// second meaning.
 const OTHER: &[OtherCode] = &[
-    // === Loader: files and includes (E0xxx), raised by `check` ===
+    // === Loader: files and includes (E0xxx), every surface (`LoadError::code`) ===
     OtherCode {
         code: "E0001",
         group: Group::Load,
@@ -153,13 +153,14 @@ const OTHER: &[OtherCode] = &[
         code: "LOAD",
         group: Group::Load,
         error: true,
-        title: "Ledger could not be loaded",
-        explanation: "A loading failure (an unreadable file, an include cycle, ...) as \
-                      reported by a surface that receives it as one processing error \
-                      rather than under its own `E0xxx` code (the LSP, WASM, the FFI). \
-                      `rledger check` reports the same failures under their `E0xxx` \
-                      codes.\n\nFix: read the message; `rledger check FILE` shows the \
-                      specific code.",
+        title: "A file's parse errors, folded into one",
+        explanation: "The parse errors of one file, as one `parse errors in <path>` \
+                      error, from a program that runs the loader's processing pipeline \
+                      on a load whose parse errors it did not take out first. `rledger \
+                      check`, the LSP, WASM and the FFI report each parse error with \
+                      its own `P` code instead, and every other load failure under its \
+                      `E0xxx` code.\n\nFix: run `rledger check FILE` to see each parse \
+                      error.",
     },
     // === Parser (P codes: `P{ParseError::kind_code:04}`) ===
     OtherCode {

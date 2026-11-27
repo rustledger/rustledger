@@ -80,9 +80,6 @@ const VFS: &[&str] = &[
     "wasm Ledger fromCache",
 ];
 
-/// The FFI component's file surfaces.
-const FFI_FILE: &[&str] = &["ffi validate-file", "ffi load-file"];
-
 /// One diagnostic an allowed difference takes out of the comparison: the
 /// corpus file (relative to the workspace root) it is reported for, its code
 /// and its line (`0`: no location).
@@ -167,8 +164,8 @@ const ALLOWED: &[Allowed] = &[
             (INCLUDE_CYCLE_INCLUDED, "E1001", 3),
         ],
         surface: &[
-            (PATH_TRAVERSAL, "LOAD", 5),
-            (INCLUDE_CYCLE_INCLUDED, "LOAD", 1),
+            (PATH_TRAVERSAL, "E0001", 5),
+            (INCLUDE_CYCLE_INCLUDED, "E0001", 1),
         ],
         reason: "The file map holds the files under the ledger's directory, and these \
                  ledgers include a file above it.",
@@ -183,54 +180,38 @@ const ALLOWED: &[Allowed] = &[
             (INCLUDE_CYCLE_INCLUDED, "E1001", 3),
         ],
         surface: &[
-            (PATH_TRAVERSAL, "LOAD", 0),
-            (INCLUDE_ABSOLUTE, "LOAD", 0),
-            (INCLUDE_CYCLE_INCLUDED, "LOAD", 0),
+            (PATH_TRAVERSAL, "E0003", 0),
+            (INCLUDE_ABSOLUTE, "E0003", 0),
+            (INCLUDE_CYCLE_INCLUDED, "E0003", 0),
         ],
         reason: "`validate-file` confines includes to the ledger's directory, the \
                  component's safe default; `check` does not. (`load-file` is run with \
                  `allow-unrestricted-includes`, and agrees.)",
     },
-    // OPEN, not a decision (see this test's PR): `check` renders the loader's
-    // load errors itself (`cmd/check.rs`), with the codes `rledger explain`
-    // documents (E0001 unreadable include, E0002 include cycle, E0004
-    // duplicate include, E0005 glob without a match). Every other surface
-    // takes them from the loader's `process`, the canonical renderer, which
-    // codes every one `LOAD` (and places a duplicate include on no line).
-    // Fixing it means choosing the code WASM, the FFI and the LSP report.
     Allowed {
-        surfaces: &[VFS, FFI_FILE, &["lsp server"]],
+        surfaces: &[VFS],
         check: &[
             (CYCLE_A, "E0002", 2),
             (CYCLE_B, "E0002", 2),
-            (GLOB_NOMATCH, "E0005", 0),
             (MISSING_INCLUDE, "E0001", 2),
+            (INCLUDE_ABSOLUTE, "E0001", 1),
             (INCLUDE_CYCLE, "E0004", 1),
             (INCLUDE_DUPLICATE, "E0004", 1),
             (INCLUDE_RELATIVE, "E0001", 1),
         ],
         surface: &[
-            (CYCLE_A, "LOAD", 2),
-            (CYCLE_B, "LOAD", 2),
-            (GLOB_NOMATCH, "LOAD", 0),
-            (MISSING_INCLUDE, "LOAD", 2),
-            (INCLUDE_CYCLE, "LOAD", 0),
-            (INCLUDE_DUPLICATE, "LOAD", 0),
-            (INCLUDE_RELATIVE, "LOAD", 1),
+            (CYCLE_A, "E0002", 2),
+            (CYCLE_B, "E0002", 2),
+            (MISSING_INCLUDE, "E0001", 2),
+            (INCLUDE_ABSOLUTE, "E0001", 1),
+            (INCLUDE_CYCLE, "E0004", 1),
+            (INCLUDE_DUPLICATE, "E0004", 1),
+            (INCLUDE_RELATIVE, "E0001", 1),
         ],
-        reason: "OPEN: `check` codes a load error E0001-E0005, the loader `LOAD`.",
-    },
-    Allowed {
-        surfaces: &[VFS, &["ffi load-file", "lsp server"]],
-        check: &[(INCLUDE_ABSOLUTE, "E0001", 1)],
-        surface: &[(INCLUDE_ABSOLUTE, "LOAD", 1)],
-        reason: "OPEN: `check` codes a load error E0001-E0005, the loader `LOAD`.",
-    },
-    Allowed {
-        surfaces: &[&["ffi load-file", "lsp server"]],
-        check: &[(INCLUDE_CYCLE_INCLUDED, "E0004", 1)],
-        surface: &[(INCLUDE_CYCLE_INCLUDED, "LOAD", 0)],
-        reason: "OPEN: `check` codes a load error E0001-E0005, the loader `LOAD`.",
+        reason: "The same load error, code and line, in the file map's words: its \
+                 files are named by their keys (`cycle_a.beancount`), not their paths \
+                 on disk, and a missing one is `file not found in virtual filesystem`, \
+                 not the operating system's error.",
     },
 ];
 
@@ -253,7 +234,6 @@ const OPTION_LIST: &str = "tests/fixtures/lima-tests/ParserOptions.OptionListVal
 const PATH_TRAVERSAL: &str = "crates/rustledger-loader/tests/fixtures/path_traversal.beancount";
 const CYCLE_A: &str = "crates/rustledger-loader/tests/fixtures/cycle_a.beancount";
 const CYCLE_B: &str = "crates/rustledger-loader/tests/fixtures/cycle_b.beancount";
-const GLOB_NOMATCH: &str = "crates/rustledger-loader/tests/fixtures/glob_nomatch.beancount";
 const MISSING_INCLUDE: &str = "crates/rustledger-loader/tests/fixtures/missing_include.beancount";
 const INCLUDE_ABSOLUTE: &str = "tests/fixtures/lima-tests/ParserInclude.IncludeAbsolute.beancount";
 const INCLUDE_CYCLE: &str = "tests/fixtures/lima-tests/ParserInclude.IncludeCycle.beancount";

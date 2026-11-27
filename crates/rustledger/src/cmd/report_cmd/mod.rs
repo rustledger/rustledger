@@ -386,7 +386,7 @@ pub fn run(
 /// silently broke into two.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// The error code, for diagnostics that have one (`E11001`, `LOAD`).
+    /// The error code, for diagnostics that have one (`E11001`, `E0001`).
     pub code: Option<String>,
     /// The date the diagnostic is about, not the date it was produced.
     pub date: Option<NaiveDate>,

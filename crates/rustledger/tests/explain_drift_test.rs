@@ -12,10 +12,12 @@
 //! - option codes: [`OptionWarning::ALL_CODES`] (pinned against the sources
 //!   that raise them by the loader's own tests);
 //! - the booking fallback: [`rustledger_booking::BOOKING_FAILURE_CODE`];
+//! - the load errors' codes: the arms of `LoadError::code` (the `E0xxx`
+//!   codes and `LOAD`), which every surface reports them with;
 //! - the codes written as literals where they are raised: every
-//!   `rules.keep("...")` in `check` (the `E0xxx` load errors) and every
-//!   `LedgerError::error("...")` / `LedgerError::warning("...")` in the
-//!   loader's processing pipeline (`E8xxx`, `PLUGIN`, `LOAD`).
+//!   `rules.keep("...")` in `check` and every `LedgerError::error("...")` /
+//!   `LedgerError::warning("...")` in the loader's processing pipeline
+//!   (`E8xxx`, `PLUGIN`).
 //!
 //! A new code in any of these places fails this test until `explain` gains
 //! an explanation for it.
@@ -56,6 +58,18 @@ const CHECK_SOURCE: &str = include_str!("../src/cmd/check.rs");
 
 const PROCESS_SOURCE: &str = include_str!("../../rustledger-loader/src/process.rs");
 
+const LOADER_LIB_SOURCE: &str = include_str!("../../rustledger-loader/src/lib.rs");
+
+/// The codes `LoadError::code` returns: the literals of its match arms.
+fn load_error_codes() -> BTreeSet<String> {
+    let start = LOADER_LIB_SOURCE
+        .find("pub const fn code(&self)")
+        .expect("LoadError::code");
+    let body = &LOADER_LIB_SOURCE[start..];
+    let body = &body[..body.find("\n    }\n").expect("end of LoadError::code")];
+    literal_codes(body, &["=> "])
+}
+
 /// Every code `check` can emit, from the canonical definitions above.
 fn every_emitted_code() -> BTreeSet<String> {
     let mut codes = BTreeSet::new();
@@ -68,6 +82,7 @@ fn every_emitted_code() -> BTreeSet<String> {
     codes.extend(OptionWarning::ALL_CODES.iter().map(ToString::to_string));
     codes.insert(rustledger_booking::BOOKING_FAILURE_CODE.to_string());
     codes.extend(literal_codes(CHECK_SOURCE, &["rules.keep("]));
+    codes.extend(load_error_codes());
     codes.extend(literal_codes(
         PROCESS_SOURCE,
         &["LedgerError::error(", "LedgerError::warning("],
@@ -79,20 +94,22 @@ fn every_emitted_code() -> BTreeSet<String> {
 fn test_literal_codes_scanner_finds_the_known_sites() {
     // The scan must actually see the sites it exists to watch; a scanner
     // that matched nothing would make the guard below vacuous.
-    let check = literal_codes(CHECK_SOURCE, &["rules.keep("]);
+    let load = load_error_codes();
     for code in [
-        "E0001", "E0002", "E0003", "E0004", "E0005", "E0006", "E0007",
+        "E0001", "E0002", "E0003", "E0004", "E0005", "E0006", "E0007", "LOAD",
     ] {
         assert!(
-            check.contains(code),
-            "{code} not found in check.rs: {check:?}"
+            load.contains(code),
+            "{code} not found in LoadError::code: {load:?}"
         );
     }
+    let check = literal_codes(CHECK_SOURCE, &["rules.keep("]);
+    assert!(check.contains("PLUGIN"), "{check:?}");
     let process = literal_codes(
         PROCESS_SOURCE,
         &["LedgerError::error(", "LedgerError::warning("],
     );
-    for code in ["E8001", "E8002", "E8004", "E8005", "PLUGIN", "LOAD"] {
+    for code in ["E8001", "E8002", "E8004", "E8005", "PLUGIN"] {
         assert!(
             process.contains(code),
             "{code} not found in process.rs: {process:?}"

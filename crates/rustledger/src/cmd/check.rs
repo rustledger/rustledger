@@ -318,396 +318,79 @@ pub fn run_with_writer<W: Write>(
     let mut parse_error_count = 0;
     let mut validate_error_count = 0;
 
-    // Report load/parse errors
-    for load_error in &load_result.errors {
-        match load_error {
-            LoadError::ParseErrors { path, errors } => {
-                let source = std::fs::read_to_string(path).unwrap_or_default();
-                let path_str = path.display().to_string();
+    // Parse errors are reported here, one by one with their `P` codes, from
+    // the file's text. Every other load error stays in the load for
+    // `process`, which renders it through `load_error_to_ledger_error`, the
+    // one renderer the LSP, WASM and the FFI share, and it is reported below
+    // with the ledger's other errors. `check` used to render load errors
+    // itself, with codes and places the other surfaces did not give.
+    let mut load_result = load_result;
+    let parse_failures = load_result.take_parse_errors();
+    for load_error in &parse_failures {
+        let LoadError::ParseErrors { path, errors } = load_error else {
+            continue;
+        };
+        {
+            let source = std::fs::read_to_string(path).unwrap_or_default();
+            let path_str = path.display().to_string();
 
-                // Filter for DISPLAY only, and keep the original count. The
-                // text path hands the whole batch to `report_parse_errors`,
-                // which cannot skip individual entries, so the filtered set is
-                // built here — but counting it would mean `--exclude-rules`
-                // exited 0 on a file that does not parse, which is the worst
-                // form of a check reporting success it has not earned.
-                let found = errors.len();
-                let errors: Vec<_> = errors
-                    .iter()
-                    .filter(|e| rules.keep(&format!("P{:04}", e.kind_code())))
-                    .cloned()
-                    .collect();
-                let errors = &errors[..];
+            // Filter for DISPLAY only, and keep the original count. The
+            // text path hands the whole batch to `report_parse_errors`,
+            // which cannot skip individual entries, so the filtered set is
+            // built here — but counting it would mean `--exclude-rules`
+            // exited 0 on a file that does not parse, which is the worst
+            // form of a check reporting success it has not earned.
+            let found = errors.len();
+            let errors: Vec<_> = errors
+                .iter()
+                .filter(|e| rules.keep(&format!("P{:04}", e.kind_code())))
+                .cloned()
+                .collect();
+            let errors = &errors[..];
 
-                if json_mode {
-                    // A deliberate copy of
-                    // `rustledger_loader::parse_errors_to_ledger_errors`, which
-                    // the FFI reports parse errors through: the same code,
-                    // phase, message and character line and column, rendered
-                    // here inline because `check` re-reads the file and filters
-                    // by rule before rendering. The `parse-error-in-include`
-                    // case of `tests/ffi_check_parity/cases.rs` pins the two
-                    // to agree (code, line, column, message). Revisit, and
-                    // call the loader function here instead, if this arm gains
-                    // a field that function does not produce, or if `check`
-                    // stops re-reading the file (review of #2946).
-                    //
-                    // One line-start table per file: `line_col_in` per span
-                    // rescanned the file from byte 0, so a file with
-                    // thousands of parse errors took seconds (#2632).
-                    let index = rustledger_loader::LineIndex::new(&source);
-                    for error in errors {
-                        let (start_line, start_col) = index.line_col(error.span.start);
-                        let (end_line, end_col) = index.line_col(error.span.end);
-                        diagnostics.push(JsonDiagnostic {
-                            file: path_str.clone(),
-                            line: start_line,
-                            column: start_col,
-                            end_line,
-                            end_column: end_col,
-                            severity: "error".to_string(),
-                            phase: "parse".to_string(),
-                            code: format!("P{:04}", error.kind_code()),
-                            message: error.message(),
-                            hint: error.hint.clone(),
-                            context: error.context.clone(),
-                        });
-                    }
-                    error_count += found;
-                    parse_error_count += found;
-                } else if args.quiet {
-                    error_count += found;
-                } else {
-                    // The reporter returns how many it printed, which is the
-                    // filtered count; the ledger's error total is `found`.
-                    report::report_parse_errors(errors, path, &source, stdout, use_color)?;
-                    error_count += found;
-                }
-            }
-            LoadError::Io {
-                path,
-                error: source,
-                include_site,
-            } => {
-                let path_str = path.display().to_string();
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0001");
-                if json_mode && shown {
-                    // Prefer the include site when present so JSON consumers
-                    // land on the directive the user wrote, not line 1 of a
-                    // missing target that never existed on disk.
-                    let (file, line, column, end_line, end_column) =
-                        if let Some(site) = include_site {
-                            if let Some(src) = load_result.source_map.get(site.file_id as usize) {
-                                // Character columns, as everywhere else: since
-                                // #2341 `line_col_in` and `SourceFile::line_col`
-                                // are two surfaces of one rule, pinned to agree.
-                                let (sl, sc) = src.line_col(site.span.start);
-                                let (el, ec) = src.line_col(site.span.end);
-                                (site.file.display().to_string(), sl, sc, el, ec)
-                            } else {
-                                (site.file.display().to_string(), 1, 1, 1, 1)
-                            }
-                        } else {
-                            (path_str.clone(), 1, 1, 1, 1)
-                        };
-                    // With an include site, `file` names the including file, so the
-                    // message has to carry the missing target or nothing does.
-                    let message = if include_site.is_some() {
-                        format!("failed to read included file {path_str}: {source}")
-                    } else {
-                        format!("failed to read file: {source}")
-                    };
+            if json_mode {
+                // A deliberate copy of
+                // `rustledger_loader::parse_errors_to_ledger_errors`, which
+                // the FFI reports parse errors through: the same code,
+                // phase, message and character line and column, rendered
+                // here inline because `check` re-reads the file and filters
+                // by rule before rendering. The `parse-error-in-include`
+                // case of `tests/ffi_check_parity/cases.rs` pins the two
+                // to agree (code, line, column, message). Revisit, and
+                // call the loader function here instead, if this arm gains
+                // a field that function does not produce, or if `check`
+                // stops re-reading the file (review of #2946).
+                //
+                // One line-start table per file: `line_col_in` per span
+                // rescanned the file from byte 0, so a file with
+                // thousands of parse errors took seconds (#2632).
+                let index = rustledger_loader::LineIndex::new(&source);
+                for error in errors {
+                    let (start_line, start_col) = index.line_col(error.span.start);
+                    let (end_line, end_col) = index.line_col(error.span.end);
                     diagnostics.push(JsonDiagnostic {
-                        file,
-                        line,
-                        column,
+                        file: path_str.clone(),
+                        line: start_line,
+                        column: start_col,
                         end_line,
-                        end_column,
+                        end_column: end_col,
                         severity: "error".to_string(),
                         phase: "parse".to_string(),
-                        code: "E0001".to_string(),
-                        message,
-                        hint: None,
-                        context: None,
+                        code: format!("P{:04}", error.kind_code()),
+                        message: error.message(),
+                        hint: error.hint.clone(),
+                        context: error.context.clone(),
                     });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(
-                        stdout,
-                        "error: {}",
-                        escape_untrusted_text(&format!("failed to read {path_str}: {source}"))
-                    )?;
                 }
-                error_count += 1;
-            }
-            LoadError::IncludeCycle {
-                cycle,
-                include_site,
-            } => {
-                // Delegate to the canonical Display impl on
-                // `LoadError::IncludeCycle` so the wording lives in
-                // exactly one place (the `#[error(...)]` attribute on
-                // the variant). This is load-bearing for pta-standards
-                // conformance (#765): the substring `"Duplicate
-                // filename"` must appear, and centralizing the format
-                // string prevents it from drifting out of sync with the
-                // library-level error.
-                let message = load_error.to_string();
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0002");
-                if json_mode && shown {
-                    // At the `include` that closed the cycle, as for an
-                    // unreadable include above and as the loader's `LOAD`
-                    // error (and so the LSP) locates it (#2959).
-                    let (file, line, column, end_line, end_column) = include_site
-                        .as_ref()
-                        .and_then(|site| {
-                            let map = &load_result.source_map;
-                            let start = map.locate(site.file_id, site.span.start)?;
-                            let end = map.locate(site.file_id, site.span.end)?;
-                            Some((
-                                site.file.display().to_string(),
-                                start.line,
-                                start.column,
-                                end.line,
-                                end.column,
-                            ))
-                        })
-                        .unwrap_or_else(|| {
-                            (cycle.first().cloned().unwrap_or_default(), 1, 1, 1, 1)
-                        });
-                    diagnostics.push(JsonDiagnostic {
-                        file,
-                        line,
-                        column,
-                        end_line,
-                        end_column,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0002".to_string(),
-                        message,
-                        hint: Some("break the cycle by removing one of the includes".to_string()),
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
-                }
-                error_count += 1;
-            }
-            LoadError::DuplicateInclude { path } => {
-                // Same wording as the cycle case and from the same place —
-                // the variant's `#[error(...)]` — so the `"Duplicate
-                // filename"` substring the pta-standards conformance test
-                // asserts on cannot drift between the two.
-                let message = load_error.to_string();
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0004");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: path.clone(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0004".to_string(),
-                        message,
-                        hint: Some(
-                            "the file is included from more than one place; its directives \
-                             are loaded once"
-                                .to_string(),
-                        ),
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
-                }
-                error_count += 1;
-            }
-            LoadError::PathTraversal {
-                include_path,
-                base_dir,
-            } => {
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0003");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: base_dir.display().to_string(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0003".to_string(),
-                        message: format!(
-                            "path traversal not allowed: {} escapes {}",
-                            include_path,
-                            base_dir.display()
-                        ),
-                        hint: Some("use paths within the base directory".to_string()),
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(
-                        stdout,
-                        "error: {}",
-                        escape_untrusted_text(&format!(
-                            "path traversal not allowed: {} escapes {}",
-                            include_path,
-                            base_dir.display()
-                        ))
-                    )?;
-                }
-                error_count += 1;
-            }
-            LoadError::Decryption { path, message } => {
-                let path_str = path.display().to_string();
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0004");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: path_str,
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0004".to_string(),
-                        message: format!("failed to decrypt: {message}"),
-                        hint: None,
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(
-                        stdout,
-                        "error: {}",
-                        escape_untrusted_text(&format!(
-                            "failed to decrypt {}: {}",
-                            path.display(),
-                            message
-                        ))
-                    )?;
-                }
-                error_count += 1;
-            }
-            LoadError::GlobNoMatch { pattern } => {
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0005");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: file.display().to_string(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0005".to_string(),
-                        message: format!("include pattern \"{pattern}\" does not match any files"),
-                        hint: Some(
-                            "check that the glob pattern is correct and files exist".to_string(),
-                        ),
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(
-                        stdout,
-                        "error: {}",
-                        escape_untrusted_text(&format!(
-                            "include pattern \"{pattern}\" does not match any files"
-                        ))
-                    )?;
-                }
-                error_count += 1;
-            }
-            LoadError::GlobError { pattern, message } => {
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0006");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: file.display().to_string(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0006".to_string(),
-                        message: format!(
-                            "failed to expand include pattern \"{pattern}\": {message}"
-                        ),
-                        hint: None,
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(
-                        stdout,
-                        "error: {}",
-                        escape_untrusted_text(&format!(
-                            "failed to expand include pattern \"{pattern}\": {message}"
-                        ))
-                    )?;
-                }
-                error_count += 1;
-            }
-            LoadError::TooManyFiles { .. } => {
-                // Message lives once, on the variant's `#[error(...)]`.
-                let message = load_error.to_string();
-                // Tally and filter like every other diagnostic, so
-                // --show-summary counts this and --exclude-rules can hide it.
-                // The count below is deliberately outside: hiding a
-                // diagnostic must not change the exit code.
-                let shown = rules.keep("E0007");
-                if json_mode && shown {
-                    diagnostics.push(JsonDiagnostic {
-                        file: file.display().to_string(),
-                        line: 1,
-                        column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        severity: "error".to_string(),
-                        phase: "parse".to_string(),
-                        code: "E0007".to_string(),
-                        message,
-                        hint: None,
-                        context: None,
-                    });
-                    parse_error_count += 1;
-                } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
-                }
-                error_count += 1;
+                error_count += found;
+                parse_error_count += found;
+            } else if args.quiet {
+                error_count += found;
+            } else {
+                // The reporter returns how many it printed, which is the
+                // filtered count; the ledger's error total is `found`.
+                report::report_parse_errors(errors, path, &source, stdout, use_color)?;
+                error_count += found;
             }
         }
     }
@@ -806,11 +489,9 @@ pub fn run_with_writer<W: Write>(
         ..Default::default()
     };
 
-    // Clear load errors from the result (already reported above with rich formatting)
-    let mut process_input = load_result;
-    process_input.errors.clear();
-
-    let ledger = rustledger_loader::process(process_input, &load_options)
+    // The parse errors were taken out above; the other load errors go to
+    // `process`, which reports them.
+    let ledger = rustledger_loader::process(load_result, &load_options)
         .with_context(|| "processing pipeline failed")?;
 
     // `@@`→`@` price normalization is done in the loader's `finalize` phase (the
@@ -1402,7 +1083,7 @@ mod tests {
     }
 
     /// #2959: JSON places an include cycle on the `include` that closes it,
-    /// in the file that holds it, as the loader's `LOAD` error and the LSP
+    /// in the file that holds it, as the loader's `E0002` error and the LSP
     /// do, where it gave line 1 of the first file of the cycle.
     #[test]
     fn json_locates_an_include_cycle_at_its_include() {

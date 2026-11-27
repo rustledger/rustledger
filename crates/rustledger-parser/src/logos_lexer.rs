@@ -1507,8 +1507,8 @@ impl<'src> Iterator for TokenIter<'src> {
             // token all the same (#2982). It was a token here, and the
             // parser's glued one-letter rules reported it, one error, which
             // matched on a clean line. After an earlier invalid token on the
-            // line, the line's construct checks are quieted
-            // (`quiet_after_invalid_tokens`), that error with them, so
+            // line, the line's construct checks are quieted (beancount's
+            // recovery discards the rest of it), that error with them, so
             // `  Assets:A  $ U~SD` lost the `'U~SD'` beancount reports; and a
             // first glued capital reported through grammar errors (sometimes
             // two) stood before the line's first invalid token, so a later

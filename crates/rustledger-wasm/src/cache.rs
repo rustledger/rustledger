@@ -813,7 +813,10 @@ use crate::types::{Error, LedgerOptions};
 /// beancount's grammar discards moves no inventory, so a later `balance` sees
 /// its account without it. Every such source has a parse error, which the
 /// loader's cache is never saved for.
-pub const CACHE_VERSION: u32 = 154;
+/// v155: loader v82, unchanged; the hand-modeled pass that quieted a line
+/// after its first invalid token is gone and the error oracle alone decides
+/// those lines. A source with a parse error keeps one.
+pub const CACHE_VERSION: u32 = 155;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

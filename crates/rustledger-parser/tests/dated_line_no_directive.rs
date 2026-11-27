@@ -5,7 +5,7 @@
 //! transaction flag (a number, an account, a currency, ...), beancount reads
 //! the date and fails at that token, and bison's recovery stays quiet about
 //! the indented lines under it until its grammar has read three tokens again
-//! (`quiet_after_failed_line_starts`). Each of those lines was an orphan
+//! (the error oracle replays that). Each of those lines was an orphan
 //! `unexpected input` here.
 //!
 //! Where bison would shift a declaration (a dated header after a blank, or an

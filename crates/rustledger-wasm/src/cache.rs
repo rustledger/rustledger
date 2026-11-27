@@ -792,7 +792,10 @@ use crate::types::{Error, LedgerOptions};
 /// many errors, and a line its recovery swallows none. Parsed directives do
 /// not move, and a source with a parse error keeps one, which the loader's
 /// cache is never saved for.
-pub const CACHE_VERSION: u32 = 148;
+/// v149: loader v82, unchanged; parse errors move: the hand-modeled
+/// recovery pass is gone and the error oracle alone decides the lines
+/// beancount's recovery keeps quiet. A source with a parse error keeps one.
+pub const CACHE_VERSION: u32 = 149;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

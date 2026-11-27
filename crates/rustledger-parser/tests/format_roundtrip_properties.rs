@@ -313,13 +313,15 @@ fn test_format_source_adds_no_newline_after_a_broken_last_line() {
 /// `fuzz_format_roundtrip` crash (`fuzz/regressions/fuzz_format_roundtrip/
 /// leading-indented-comment`): a file-leading indented comment was moved to
 /// column 0. rledger reads such a comment as a comment on purpose (beancount
-/// reports `unexpected INDENT` there) but keeps bison's recovery after it
-/// quiet, so the indented line after it is clean; after a column-0 comment
-/// it is an error, and formatting broke a clean file.
+/// reports `unexpected INDENT` there), and the indented line after it is an
+/// orphan to rledger, inside the recovery beancount starts at that indent:
+/// one error, as for `  ; c` then `  !` (a parse rledger finds an error in
+/// never comes out clean; `bison_recovery_model`). Formatting keeps the
+/// comment indented, as after a column-0 comment it would read differently.
 #[test]
 fn test_format_source_keeps_a_leading_indented_comment_indented() {
     let src = "\t;\n\t+";
-    assert!(parse(src).errors.is_empty());
+    assert_eq!(parse(src).errors.len(), 1);
     assert_eq!(format_source(src), "\t;\n\t+\n");
     assert_roundtrip(src);
 }

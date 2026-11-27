@@ -65,8 +65,11 @@ impl DeviationOverlay<Lexeme> for EolErrorOnFailingLine {
 
 /// A stray `\r` (one not part of a CRLF line end) is a blank to beancount's
 /// lexer; rledger reports one before a token that lexes, or at a line start,
-/// as an error of its own (#2980), and a line where it does keeps its own
-/// errors.
+/// as an error of its own (#2980). It is claimed as rledger's own: on a line
+/// beancount reports errors on, it takes the place of one of them (the
+/// reconciler counts rledger's own errors against the line's slots first),
+/// and it stands on a line beancount reports nothing on, but not on one
+/// beancount's recovery swallows whole.
 pub(super) struct StrayCarriageReturn;
 
 impl DeviationOverlay<Lexeme> for StrayCarriageReturn {
@@ -76,22 +79,31 @@ impl DeviationOverlay<Lexeme> for StrayCarriageReturn {
     fn compatibility_section(&self) -> &'static str {
         "p3-a-stray-carriage-return"
     }
-    fn claim_own_lines(
+    fn claim_own_errors(
         &self,
         src: &str,
         errors: &[ParseError],
-        _reference: &Reference,
-        lines: &mut Vec<u32>,
+        reference: &Reference,
+        own: &mut [bool],
     ) {
         let b = src.as_bytes();
         let is_stray = |i: usize| b.get(i) == Some(&b'\r') && b.get(i + 1) != Some(&b'\n');
-        let mut index: Option<LineIndex> = None;
-        for e in errors {
-            let end = e.span.end.max(e.span.start + 1).min(b.len());
-            if let Some(i) = (e.span.start..end).find(|&i| is_stray(i)) {
-                let index = index.get_or_insert_with(|| LineIndex::new(src));
-                lines.push(index.line_of(i));
+        let mut index: Option<(LineIndex, Vec<u32>)> = None;
+        for (e, own) in errors.iter().zip(own.iter_mut()) {
+            if !is_stray(e.span.start) {
+                continue;
             }
+            // On a line beancount's recovery swallows whole (no error of its
+            // own there), the `\r` is as quiet as the rest of the line.
+            let (lines, quiet) = index.get_or_insert_with(|| {
+                let lines = LineIndex::new(src);
+                let quiet = reference.quiet_lines(&lines);
+                (lines, quiet)
+            });
+            let line = lines.line_of(e.span.start);
+            let swallowed = quiet.binary_search(&line).is_ok()
+                && !reference.slots.iter().any(|s| s.line == line);
+            *own = !swallowed;
         }
     }
 }
@@ -348,17 +360,24 @@ impl DeviationOverlay<Lexeme> for DivideByZero {
         reference: &Reference,
         own: &mut [bool],
     ) {
-        let mut index: Option<LineIndex> = None;
+        let mut index: Option<(LineIndex, Vec<u32>)> = None;
         for (e, own) in errors.iter().zip(own.iter_mut()) {
             if let ParseErrorKind::SyntaxError(m) = &e.kind
                 && m.starts_with("invalid arithmetic expression")
             {
-                let index = index.get_or_insert_with(|| LineIndex::new(src));
-                let line = index.line_of(e.span.start);
-                *own = !reference
-                    .slots
-                    .iter()
-                    .any(|s| s.kind == SlotKind::Syntax && s.line == line);
+                let (lines, quiet) = index.get_or_insert_with(|| {
+                    let lines = LineIndex::new(src);
+                    let quiet = reference.quiet_lines(&lines);
+                    (lines, quiet)
+                });
+                let line = lines.line_of(e.span.start);
+                // Not in beancount's recovery either: it evaluates nothing
+                // there.
+                *own = quiet.binary_search(&line).is_err()
+                    && !reference
+                        .slots
+                        .iter()
+                        .any(|s| s.kind == SlotKind::Syntax && s.line == line);
             }
         }
     }

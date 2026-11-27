@@ -9,8 +9,8 @@
 //! token it cannot read, `$`, `2<BOM>?02`; a marker alone on its line, `!`;
 //! an undated declaration holding an invalid token, `pushmeta k: "v"`), the
 //! lines after it report only the lexer's own errors until that window ends.
-//! `quiet_after_failed_line_starts` models it for these lines with the rules
-//! of a dated line's window (#2979).
+//! The error oracle replays that window from beancount's own grammar; it
+//! was first modeled for these lines with a dated line's rules (#2979).
 //!
 //! Where a line in the window holds a date or an undated keyword, bison
 //! shifts it and may end its recovery inside the line, which is not modeled:
@@ -128,7 +128,7 @@ fn test_parse_lines_under_an_unreadable_line_are_quiet() {
 /// blank line there, a deliberate difference, #2980). Where this parser
 /// reports the `\r` itself, the line keeps its own errors; every other line
 /// from there on is counted as beancount counts the input with each stray
-/// `\r` read as the blank it is there (`recovery::model_stray_cr_lines`), so
+/// `\r` read as the blank it is there (the error oracle's lexer reads it so), so
 /// bison's recovery from a statement that fails on such a line keeps the
 /// lines after it quiet (`\r$` then a posting, `option \r;c` then `-`).
 #[test]
@@ -189,8 +189,8 @@ fn test_parse_stray_cr_lines_keep_their_errors() {
     ]);
 }
 
-/// Shapes #2993 part A left at main's count, which the token-level model of
-/// part B (`cst/recovery.rs`) reads as beancount does: a line holding a date
+/// Shapes #2993 part A left at main's count, which the error oracle
+/// (`cst/oracle/`) reads as beancount does: a line holding a date
 /// or an undated keyword (where bison may end its recovery), a line right
 /// after another failed line, a line a BOM or a date starts, and an indented
 /// line after a failed header with a blank line between.
@@ -216,7 +216,7 @@ fn test_parse_unmodeled_recovery_shapes_keep_their_errors() {
             vec![(3, 1), (4, 1)],
         ),
         (format!("{P}pushtag #a $\nx\n"), vec![(2, 1), (3, 1)]),
-        // Modeled since #2993's general model (`cst/recovery.rs`), each as
+        // Modeled since #2993's general model (now the error oracle), each as
         // beancount counts it: the date bison shifts mid-line, the pipe it
         // reports once its recovery is over, the entry it builds there.
         (

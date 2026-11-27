@@ -18,7 +18,9 @@ publish = false
 
 [lib]
 # wasm32-wasip2 emits a component directly from a cdylib (no cargo-component).
-crate-type = ["cdylib"]
+# The rlib is for the native cross-surface drift guard
+# (`rustledger-surface-parity-tests`), which calls `surface_probe`.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wit-bindgen.workspace = true

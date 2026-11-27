@@ -3398,6 +3398,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustledger-surface-parity-tests"
+version = "0.24.0"
+dependencies = [
+ "clap",
+ "crossbeam-channel",
+ "lsp-server",
+ "lsp-types",
+ "rustledger",
+ "rustledger-core",
+ "rustledger-ffi-component",
+ "rustledger-loader",
+ "rustledger-lsp",
+ "rustledger-parser",
+ "rustledger-wasm",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rustledger-validate"
 version = "0.24.0"
 dependencies = [

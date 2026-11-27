@@ -1,0 +1,31 @@
+[package]
+name = "rustledger-surface-parity-tests"
+description = "Drift guard: every diagnostic surface (CLI, WASM, FFI component, LSP) reports what `rledger check` reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+# The surfaces under comparison, each called natively as Rust.
+rustledger = { path = "../rustledger" }
+rustledger-wasm.workspace = true
+rustledger-ffi-component = { path = "../rustledger-ffi-component" }
+rustledger-lsp = { path = "../rustledger-lsp" }
+# The canonical pipeline the booked directives are compared against.
+rustledger-core.workspace = true
+rustledger-loader = { workspace = true, features = ["plugins", "validation"] }
+rustledger-parser.workspace = true
+clap.workspace = true
+lsp-types.workspace = true
+# The LSP protocol harness (`rustledger-lsp/tests/lsp_protocol/harness.rs`),
+# which drives the real server for the multi-file ledgers.
+lsp-server.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

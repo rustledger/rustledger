@@ -337,10 +337,7 @@ impl ParsedLedger {
     /// Get all errors (parse + validation).
     #[wasm_bindgen(js_name = "getErrors")]
     pub fn get_errors(&self) -> Result<JsValue, JsError> {
-        let mut all_errors = self.parse_errors.clone();
-        all_errors.extend(self.option_errors.clone());
-        all_errors.extend(self.validation_errors.clone());
-        to_js(&all_errors)
+        to_js(&self.all_errors())
     }
 
     /// Get parse errors only.
@@ -641,6 +638,21 @@ impl ParsedLedger {
     }
 }
 
+impl ParsedLedger {
+    /// The errors `getErrors` answers with: parse, option, then validation.
+    pub(crate) fn all_errors(&self) -> Vec<Error> {
+        let mut all_errors = self.parse_errors.clone();
+        all_errors.extend(self.option_errors.clone());
+        all_errors.extend(self.validation_errors.clone());
+        all_errors
+    }
+
+    /// The booked directives, plugins applied, that queries run on.
+    pub(crate) fn booked_directives(&self) -> &[Directive] {
+        &self.directives
+    }
+}
+
 // =============================================================================
 // Ledger: Multi-file with queries and cross-file completions
 // =============================================================================
@@ -750,13 +762,11 @@ impl Ledger {
     }
 
     /// The errors `getErrors` answers with.
-    #[cfg(test)]
     pub(crate) fn error_list(&self) -> &[Error] {
         &self.errors
     }
 
     /// The booked directives, plugins applied, that queries run on.
-    #[cfg(test)]
     pub(crate) fn directives(&self) -> &[Directive] {
         &self.directives
     }

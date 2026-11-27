@@ -275,3 +275,17 @@ impl FormatGuest for Component {
 // cdylib); everything above compiles and is unit-tested on the host.
 #[cfg(target_arch = "wasm32")]
 export!(Component);
+
+/// The component's diagnostic exports as plain Rust, for the cross-surface
+/// drift guard (`rustledger-surface-parity-tests`), which compares them with
+/// `rledger check`, WASM and the LSP on a shared corpus.
+///
+/// Each is the function the export of the same name delegates to, so the
+/// guard runs the component's own body natively, with no wasip2 build. Not a
+/// public API: the component's contract is `wit/world.wit`.
+#[doc(hidden)]
+pub mod surface_probe {
+    pub use crate::convert::{load, load_file, query, query_file, validate, validate_file};
+    pub use crate::exports::rustledger::ledger::ledger::QueryResult;
+    pub use crate::rustledger::ledger::types::{CostNumber, Directive, Error, QueryValue};
+}

@@ -89,7 +89,7 @@ rustledger is a pure Rust implementation of Beancount, the double-entry bookkeep
 
 ## Architecture
 
-The project is a Cargo workspace with 19 crates plus editor extensions:
+The project is a Cargo workspace with 20 crates plus editor extensions:
 
 | Crate | Purpose |
 |-------|---------|
@@ -112,6 +112,7 @@ The project is a Cargo workspace with 19 crates plus editor extensions:
 | `rustledger-ffi-wasi` | Slimmed FFI-support helpers crate reused by `rustledger-ffi-component` (loader orchestration + WIT-input construction + `compute_directive_hash`). Phase 5 (#1419) is complete: the wasip1 JSON-RPC surface AND the Directive→JSON DTO are removed; the crate is deliberately retained (its survivors are FFI glue kept out of core `rustledger-loader`). |
 | `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@4.x`; the exact version is the `package` line of `wit/world.wit`): primary embedding surface, default in the rustfava embedder (#1384 Phase 4) |
 | `rustledger-ffi-component-tests` | Parity tests for the WIT component surface (#1384) |
+| `rustledger-surface-parity-tests` | Cross-surface drift guard: every ledger of the corpus through `rledger check`, WASM, the FFI component and the LSP, diagnostics compared exactly (allowlist with reasons in the test) |
 
 | Package | Purpose |
 |---------|---------|
@@ -532,7 +533,8 @@ order of preference:
    value-denominated FIFO; the LSP's single-pass validation pipeline).
 1. **Pin agreement with a drift-guard test** that compares the two surfaces
    end-to-end on the shapes that historically broke (examples:
-   `query_report_realization_parity_test`, `fuzz_green_eq_red` + its corpus
+   `query_report_realization_parity_test`, `surface_parity` (every diagnostic
+   surface against `rledger check` on the whole corpus), `fuzz_green_eq_red` + its corpus
    test, `cost_number_wire_parity` across all five `CostNumber` mirrors).
    A guard that a future divergence CANNOT trip is decoration — assert on
    the exact observable, not a proxy (a bare substring match on `60.00 USD`

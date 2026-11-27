@@ -79,6 +79,77 @@ pub use api::{list_plugins, run_plugin};
 pub use api::expand_pads;
 pub use parsed_ledger::{Ledger, ParsedLedger};
 
+/// The diagnostic surfaces as plain Rust, for the cross-surface drift guard
+/// (`rustledger-surface-parity-tests`), which compares them with `rledger
+/// check`, the FFI component and the LSP on a shared corpus.
+///
+/// Each function runs the body of the export it names, minus the
+/// `JsValue` conversion, which panics off `wasm32`. Not a public API.
+#[doc(hidden)]
+pub mod surface_probe {
+    use rustledger_core::Directive;
+
+    use crate::types::Error;
+
+    /// The errors `validateSource` answers with.
+    #[must_use]
+    pub fn validate_source(source: &str) -> Vec<Error> {
+        crate::api::validate_source_result(source).errors
+    }
+
+    /// The errors `validateMultiFile` answers with.
+    ///
+    /// # Errors
+    ///
+    /// What `validateMultiFile` throws: `entry_point` is not in `files`.
+    pub fn validate_multi_file(
+        files: impl IntoIterator<Item = (String, String)>,
+        entry_point: &str,
+    ) -> Result<Vec<Error>, String> {
+        crate::api::validate_file_map(files.into_iter().collect(), entry_point).map(|r| r.errors)
+    }
+
+    /// `new ParsedLedger(source)`: its `getErrors` and its booked directives,
+    /// then the same from the ledger restored from its own cache.
+    ///
+    /// # Panics
+    ///
+    /// When the ledger does not survive its cache round trip.
+    #[must_use]
+    pub fn parsed_ledger(source: &str) -> [(Vec<Error>, Vec<Directive>); 2] {
+        let parsed = crate::ParsedLedger::new(source);
+        let bytes = parsed
+            .serialize()
+            .unwrap_or_else(|_| panic!("ParsedLedger.serialize failed"));
+        let restored = crate::ParsedLedger::from_cache(&bytes, source)
+            .unwrap_or_else(|_| panic!("ParsedLedger.fromCache failed"));
+        [&parsed, &restored].map(|l| (l.all_errors(), l.booked_directives().to_vec()))
+    }
+
+    /// `Ledger.fromFiles(files, entryPoint)`: its `getErrors` and its booked
+    /// directives, then the same from the ledger restored from its own cache.
+    ///
+    /// # Errors
+    ///
+    /// What `Ledger.fromFiles` throws: `entry_point` is not in `files`.
+    ///
+    /// # Panics
+    ///
+    /// When the ledger does not survive its cache round trip.
+    pub fn ledger(
+        files: impl IntoIterator<Item = (String, String)>,
+        entry_point: &str,
+    ) -> Result<[(Vec<Error>, Vec<Directive>); 2], String> {
+        let ledger = crate::Ledger::from_file_map(files.into_iter().collect(), entry_point)?;
+        let bytes = ledger
+            .serialize()
+            .unwrap_or_else(|_| panic!("Ledger.serialize failed"));
+        let restored =
+            crate::Ledger::from_cache(&bytes).unwrap_or_else(|_| panic!("Ledger.fromCache failed"));
+        Ok([&ledger, &restored].map(|l| (l.error_list().to_vec(), l.directives().to_vec())))
+    }
+}
+
 use wasm_bindgen::prelude::*;
 
 // =============================================================================

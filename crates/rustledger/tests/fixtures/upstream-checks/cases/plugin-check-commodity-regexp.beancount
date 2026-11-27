@@ -1,0 +1,3 @@
+plugin "beancount.plugins.check_commodity" "{'Assets:.*': '(unclosed'}"
+2020-01-01 commodity USD
+2020-01-01 open Assets:Cash USD

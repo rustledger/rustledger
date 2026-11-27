@@ -1,0 +1,10 @@
+plugin "beancount.plugins.onecommodity"
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-01 open Assets:Euro
+2020-01-02 * "usd cost"
+  Assets:Stock   1 HOOL {10 USD}
+  Assets:Cash  -10 USD
+2020-01-03 * "eur cost"
+  Assets:Stock   1 HOOL {10 EUR}
+  Assets:Euro  -10 EUR

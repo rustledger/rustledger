@@ -1,0 +1,10 @@
+plugin "beancount.plugins.coherent_cost"
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Other
+2020-01-01 open Assets:Cash
+2020-01-02 * "at cost"
+  Assets:Stock   1 HOOL {10 USD}
+  Assets:Cash  -10 USD
+2020-01-03 * "without cost"
+  Assets:Other   1 HOOL @ 10 USD
+  Assets:Cash  -10 USD

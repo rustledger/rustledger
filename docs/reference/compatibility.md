@@ -606,6 +606,27 @@ posting column, and leaves other spacing as written, such as the gaps inside
 `2021-01-01   open  Assets:Bank   USD`.) Pinned by
 `crates/rustledger-parser/tests/format_display_width.rs` (issue #2852).
 
+### 20. AVERAGE Booking and Cost Merging
+
+Beancount 3.2.3 parses both but implements neither. A reduction from an
+account booked `AVERAGE` fails with `AVERAGE method is not supported`, and a
+cost spec holding `*` fails with `Cost merging is not supported yet`.
+rustledger implements both: an `AVERAGE` account sells from the pool of its
+lots at their average cost, and `{*}` reduces that pool from an account
+booked any other way (ADR 0007,
+`docs/reference/adr/0007-average-booking-realization.md`).
+
+| Ledger | rustledger | Python beancount |
+|---|---|---|
+| A sale from an `AVERAGE` account holding two lots | sells at the pool's average cost | `AVERAGE method is not supported` |
+| `-1 HOOL {*}` from an account holding two lots | sells from the merged pool | `Cost merging is not supported yet` |
+
+This is deliberate: both are documented beancount syntax with well-defined
+semantics, and a ledger that uses them cannot load in beancount at all, so
+nothing that loads there changes here. Pinned by the `booking-average` and
+`grammar-cost-merge` cases in `crates/rustledger/tests/fixtures/upstream-checks/`
+(see [Upstream Check Coverage](upstream-checks.md)).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

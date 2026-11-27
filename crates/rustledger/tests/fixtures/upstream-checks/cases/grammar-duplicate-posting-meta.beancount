@@ -1,0 +1,7 @@
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Opening
+2020-03-01 * "x"
+  Assets:Cash      1 USD
+    key: "a"
+    key: "b"
+  Equity:Opening  -1 USD

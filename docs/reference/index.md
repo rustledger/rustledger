@@ -22,6 +22,7 @@ Technical reference documentation for rustledger.
 |-------|-------------|
 | [Architecture](architecture.md) | Crate structure and data flow |
 | [Compatibility](compatibility.md) | Python beancount compatibility status |
+| [Upstream Check Coverage](upstream-checks.md) | Every check beancount reports, and what rledger does about it |
 | [ADRs](adr/) | Architecture Decision Records |
 
 ## External Resources

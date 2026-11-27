@@ -1,0 +1,6 @@
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Opening
+2020-02-01 close Assets:Cash
+2020-03-01 * "after close"
+  Assets:Cash      1 USD
+  Equity:Opening  -1 USD

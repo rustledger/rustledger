@@ -1,0 +1,3 @@
+plugin "beancount.plugins.commodity_attr" "{'kind': ['cash', 'stock']}"
+2020-01-01 commodity USD
+  kind: "bond"

@@ -1,0 +1,7 @@
+2020-01-01 open Assets:Cash
+2020-01-01 open Assets:Other
+2020-01-01 open Equity:Opening
+2020-01-02 * "two auto"
+  Equity:Opening  -1 USD
+  Assets:Cash
+  Assets:Other

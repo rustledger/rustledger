@@ -1,0 +1,5 @@
+2020-01-01 open Assets:Euro
+2020-01-01 open Assets:Cash
+2020-01-02 * "units currency missing, price known"
+  Assets:Euro   1 @ 2 USD
+  Assets:Cash  -2 USD

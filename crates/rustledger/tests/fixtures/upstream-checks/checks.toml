@@ -1,0 +1,1030 @@
+# Every check beancount 3.2.3 can report to a user, and what rledger does
+# about it. See docs/reference/upstream-checks.md for the fields, the
+# statuses and how to update this file; the drift guard and the case runner
+# are crates/rustledger/tests/upstream_checks_test.rs, and the enumeration
+# whose output the `id`s must match is enumerate.py beside this file.
+
+beancount_version = "3.2.3"
+
+
+# ---- deprecated options ----------------------------------------------------
+
+[[check]]
+id = "option-deprecated:allow_deprecated_none_for_tags_and_links"
+status = "missing"
+case = "grammar-option-deprecated-none-tags"
+code = "E7001"
+lines = [1]
+python_message = "Allowing None for tags and link"
+note = "rledger does not know the option and reports it as unknown (E7001) instead of deprecated."
+
+[[check]]
+id = "option-deprecated:allow_pipe_separator"
+status = "covered"
+rledger = "E7004: rustledger_loader::options::deprecation_message"
+case = "grammar-option-deprecated-pipe"
+code = "E7004"
+lines = [1]
+python_message = "Allowing pipe separator temporarily"
+
+[[check]]
+id = "option-deprecated:inferred_tolerance_multiplier"
+status = "covered"
+rledger = "E7004: rustledger_loader::options::deprecation_message"
+case = "grammar-option-deprecated-tolerance-multiplier"
+code = "E7004"
+lines = [1]
+python_message = "Renamed to 'tolerance_multiplier'."
+
+# ---- plugin modules --------------------------------------------------------
+
+[[check]]
+id = "plugin:beancount.plugins.auto"
+status = "missing"
+case = "plugin-auto"
+code = "E8004"
+python_lines = []
+rledger_lines = [1]
+note = "rledger has no native `auto` (auto_accounts + implicit_prices) and refuses the module name."
+
+[[check]]
+id = "plugin:beancount.plugins.auto_accounts"
+status = "covered"
+rledger = "auto_accounts plugin"
+case = "plugin-auto-accounts"
+lines = []
+
+[[check]]
+id = "plugin:beancount.plugins.check_average_cost"
+status = "covered"
+rledger = "PLUGIN: check_average_cost plugin"
+case = "plugin-check-average-cost"
+code = "PLUGIN"
+lines = [10]
+python_message = "too far from the average cost"
+
+[[check]]
+id = "plugin:beancount.plugins.check_closing"
+status = "covered"
+rledger = "E2001: check_closing plugin (synthesizes a zero balance assertion)"
+case = "plugin-check-closing"
+code = "E2001"
+lines = [0]
+python_message = "Balance failed"
+
+[[check]]
+id = "plugin:beancount.plugins.check_commodity"
+status = "covered"
+rledger = "PLUGIN: check_commodity plugin"
+case = "plugin-check-commodity-missing"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+python_message = "Missing Commodity directive"
+note = "beancount reports plugin configuration and commodity errors at <plugin>:0; rledger on the plugin line."
+
+[[check]]
+id = "plugin:beancount.plugins.check_drained"
+status = "covered"
+rledger = "E2001: check_drained plugin (synthesizes zero balance assertions)"
+case = "plugin-check-drained"
+code = "E2001"
+lines = [7]
+python_message = "Balance failed"
+
+[[check]]
+id = "plugin:beancount.plugins.close_tree"
+status = "covered"
+rledger = "E1003: close_tree plugin"
+case = "plugin-close-tree"
+code = "E1003"
+lines = [6]
+python_message = "inactive account"
+
+[[check]]
+id = "plugin:beancount.plugins.coherent_cost"
+status = "covered"
+rledger = "PLUGIN: coherent_cost plugin"
+case = "plugin-coherent-cost"
+code = "PLUGIN"
+lines = [8]
+python_message = "both with and without cost"
+
+[[check]]
+id = "plugin:beancount.plugins.commodity_attr"
+status = "covered"
+rledger = "PLUGIN: commodity_attr plugin"
+case = "plugin-commodity-attr-missing"
+code = "PLUGIN"
+lines = [2]
+python_message = "Missing attribute"
+
+[[check]]
+id = "plugin:beancount.plugins.currency_accounts"
+status = "covered"
+rledger = "E2001: currency_accounts plugin"
+case = "plugin-currency-accounts"
+code = "E2001"
+lines = [7]
+python_message = "Balance failed"
+
+[[check]]
+id = "plugin:beancount.plugins.implicit_prices"
+status = "covered"
+rledger = "PLUGIN: implicit_prices plugin"
+case = "plugin-implicit-prices"
+code = "PLUGIN"
+lines = [5]
+python_message = "Disagreeing price entries"
+
+[[check]]
+id = "plugin:beancount.plugins.leafonly"
+status = "covered"
+rledger = "PLUGIN: leafonly plugin"
+case = "plugin-leafonly"
+code = "PLUGIN"
+lines = [2]
+python_message = "Non-leaf account"
+
+[[check]]
+id = "plugin:beancount.plugins.noduplicates"
+status = "covered"
+rledger = "PLUGIN: noduplicates plugin"
+case = "plugin-noduplicates"
+code = "PLUGIN"
+lines = [7]
+python_message = "Duplicate entry"
+
+[[check]]
+id = "plugin:beancount.plugins.nounused"
+status = "covered"
+rledger = "PLUGIN: nounused plugin"
+case = "plugin-nounused"
+code = "PLUGIN"
+lines = [2]
+python_message = "Unused account"
+
+[[check]]
+id = "plugin:beancount.plugins.onecommodity"
+status = "covered"
+rledger = "PLUGIN: onecommodity plugin"
+case = "plugin-onecommodity"
+code = "PLUGIN"
+lines = [7]
+python_message = "More than one currency"
+
+[[check]]
+id = "plugin:beancount.plugins.pedantic"
+status = "covered"
+rledger = "PLUGIN: pedantic plugin"
+case = "plugin-pedantic"
+code = "PLUGIN"
+lines = [3]
+python_message = "Unused account"
+
+[[check]]
+id = "plugin:beancount.plugins.sellgains"
+status = "covered"
+rledger = "PLUGIN: sellgains plugin"
+case = "plugin-sellgains"
+code = "PLUGIN"
+lines = [8]
+python_message = "Invalid price vs. proceeds/gains"
+
+[[check]]
+id = "plugin:beancount.plugins.unique_prices"
+status = "covered"
+rledger = "PLUGIN: unique_prices plugin"
+case = "plugin-unique-prices"
+code = "PLUGIN"
+lines = [2]
+python_message = "Disagreeing price entries"
+
+# ---- raised exceptions -----------------------------------------------------
+
+[[check]]
+id = "raise:beancount.ops.lifetimes.trim_intervals:Trim end date is before start date"
+status = "not-applicable"
+reason = "Commodity-lifetime helper used by bean-price tooling, not by bean-check."
+
+[[check]]
+id = "raise:beancount.ops.pad.pad:Position held at cost goes negative: {}"
+status = "not-applicable"
+reason = "Unreachable: the padding position is always built without a cost, so it can never be a negative position at cost. Had it escaped, it would surface as 'Error applying plugin \"beancount.ops.pad\"'."
+
+[[check]]
+id = "raise:beancount.parser.booking.convert_lot_specs_to_lots:Amount is zero: \"{}\""
+status = "not-applicable"
+reason = "Dead code in 3.2.3: nothing calls convert_lot_specs_to_lots (booking_full.interpolate_group has the live copy, its own row)."
+
+[[check]]
+id = "raise:beancount.parser.booking.convert_lot_specs_to_lots:Cost is negative: \"{}\""
+status = "not-applicable"
+reason = "Dead code in 3.2.3: nothing calls convert_lot_specs_to_lots (booking_full.interpolate_group has the live copy, its own row)."
+
+[[check]]
+id = "raise:beancount.parser.cmptest._local_booking:Cannot convert posting without units: {}"
+status = "not-applicable"
+reason = "beancount's unit-test helpers (cmptest), not run on a ledger."
+
+[[check]]
+id = "raise:beancount.parser.cmptest.read_string_or_entries:Entries in assertions may not use interpolation."
+status = "not-applicable"
+reason = "beancount's unit-test helpers (cmptest), not run on a ledger."
+
+[[check]]
+id = "raise:beancount.parser.cmptest.read_string_or_entries:Unexpected errors in expected: {}"
+status = "not-applicable"
+reason = "beancount's unit-test helpers (cmptest), not run on a ledger."
+
+[[check]]
+id = "raise:beancount.parser.context.render_file_context:No entry could be found before {}:{}"
+status = "not-applicable"
+reason = "bean-doctor's context command, not run by bean-check."
+
+[[check]]
+id = "raise:beancount.parser.context.render_file_context:Parsed entry corresponding to real entry not found in original filename."
+status = "not-applicable"
+reason = "bean-doctor's context command, not run by bean-check."
+
+[[check]]
+id = "raise:beancount.parser.options.options_validate_booking_method:<dynamic>"
+status = "covered"
+rledger = "E7002: rustledger_loader::options::Options::set"
+case = "options-invalid-booking-method"
+code = "E7002"
+lines = [1]
+python_message = "Error for option 'booking_method'"
+
+[[check]]
+id = "raise:beancount.parser.options.options_validate_leaf_account:Invalid leaf account name: {}"
+status = "covered"
+rledger = "E7002: rustledger_loader::options::Options::set"
+case = "options-invalid-leaf"
+code = "E7002"
+lines = [1]
+
+[[check]]
+id = "raise:beancount.parser.options.options_validate_processing_mode:Invalid value '{}'"
+status = "covered"
+rledger = "E7002: rustledger_loader::options::Options::set"
+case = "options-invalid-processing-mode"
+code = "E7002"
+lines = [1]
+
+[[check]]
+id = "raise:beancount.parser.options.options_validate_root_account:Invalid root account name: {}"
+status = "covered"
+rledger = "E7008: rustledger_loader::options::Options::set"
+case = "options-invalid-root"
+code = "E7008"
+lines = [1]
+
+[[check]]
+id = "raise:beancount.parser.options.options_validate_tolerance_map:Invalid value '{}'"
+status = "covered"
+rledger = "E7002: rustledger_loader::options::Options::read_tolerance_map"
+case = "options-invalid-tolerance-map"
+code = "E7002"
+lines = [1]
+
+[[check]]
+id = "raise:beancount.parser.parser.parse_file:Only UTF-8 encoded files are supported."
+status = "not-applicable"
+reason = "Raised only when a caller passes a non-UTF-8 `encoding` to parse_file; bean-check and the loader never do."
+
+[[check]]
+id = "raise:beancount.parser.printer.EntryPrinter.write_metadata:Unexpected value: '{!r}'"
+status = "not-applicable"
+reason = "The printer (bean-format and friends), not run by bean-check."
+
+[[check]]
+id = "raise:beancount.plugins.check_average_cost.validate_average_cost:Invalid configuration for check_average_cost: must be a float"
+status = "covered"
+rledger = "PLUGIN: check_average_cost plugin"
+case = "loader-plugin-apply-error"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+python_message = "Error applying plugin \"beancount.plugins.check_average_cost\""
+note = "beancount wraps the RuntimeError as 'Error applying plugin' at <load>:0; rledger reports the message on the plugin line."
+
+# ---- error sites -----------------------------------------------------------
+
+[[check]]
+id = "site:beancount.core.compare.hash_entries:Duplicate entry: {} == {}"
+status = "covered"
+rledger = "PLUGIN: noduplicates plugin"
+case = "plugin-noduplicates"
+code = "PLUGIN"
+lines = [7]
+
+[[check]]
+id = "site:beancount.loader._parse_recursive:Duplicate filename parsed: \"{}\""
+status = "covered"
+rledger = "E0004: rustledger_loader (include resolution)"
+case = "loader-duplicate-include"
+code = "E0004"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at <load>:0; rledger at line 1 of the file included twice."
+
+[[check]]
+id = "site:beancount.loader._parse_recursive:File \"{}\" does not exist"
+status = "covered"
+rledger = "rledger check (missing input file)"
+test = ["crates/rustledger/tests/cli_commands_test.rs::test_check_nonexistent_file"]
+note = "The top-level file missing: beancount exits 1 with this error, rledger exits 2 with `error: file not found`. No case file, since the case would have to not exist."
+
+[[check]]
+id = "site:beancount.loader._parse_recursive:File glob \"{}\" does not match any files"
+status = "covered"
+rledger = "E0005: rustledger_loader (include resolution)"
+case = "loader-include-glob-no-match"
+code = "E0005"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at <load>:0; rledger on the include line. An include of one literal missing file is E0001 in rledger, the same glob message in beancount."
+
+[[check]]
+id = "site:beancount.loader.run_transformations:Error applying plugin \"{}\": {}"
+status = "covered"
+rledger = "PLUGIN: native plugin errors"
+case = "loader-plugin-apply-error"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports the plugin's traceback at <load>:0; rledger the plugin's own error on the plugin line."
+
+[[check]]
+id = "site:beancount.loader.run_transformations:Error importing \"{}\": {}"
+status = "covered"
+rledger = "E8004: rustledger_loader plugin resolution"
+case = "loader-plugin-import-error"
+code = "E8004"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at <load>:0; rledger on the plugin line. rledger runs no host Python, so a module it does not have natively is refused with a pointer to the file form."
+
+[[check]]
+id = "site:beancount.ops.balance.check:Balance failed for '{}': expected {} != accumulated {} ({} {})"
+status = "covered"
+rledger = "E2001: validators::balance::validate_balance_late"
+case = "balance-failed"
+code = "E2001"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.balance.check:Invalid currency '{}' for Balance directive: "
+status = "covered"
+rledger = "E5002: validators::balance::validate_balance_account"
+case = "balance-invalid-currency"
+code = "E5002"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.balance.check:Invalid reference to unknown account '{}'"
+status = "covered"
+rledger = "E1001: validators::balance::validate_balance_account"
+case = "balance-unknown-account"
+code = "E1001"
+lines = [1]
+note = "beancount reports the unknown account twice on that line (once from validate_active_accounts, once from balance.check); rledger once."
+
+[[check]]
+id = "site:beancount.ops.documents.find_documents:Document '{}' found in child account {}"
+status = "not-applicable"
+reason = "Only emitted with find_documents(strict=True); the loader's process_documents never passes strict, so no ledger reaches it."
+
+[[check]]
+id = "site:beancount.ops.documents.find_documents:Document '{}' found in parent account {}"
+status = "not-applicable"
+reason = "Only emitted with find_documents(strict=True); the loader's process_documents never passes strict, so no ledger reaches it."
+
+[[check]]
+id = "site:beancount.ops.documents.find_documents:Document root '{}' does not exist"
+status = "covered"
+rledger = "E7006: loader document-root check"
+case = "documents-missing-root"
+code = "E7006"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at <load>:0; rledger on the `option \"documents\"` line that names the root."
+
+[[check]]
+id = "site:beancount.ops.documents.find_documents:Invalid date on document file '{}': {}"
+status = "covered"
+rledger = "PLUGIN: document_discovery plugin"
+case = "documents-invalid-date"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at 0 and skips that one file; rledger reports that the plugin returned an invalid entry (line 1, the documents option) and discards every document the scan found."
+
+[[check]]
+id = "site:beancount.ops.documents.verify_document_files_exist:File does not exist: \"{}\""
+status = "covered"
+rledger = "E8001: validators::document::validate_document"
+case = "documents-missing-file"
+code = "E8001"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.pad.pad:Attempt to pad an entry with cost for balance: {}"
+status = "covered"
+rledger = "E2005: validators::balance::check_padding_at_cost"
+case = "pad-with-cost"
+code = "E2005"
+lines = [8]
+
+[[check]]
+id = "site:beancount.ops.pad.pad:Unused Pad entry"
+status = "covered"
+rledger = "E2003: check_unused_pads"
+case = "pad-unused"
+code = "E2003"
+lines = [3]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_active_accounts:Invalid reference to inactive account '{}'"
+status = "covered"
+rledger = "E1003: validators::transaction::validate_account_lifecycle"
+case = "validation-inactive-account"
+code = "E1003"
+lines = [4]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_active_accounts:Invalid reference to unknown account '{}'"
+status = "covered"
+rledger = "E1001: validators::helpers::push_unknown_account"
+case = "validation-unknown-account"
+code = "E1001"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_check_transaction_balances:Transaction does not balance: {}"
+status = "covered"
+rledger = "E3001: validators::transaction::validate_transaction_balance"
+case = "validation-transaction-unbalanced"
+code = "E3001"
+lines = [3]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_currency_constraints:Invalid currency {} for account '{}'"
+status = "covered"
+rledger = "E5002: validators::transaction::validate_posting_currency"
+case = "validation-currency-constraint"
+code = "E5002"
+lines = [3]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_data_types:Invalid data types: {}"
+status = "not-applicable"
+reason = "Checks that Python plugins returned correctly typed namedtuples (bean-check runs it as a HARDCORE validation). rledger's directives are Rust types, and a plugin's output is checked when it is converted back (a plugin returning an invalid entry is reported, PLUGIN)."
+
+[[check]]
+id = "site:beancount.ops.validation.validate_documents_paths:Invalid relative path for entry"
+status = "not-applicable"
+reason = "A sanity check on beancount's own pipeline: the parser makes every document path absolute, so no ledger reaches it. rledger resolves document paths against the declaring file the same way."
+
+[[check]]
+id = "site:beancount.ops.validation.validate_duplicate_balances:Duplicate balance assertion with different amounts"
+status = "covered"
+rledger = "E2006: validators::balance::validate_balance_duplicate"
+case = "validation-duplicate-balance"
+code = "E2006"
+lines = [3]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_duplicate_commodities:Duplicate commodity directives for '{}'"
+status = "covered"
+rledger = "E5004: validate_phase_inner (Commodity arm)"
+case = "validation-duplicate-commodity"
+code = "E5004"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_open_close:Duplicate close directive for {}"
+status = "covered"
+rledger = "E1003: validators::account::validate_close"
+case = "validation-duplicate-close"
+code = "E1003"
+lines = [3]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_open_close:Duplicate open directive for {}"
+status = "covered"
+rledger = "E1002: validators::account::validate_open"
+case = "validation-duplicate-open"
+code = "E1002"
+lines = [2]
+
+[[check]]
+id = "site:beancount.ops.validation.validate_open_close:Internal error: closing date for {} appears before opening date"
+status = "not-applicable"
+reason = "Unreachable from a ledger: entries are sorted by date before validation, so a close dated before its open is seen first and reported as 'Unopened account ... is being closed' (that row; case validation-close-before-open)."
+
+[[check]]
+id = "site:beancount.ops.validation.validate_open_close:Unopened account {} is being closed"
+status = "covered"
+rledger = "E1001: validators::account::validate_close"
+case = "validation-close-unopened"
+code = "E1001"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.booking.convert_lot_specs_to_lots:<dynamic>"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: nothing calls convert_lot_specs_to_lots."
+
+[[check]]
+id = "site:beancount.parser.booking.convert_lot_specs_to_lots:Cost syntax not supported; cost spec ignored"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: nothing calls convert_lot_specs_to_lots."
+
+[[check]]
+id = "site:beancount.parser.booking.validate_inventory_booking:Reducing position results in inventory with positive and negative lots: {}"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: nothing calls validate_inventory_booking (marked FIXME, 'This goes away')."
+
+[[check]]
+id = "site:beancount.parser.booking.validate_missing_eliminated:Transaction has incomplete elements"
+status = "not-applicable"
+reason = "A defensive invariant after booking: every path that leaves a number or currency missing has already reported a booking error. (With a cost spec left over, 3.2.3 crashes in this check itself: AttributeError on CostSpec.number.)"
+
+[[check]]
+id = "site:beancount.parser.booking_full._book:Self-reduction is not allowed"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: the check sits under `if False:`."
+
+[[check]]
+id = "site:beancount.parser.booking_full.book_reductions:No position matches \"{}\" against balance {}"
+status = "covered"
+rledger = "E4001: rustledger_booking (reduction matching)"
+case = "booking-no-position-matches"
+code = "E4001"
+python_lines = [6]
+rledger_lines = [7]
+note = "rledger reports a booking failure on the posting that fails; beancount on the transaction's first line."
+
+[[check]]
+id = "site:beancount.parser.booking_full.categorize_by_currency:Could not resolve {} currency"
+status = "covered"
+rledger = "BOOK: rustledger_booking::interpolate"
+case = "booking-unresolved-units-currency"
+code = "BOOK"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.booking_full.categorize_by_currency:Failed to categorize posting {}"
+status = "covered"
+rledger = "BOOK: rustledger_booking::interpolate"
+case = "booking-unresolved-currency"
+code = "BOOK"
+lines = [4]
+note = "Compatibility section 17 lists the `{}` shapes where rledger resolves a cost currency beancount refuses to categorize."
+
+[[check]]
+id = "site:beancount.parser.booking_full.categorize_by_currency:You may not have more than one auto-posting per currency"
+status = "covered"
+rledger = "E3002: validators::transaction::validate_transaction_structure"
+case = "booking-two-auto-postings"
+code = "E3002"
+lines = [7]
+
+[[check]]
+id = "site:beancount.parser.booking_full.interpolate_group:Amount is zero: \"{}\""
+status = "missing"
+case = "booking-amount-zero"
+python_lines = [4]
+rledger_lines = []
+note = "rledger accepts a zero-unit posting held at cost."
+
+[[check]]
+id = "site:beancount.parser.booking_full.interpolate_group:Cannot infer per-unit cost only from total"
+status = "covered"
+rledger = "BOOK: rustledger_booking::interpolate"
+case = "booking-per-unit-from-total"
+code = "BOOK"
+python_crash = true
+rledger_lines = [4]
+note = "bean-check 3.2.3 records this error and then crashes in validate_check_transaction_balances (the posting it left incomplete), so the run shows only a traceback."
+
+[[check]]
+id = "site:beancount.parser.booking_full.interpolate_group:Cannot infer price for postings with units held at cost"
+status = "missing"
+case = "booking-price-at-cost"
+python_crash = true
+rledger_lines = []
+note = "rledger accepts `1 HOOL {10 USD} @ USD`: beside a cost, a bare price sigil is deliberately inert there (`a_bare_price_beside_a_cost_is_inert` in rustledger-booking, #1919), though compatibility.md does not say so. Whether to refuse it as beancount does is open (a maintainer decision). bean-check 3.2.3 records the error and then crashes in validate_missing_eliminated (AttributeError on CostSpec.number)."
+
+[[check]]
+id = "site:beancount.parser.booking_full.interpolate_group:Cost is negative: \"{}\""
+status = "covered"
+rledger = "E4005: validators::transaction::validate_transaction_structure"
+case = "booking-cost-negative"
+code = "E4005"
+python_lines = [4]
+rledger_lines = [3]
+note = "beancount reports it on the posting; rledger on the transaction's first line."
+
+[[check]]
+id = "site:beancount.parser.booking_full.interpolate_group:Too many missing numbers for currency group '{}'"
+status = "covered"
+rledger = "E3002: validators::transaction::validate_transaction_structure"
+case = "booking-too-many-missing"
+code = "E3002"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.booking_method.booking_method_AVERAGE:AVERAGE method is not supported"
+status = "deviation"
+compat = "docs/reference/compatibility.md#20-average-booking-and-cost-merging"
+case = "booking-average"
+python_lines = [9]
+rledger_lines = []
+note = "rledger implements AVERAGE booking (ADR 0007)."
+
+[[check]]
+id = "site:beancount.parser.booking_method.booking_method_AVERAGE:Cannot merge positions in multiple currencies: {}"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: beancount's AVERAGE implementation sits under `if False:` after the unconditional 'AVERAGE method is not supported' return."
+
+[[check]]
+id = "site:beancount.parser.booking_method.booking_method_AVERAGE:Explicit cost reductions aren't supported yet: {}"
+status = "not-applicable"
+reason = "Dead code in 3.2.3: beancount's AVERAGE implementation sits under `if False:` after the unconditional 'AVERAGE method is not supported' return."
+
+[[check]]
+id = "site:beancount.parser.booking_method.booking_method_STRICT:Ambiguous matches for \"{}\": {}"
+status = "covered"
+rledger = "E4003: rustledger_booking (STRICT matching)"
+case = "booking-strict-ambiguous"
+code = "E4003"
+python_lines = [9]
+rledger_lines = [10]
+note = "rledger reports a booking failure on the posting that fails; beancount on the transaction's first line."
+
+[[check]]
+id = "site:beancount.parser.booking_method.handle_ambiguous_matches:Not enough lots to reduce \"{}\": {}"
+status = "covered"
+rledger = "E4002: rustledger_booking (reduction matching)"
+case = "booking-not-enough-lots"
+code = "E4002"
+python_lines = [6]
+rledger_lines = [7]
+note = "rledger reports a booking failure on the posting that fails; beancount on the transaction's first line."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder._unpack_txn_strings:Too many strings on transaction description: {}"
+status = "covered"
+rledger = "P0012: parser (transaction header)"
+case = "grammar-too-many-strings"
+code = "P0012"
+lines = [3]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.account:Invalid account name: {}"
+status = "covered"
+rledger = "E1005: validators::helpers::invalid_account_name_error"
+case = "grammar-invalid-account"
+code = "E1005"
+lines = [2]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.build_grammar_error:<dynamic>"
+status = "covered"
+rledger = "P0012: parser (syntax errors)"
+case = "grammar-syntax-error"
+code = "P0012"
+lines = [2]
+note = "Bison's syntax errors. Their full parity (same lines, as many per line) is the parse-error-parity CI job over ~111k inputs (scripts/compat-parse-error-parity.py); this case only pins one."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.build_grammar_error:{} ({}:{})"
+status = "not-applicable"
+reason = "An exception escaping a grammar action (a beancount bug), reported with its Python traceback location. There is no ledger-level condition to port."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Cost merging is not supported yet"
+status = "deviation"
+compat = "docs/reference/compatibility.md#20-average-booking-and-cost-merging"
+case = "grammar-cost-merge"
+python_lines = [10]
+rledger_lines = []
+note = "rledger implements `{*}` (ADR 0007): the case's merge sells from the pool, where beancount refuses the syntax."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Duplicate cost: '{}'."
+status = "covered"
+rledger = "P0012: parser (cost spec)"
+case = "grammar-duplicate-cost"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Duplicate date: '{}'."
+status = "covered"
+rledger = "P0012: parser (cost spec)"
+case = "grammar-duplicate-date"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Duplicate label: '{}'."
+status = "covered"
+rledger = "P0012: parser (cost spec)"
+case = "grammar-duplicate-label"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Duplicate merge-cost spec"
+status = "missing"
+case = "grammar-duplicate-merge"
+python_lines = [7]
+rledger_lines = []
+note = "rledger accepts `{*, *}` silently."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.cost_spec:Per-unit cost may not be specified using total cost syntax: '{}'; ignoring per-unit cost"
+status = "covered"
+rledger = "P0012: parser (cost spec)"
+case = "grammar-total-cost-per-unit"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.finalize:Unbalanced metadata key '{}'; leftover metadata '{}'"
+status = "covered"
+rledger = "P0023: parser (pushmeta/popmeta pairing)"
+case = "grammar-unbalanced-pushmeta"
+code = "P0023"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at the end of the file (line 0); rledger on the unpopped pushmeta."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.finalize:Unbalanced pushed tag: '{}'"
+status = "covered"
+rledger = "P0021: parser (pushtag/poptag pairing)"
+case = "grammar-unbalanced-pushtag"
+code = "P0021"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports it at the end of the file (line 0); rledger on the unpopped pushtag."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.open:Invalid booking method: {}"
+status = "covered"
+rledger = "P0025: parser (open directive)"
+case = "grammar-invalid-booking-method"
+code = "P0025"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.option:<dynamic>"
+status = "covered"
+rledger = "E7004: rustledger_loader::options::deprecation_message"
+case = "grammar-option-deprecated-tolerance-multiplier"
+code = "E7004"
+lines = [1]
+note = "The DeprecatedError for an option whose descriptor carries a deprecation message; each such option has its own option-deprecated row."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.option:Error for option '{}': {}"
+status = "covered"
+rledger = "E7002: rustledger_loader::options::Options::set"
+case = "options-invalid-tolerance-multiplier"
+code = "E7002"
+lines = [1]
+note = "The wrapper around each option converter's ValueError; the converters have their own raise rows."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.option:Invalid option: '{}'"
+status = "covered"
+rledger = "E7001: rustledger_loader::options::Options::set"
+case = "grammar-invalid-option"
+code = "E7001"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.option:Option '{}' may not be set"
+status = "covered"
+rledger = "E7005: rustledger_loader::options::Options::set"
+case = "grammar-readonly-option"
+code = "E7005"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.pipe_deprecated_error:Pipe symbol is deprecated."
+status = "covered"
+rledger = "P0024: parser"
+case = "grammar-pipe-deprecated"
+code = "P0024"
+lines = [3]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.popmeta:Attempting to pop absent metadata key: '{}'"
+status = "covered"
+rledger = "P0022: parser"
+case = "grammar-popmeta-absent"
+code = "P0022"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.poptag:Attempting to pop absent tag: '{}'"
+status = "covered"
+rledger = "P0020: parser"
+case = "grammar-poptag-absent"
+code = "P0020"
+lines = [1]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.posting:Cost and price currencies must match: {} != {}"
+status = "covered"
+rledger = "P0012: parser (posting)"
+case = "grammar-cost-price-currency"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.posting:Negative prices are not allowed: {} (see http://furius.ca/beancount/doc/bug-negative-prices for workaround)"
+status = "covered"
+rledger = "P0012: parser (posting)"
+case = "grammar-negative-price"
+code = "P0012"
+lines = [4]
+note = "beancount also reports the transaction as unbalanced (line 3); rledger drops the price with the parse error, so it does not."
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.posting:Total price on a posting without units: {}."
+status = "covered"
+rledger = "P0012: parser (posting)"
+case = "grammar-total-price-no-units"
+code = "P0012"
+lines = [4]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.transaction:Duplicate metadata field on entry: {}"
+status = "covered"
+rledger = "P0012: parser (metadata)"
+case = "grammar-duplicate-entry-meta"
+code = "P0012"
+lines = [3]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.transaction:Duplicate posting metadata field: {}"
+status = "covered"
+rledger = "P0012: parser (metadata)"
+case = "grammar-duplicate-posting-meta"
+code = "P0012"
+lines = [3]
+
+[[check]]
+id = "site:beancount.parser.grammar.Builder.transaction:Tags or links not allowed after first Posting: {}"
+status = "covered"
+rledger = "P0012: parser (transaction body)"
+case = "grammar-tags-after-posting"
+code = "P0012"
+python_lines = [3]
+rledger_lines = [5]
+note = "beancount reports it on the transaction's first line; rledger on the line holding the tag."
+
+[[check]]
+id = "site:beancount.parser.lexer.LexBuilder.build_lexer_error:<dynamic>"
+status = "covered"
+rledger = "P0012: parser (lexer)"
+case = "lexer-invalid-token"
+code = "P0012"
+lines = [2]
+note = "The C lexer's errors. Full parity is the parse-error-parity CI job. Not covered: bytes that are not UTF-8 (beancount's lexer refuses them in tokens and strings; rledger decodes them lossily and accepts them), an open question listed for the maintainer."
+
+[[check]]
+id = "site:beancount.plugins.check_average_cost.validate_average_cost:Cost basis on reducing posting is too far from the average cost ({} vs. {})"
+status = "covered"
+rledger = "PLUGIN: check_average_cost plugin"
+case = "plugin-check-average-cost"
+code = "PLUGIN"
+lines = [10]
+
+[[check]]
+id = "site:beancount.plugins.check_commodity.validate_commodity_directives:Invalid configuration for check_commodity plugin; skipping."
+status = "covered"
+rledger = "PLUGIN: check_commodity plugin"
+case = "plugin-check-commodity-config"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports plugin configuration and commodity errors at <plugin>:0; rledger on the plugin line."
+
+[[check]]
+id = "site:beancount.plugins.check_commodity.validate_commodity_directives:Invalid regexp: '{}' for {}"
+status = "covered"
+rledger = "PLUGIN: check_commodity plugin"
+case = "plugin-check-commodity-regexp"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports plugin configuration and commodity errors at <plugin>:0; rledger on the plugin line."
+
+[[check]]
+id = "site:beancount.plugins.check_commodity.validate_commodity_directives:Missing Commodity directive for '{}' in '{}'"
+status = "covered"
+rledger = "PLUGIN: check_commodity plugin"
+case = "plugin-check-commodity-missing"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports plugin configuration and commodity errors at <plugin>:0; rledger on the plugin line."
+
+[[check]]
+id = "site:beancount.plugins.coherent_cost.validate_coherent_cost:Currency '{}' is used both with and without cost"
+status = "covered"
+rledger = "PLUGIN: coherent_cost plugin"
+case = "plugin-coherent-cost"
+code = "PLUGIN"
+lines = [8]
+
+[[check]]
+id = "site:beancount.plugins.commodity_attr.validate_commodity_attr:Invalid configuration for commodity_attr plugin; skipping."
+status = "covered"
+rledger = "PLUGIN: commodity_attr plugin"
+case = "plugin-commodity-attr-config"
+code = "PLUGIN"
+python_lines = [0]
+rledger_lines = [1]
+note = "beancount reports plugin configuration and commodity errors at <plugin>:0; rledger on the plugin line."
+
+[[check]]
+id = "site:beancount.plugins.commodity_attr.validate_commodity_attr:Invalid value '{}' for attribute {}, Commodity directive {}; valid options: {}"
+status = "covered"
+rledger = "PLUGIN: commodity_attr plugin"
+case = "plugin-commodity-attr-invalid"
+code = "PLUGIN"
+lines = [2]
+
+[[check]]
+id = "site:beancount.plugins.commodity_attr.validate_commodity_attr:Missing attribute '{}' for Commodity directive {}"
+status = "covered"
+rledger = "PLUGIN: commodity_attr plugin"
+case = "plugin-commodity-attr-missing"
+code = "PLUGIN"
+lines = [2]
+
+[[check]]
+id = "site:beancount.plugins.leafonly.validate_leaf_only:Non-leaf account '{}' has postings on it"
+status = "covered"
+rledger = "PLUGIN: leafonly plugin"
+case = "plugin-leafonly"
+code = "PLUGIN"
+lines = [2]
+
+[[check]]
+id = "site:beancount.plugins.nounused.validate_unused_accounts:Unused account '{}'"
+status = "covered"
+rledger = "PLUGIN: nounused plugin"
+case = "plugin-nounused"
+code = "PLUGIN"
+lines = [2]
+
+[[check]]
+id = "site:beancount.plugins.onecommodity.validate_one_commodity:More than one cost currency in account '{}': {}"
+status = "covered"
+rledger = "PLUGIN: onecommodity plugin"
+case = "plugin-onecommodity-cost"
+code = "PLUGIN"
+lines = [8]
+
+[[check]]
+id = "site:beancount.plugins.onecommodity.validate_one_commodity:More than one currency in account '{}': {}"
+status = "covered"
+rledger = "PLUGIN: onecommodity plugin"
+case = "plugin-onecommodity"
+code = "PLUGIN"
+lines = [7]
+
+[[check]]
+id = "site:beancount.plugins.sellgains.validate_sell_gains:Invalid price vs. proceeds/gains: {} vs. {}; difference: {}"
+status = "covered"
+rledger = "PLUGIN: sellgains plugin"
+case = "plugin-sellgains"
+code = "PLUGIN"
+lines = [8]
+
+[[check]]
+id = "site:beancount.plugins.unique_prices.validate_unique_prices:Disagreeing price entries"
+status = "covered"
+rledger = "PLUGIN: unique_prices plugin"
+case = "plugin-unique-prices"
+code = "PLUGIN"
+lines = [2]
+
+# ---- checks the enumeration cannot see -------------------------------------
+
+[[check]]
+id = "manual:beancount.utils.encryption.read_encrypted_file"
+status = "covered"
+rledger = "rustledger_loader (gpg decryption, LoadError::Decryption)"
+test = ["crates/rustledger-loader/src/lib.rs::test_decrypt_gpg_file_missing_gpg"]
+note = "Not an error tuple, so the enumeration cannot see it: beancount decrypts a .gpg/.asc ledger by running gpg, and a gpg failure aborts the load. rledger decrypts the same way and reports a failure as a load error."

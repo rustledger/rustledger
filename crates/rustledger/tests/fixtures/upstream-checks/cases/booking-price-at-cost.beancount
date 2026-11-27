@@ -1,0 +1,5 @@
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-02 * "price unknown at cost"
+  Assets:Stock   1 HOOL {10 USD} @ USD
+  Assets:Cash  -10 USD

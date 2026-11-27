@@ -1,0 +1,5 @@
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Equity:Opening
+2020-03-01 * "wrong currency"
+  Assets:Cash      1 EUR
+  Equity:Opening  -1 EUR

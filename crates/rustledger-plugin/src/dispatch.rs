@@ -155,10 +155,8 @@ pub fn find_native_plugin<'a>(
 /// else the name itself.
 ///
 /// beancount's `auto` (`beancount.plugins.auto`) is `auto_accounts` then
-/// `implicit_prices` (`loader.combine_plugins`). The first opens accounts
-/// before booking (a synth plugin here) and the second reads booked costs
-/// (a regular one), so no single native plugin can be both; the reference
-/// runs each part in its own pass. It used to be refused as an unsupported
+/// `implicit_prices` (`loader.combine_plugins`), run one after the other
+/// where `auto` is declared. It used to be refused as an unsupported
 /// Python module. `pedantic`, whose parts all run after booking, is one
 /// native plugin instead. A `python:`-forced name is never expanded, and a
 /// name resolves by its last segment, as [`find_native_plugin`] resolves it.

@@ -5,13 +5,14 @@ use crate::types::{
     PluginInput, PluginOp, PluginOutput,
 };
 
-use super::super::{NativePlugin, SynthPlugin};
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that auto-generates Open directives for accounts used without explicit open.
 pub struct AutoAccountsPlugin;
 
-/// Name used by the registry, the loader (when emitting the implicit
-/// synth-pass entry for `options.auto_accounts`), and external callers.
+/// Name used by the registry, the loader (for `options.auto_accounts`, and
+/// for the provisional opens its Early validation reads), and external
+/// callers.
 /// Kept as a constant so the three sites stay in sync.
 pub const AUTO_ACCOUNTS_NAME: &str = "auto_accounts";
 
@@ -134,7 +135,15 @@ impl NativePlugin for AutoAccountsPlugin {
     }
 }
 
-/// Synthesizes `Open` directives the early validator needs to see —
-/// must run pre-booking to suppress spurious E1001 errors on accounts
-/// the plugin will auto-create.
-impl SynthPlugin for AutoAccountsPlugin {}
+/// A regular plugin, run where it is declared, after booking, as beancount
+/// runs it: a plugin declared before it does not see the accounts it opens
+/// (`close_tree` drops the `close` of an account nothing opened before it
+/// runs), and it opens nothing for a transaction booking refused, which is
+/// no longer in the stream. It used to run in the pre-booking synth pass,
+/// ahead of every other plugin whatever the declared order.
+///
+/// The Early validator's provisional account table still needs its opens
+/// (a posting to an account it will open is not "never opened"): the loader
+/// gives Early a view with them, `rustledger_loader::early_validation_view`,
+/// which nothing downstream sees.
+impl RegularPlugin for AutoAccountsPlugin {}

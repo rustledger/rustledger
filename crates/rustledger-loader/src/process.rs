@@ -31,7 +31,7 @@ pub struct LoadOptions {
     /// Run plugins declared in the file (default: true).
     pub run_plugins: bool,
     /// Run beancount's `auto` plugin, as `bean-check --auto` does:
-    /// `auto_accounts` before booking, then `implicit_prices` after it
+    /// `auto_accounts` then `implicit_prices`, after the file's plugins
     /// (default: false). It ran `auto_accounts` alone.
     pub auto_accounts: bool,
     /// Additional plugins to run (CLI `--plugin` or programmatic API),
@@ -842,11 +842,15 @@ pub fn load_error_to_ledger_error(load_err: &LoadError, source_map: &SourceMap) 
 ///
 /// ```text
 ///   1. sort                         (canonical display order)
-///   2. synth plugins                (auto_accounts, document_discovery)
-///   3. Early validation             (structural; posting account errors held)
+///   2. synth plugins                (document_discovery)
+///   3. Early validation             (structural; posting account errors held,
+///                                    judged against the opens `auto_accounts`
+///                                    will insert: `early_validation_view`)
 ///   4. booking                      (cost spec resolution, interpolation)
 ///   5. partition                    (set aside failed-booking txns)
-///   6. regular plugins              (file plugins + extras, on booked only)
+///   6. regular plugins              (file plugins + extras, `auto_accounts`
+///                                    included, in declared order, on booked
+///                                    only)
 ///   7. Late validation              (accounts, balance, currency, inventory, on
 ///                                    what the regular plugins produced)
 ///   8. finalize                     (unused pads; held errors late never saw)
@@ -919,16 +923,35 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // get the next-phase `Directives` back. Branching here keeps each
     // cfg's signature small and prevents the call site from having to
     // know the typestate phase parameters in the disabled case.
+    // The stream Early judges posting accounts against: the stream itself,
+    // or a view with the opens `auto_accounts` will insert after booking
+    // (`early_validation_view`).
+    #[cfg(feature = "plugins")]
+    let early_view = early_validation_view(
+        synthed.as_slice(),
+        &raw.plugins,
+        &raw.options,
+        options,
+        &raw.source_map,
+    );
+    #[cfg(not(feature = "plugins"))]
+    let early_view: Option<Vec<Spanned<Directive>>> = None;
+
     #[cfg(feature = "validation")]
-    let (directives, validation_session) =
-        synthed.early_validate(validation_session, today, &raw.source_map, &mut errors);
+    let (directives, validation_session) = synthed.early_validate(
+        validation_session,
+        early_view.as_deref(),
+        today,
+        &raw.source_map,
+        &mut errors,
+    );
     #[cfg(not(feature = "validation"))]
     let directives = synthed.early_validate(&raw.source_map, &mut errors);
 
     // The stream Early validated, for a caller that validates the load itself
     // (#3001): booking below consumes it.
     let pre_booking_directives = if options.retain_pre_booking_directives {
-        directives.as_slice().to_vec()
+        early_view.unwrap_or_else(|| directives.as_slice().to_vec())
     } else {
         Vec::new()
     };
@@ -1063,9 +1086,8 @@ fn resolve_effective_booking_method(
 /// Booking order cannot change with this rank for a loaded ledger. The key
 /// runs at `sort`, on the loader's parser output (every entry has a real
 /// file), and at `finalize`, after booking. In between, only the
-/// pre-booking synth plugins (`auto_accounts`, `document_discovery`) can
-/// insert entries, and they insert `open`s and `document`s, which do not
-/// book. Only a caller that hands [`process`] a hand-built `LoadResult`
+/// pre-booking synth plugin (`document_discovery`) can insert entries, and
+/// it inserts `document`s, which do not book. Only a caller that hands [`process`] a hand-built `LoadResult`
 /// holding a synthesized cost-bearing transaction could see it book ahead of
 /// a same-date source transaction, which is where beancount books it too.
 ///
@@ -1115,10 +1137,9 @@ impl crate::Directives<crate::Raw> {
 }
 
 impl crate::Directives<crate::Sorted> {
-    /// Run synth-only plugins (`auto_accounts`, `document_discovery`)
-    /// BEFORE early validation and booking so the synthesizers' Opens /
-    /// Documents are in the stream from the start (Early judges posting
-    /// accounts against the Opens it sees).
+    /// Run the synth-only plugin (`document_discovery`) BEFORE early
+    /// validation and booking, so its Documents are in the stream from the
+    /// start, as beancount runs it first (`PLUGINS_PRE`).
     ///
     /// Only this narrow synth subset runs here; everything else
     /// waits until after booking (post-booking plugin pass) so
@@ -1135,9 +1156,8 @@ impl crate::Directives<crate::Sorted> {
     ) -> Result<crate::Directives<crate::Synthed>, ProcessError> {
         // `run_plugins` early-returns when no plugin entry matches the
         // pass; no outer gate needed (and any outer gate risked
-        // missing one of the implicit-synth triggers — auto_accounts,
-        // document_discovery via `option "documents"`, file-declared
-        // synth plugins).
+        // missing one of the synth triggers — document_discovery via
+        // `option "documents"`).
         #[cfg(feature = "plugins")]
         run_plugins(
             self.as_vec_mut(),
@@ -1166,17 +1186,22 @@ impl crate::Directives<crate::Synthed> {
     /// checks run on what the regular plugins produce, #2648). The
     /// directive list itself is unchanged by validation.
     ///
-    /// Runs on pre-booking directives, AFTER synth plugins so the held
-    /// account judgments see any Opens that plugins like `auto_accounts`
-    /// injected. This is what lets booking match Python's "prune
+    /// Runs on pre-booking directives, AFTER the synth plugin, and on the
+    /// view with `auto_accounts`' opens when it runs, so the held account
+    /// judgments see the Opens that plugin will insert after booking. This is what lets booking match Python's "prune
     /// zero-interp postings" behavior without losing E1001 on the
     /// elided-zero-to-unopened-account case (rustledger#877).
+    ///
+    /// `view`, when given, is the stream Early runs on in place of this one
+    /// (see [`early_validation_view`]); the directives returned are still
+    /// this stream's.
     #[cfg(feature = "validation")]
     pub(crate) fn early_validate(
         mut self,
         validation_session: Option<
             rustledger_validate::ValidationSession<rustledger_validate::Pending>,
         >,
+        view: Option<&[Spanned<Directive>]>,
         today: rustledger_core::NaiveDate,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
@@ -1191,7 +1216,8 @@ impl crate::Directives<crate::Synthed> {
         // captures the returned session and passes it to
         // `late_validate`.
         let session_out = validation_session.map(|session| {
-            let (session, phase_errors) = session.run_early_spanned(self.as_slice(), today);
+            let stream = view.unwrap_or_else(|| self.as_slice());
+            let (session, phase_errors) = session.run_early_spanned(stream, today);
             ledger_errors_extend(errors, &phase_errors, source_map);
             session
         });
@@ -1603,12 +1629,20 @@ fn run_booking(
 ///
 /// The loader pipeline calls `run_plugins` twice: once with
 /// [`PluginPass::PreBookingSynth`] before the Early validation phase
-/// (so synthesizers can inject Opens / Documents before booking), and
+/// (document discovery, which beancount runs before every other plugin
+/// and whose documents carry no amounts), and
 /// once with [`PluginPass::PostBooking`] after booking
 /// (so cost-spec-reading plugins like `implicit_prices`,
 /// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
 /// `unrealized`, and `valuation` see filled-in per-unit values on the
 /// `CostNumber::PerUnitFromTotal` variant).
+///
+/// `auto_accounts` (and so the `auto` plugin) runs in the post-booking pass,
+/// at its declared place, as beancount runs it: a plugin declared before it
+/// does not see the accounts it opens, and it opens none for a transaction
+/// booking refused. It ran in the synth pass, ahead of every plugin; Early
+/// validation, which needs its opens, reads them from
+/// [`early_validation_view`] instead.
 ///
 /// Standalone callers on already-booked input (FFI, tests) pass
 /// [`PluginPass::PostBooking`] — synth plugins would re-Open
@@ -1618,13 +1652,12 @@ fn run_booking(
 #[cfg(feature = "plugins")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginPass {
-    /// Only plugins that synthesize directives the pre-booking stream
-    /// needs: `auto_accounts` (synthesizes Open directives the Early
-    /// validator judges posting accounts against) and the built-in
-    /// document discovery walker (synthesizes Document directives).
+    /// Only the built-in document discovery walker (synthesizes Document
+    /// directives), driven by `option "documents"`.
     PreBookingSynth,
-    /// All file-declared plugins and CLI `extra_plugins`, EXCLUDING
-    /// `auto_accounts` and `document_discovery` (those ran pre-booking).
+    /// All file-declared plugins and CLI `extra_plugins`, `auto_accounts`
+    /// and the `--auto` flag's plugins included, EXCLUDING
+    /// `document_discovery` (it ran pre-booking).
     /// Includes the 28 plugins that don't depend on synth state but
     /// may depend on booked cost specs.
     PostBooking,
@@ -1678,6 +1711,7 @@ pub fn run_plugins(
         source_map,
         errors,
         pass,
+        None,
     );
     if pass == PluginPass::PostBooking {
         for directive in directives.iter_mut() {
@@ -1689,8 +1723,83 @@ pub fn run_plugins(
     result
 }
 
-/// [`run_plugins`] without the removal of the interpolation marks.
+/// The stream Early validation judges posting accounts against, if not `directives`.
+///
+/// That is `directives` with the `open`s the `auto_accounts` plugin will
+/// insert, or `None` when no plugin this load runs is `auto_accounts`
+/// (declared, a part of `auto`, a CLI extra, or
+/// `LoadOptions::auto_accounts`).
+///
+/// `auto_accounts` runs where it is declared, after booking, as beancount
+/// runs it (so a plugin declared before it does not see its opens, and it
+/// opens nothing for a transaction booking refuses). Early runs before
+/// booking, and its provisional account table must still know those
+/// accounts, or it would hold a "never opened" judgment for every posting
+/// to them: the same judgment Late, which sees the real opens, then drops
+/// for every transaction it checks, but reports for one booking refused.
+/// So Early reads this view: a copy of the stream with the plugin's opens,
+/// computed by the plugin itself (nothing re-derived) and then discarded.
+/// Nothing downstream of Early sees it; booking and the regular plugins
+/// run on `directives`. Costs a copy of the stream, only for a ledger that
+/// runs the plugin.
+///
+/// A surface that validates its own load runs Early over this view too
+/// (the LSP), so it holds the same judgments `rledger check` holds.
 #[cfg(feature = "plugins")]
+#[must_use]
+pub fn early_validation_view(
+    directives: &[Spanned<Directive>],
+    file_plugins: &[Plugin],
+    file_options: &Options,
+    options: &LoadOptions,
+    source_map: &SourceMap,
+) -> Option<Vec<Spanned<Directive>>> {
+    let name = rustledger_plugin::AUTO_ACCOUNTS_NAME;
+    let declared = options.run_plugins
+        && crate::plugins_in_run_order(file_plugins, source_map)
+            .iter()
+            .any(|p| {
+                !p.force_python
+                    && rustledger_plugin::plugin_parts(&p.name, false).any(|part| {
+                        rustledger_plugin::NativePluginRegistry::global()
+                            .find_regular(part)
+                            .is_some_and(|found| found.name() == name)
+                    })
+            });
+    let extra = options.extra_plugins.iter().any(|e| {
+        rustledger_plugin::plugin_parts(&e.name, false).any(|part| {
+            rustledger_plugin::NativePluginRegistry::global()
+                .find_regular(part)
+                .is_some_and(|found| found.name() == name)
+        })
+    });
+    if !(declared || extra || options.auto_accounts) {
+        return None;
+    }
+    let mut view = directives.to_vec();
+    // The plugin's diagnostics (it gives none) belong to its real run.
+    let mut discarded = Vec::new();
+    dispatch_plugins(
+        &mut view,
+        file_plugins,
+        file_options,
+        options,
+        source_map,
+        &mut discarded,
+        PluginPass::PostBooking,
+        Some(name),
+    )
+    .ok()?;
+    Some(view)
+}
+
+/// [`run_plugins`] without the removal of the interpolation marks.
+///
+/// `only`, when set, runs just the invocations of that native plugin (by
+/// its registry name), whichever pass they belong to: what
+/// [`early_validation_view`] runs.
+#[cfg(feature = "plugins")]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_plugins(
     directives: &mut Vec<Spanned<Directive>>,
     file_plugins: &[Plugin],
@@ -1699,6 +1808,7 @@ fn dispatch_plugins(
     source_map: &SourceMap,
     errors: &mut Vec<LedgerError>,
     pass: PluginPass,
+    only: Option<&str>,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::NativePluginRegistry;
 
@@ -1729,7 +1839,7 @@ fn dispatch_plugins(
     // A plugin enters the list iff its pass matches the requested `pass`.
     let mut entries: Vec<PluginInvocation> = Vec::new();
 
-    if matches!(pass, PluginPass::PreBookingSynth) {
+    if matches!(pass, PluginPass::PreBookingSynth) && only.is_none() {
         // Implicit synth: document_discovery, driven by `option "documents"`.
         // The plugin sits in the registry as a ZST; we hand it the
         // resolved directories + base_dir via its config JSON.
@@ -1761,6 +1871,15 @@ fn dispatch_plugins(
     // never in the synth registry and therefore always fall into the
     // PostBooking pass.
     let want_synth = matches!(pass, PluginPass::PreBookingSynth);
+    let selected = |name: &str, force_python: bool| match only {
+        Some(only) => {
+            !force_python
+                && registry
+                    .find_regular(name)
+                    .is_some_and(|p| p.name() == only)
+        }
+        None => registry.find_synth(name).is_some() == want_synth,
+    };
 
     // File-declared plugins, in beancount's breadth-first file order, each
     // distinct (name, config) run from the first file declaring it only.
@@ -1771,7 +1890,7 @@ fn dispatch_plugins(
         for plugin in crate::plugins_in_run_order(file_plugins, source_map) {
             // `auto` runs its parts, each in its own pass.
             for name in rustledger_plugin::plugin_parts(&plugin.name, plugin.force_python) {
-                if registry.find_synth(name).is_some() == want_synth {
+                if selected(name, plugin.force_python) {
                     entries.push(PluginInvocation {
                         name: name.to_string(),
                         config: plugin.config.clone(),
@@ -1785,7 +1904,7 @@ fn dispatch_plugins(
     // CLI extra plugins.
     for extra in &options.extra_plugins {
         for name in rustledger_plugin::plugin_parts(&extra.name, false) {
-            if registry.find_synth(name).is_some() == want_synth {
+            if selected(name, false) {
                 entries.push(PluginInvocation {
                     name: name.to_string(),
                     config: extra.config.clone(),
@@ -1797,7 +1916,7 @@ fn dispatch_plugins(
 
     // The API-level `auto` flag (`check --auto`): beancount's `--auto` adds
     // `beancount.plugins.auto` (`DEFAULT_PLUGINS_AUTO`), which is
-    // `auto_accounts` then `implicit_prices`, each part in its own pass here.
+    // `auto_accounts` then `implicit_prices`, both in the regular pass here.
     // It goes LAST, where beancount puts its `--auto` plugins (`PLUGINS_AUTO`,
     // after the file's plugins), and in any case after document discovery,
     // which beancount runs first (`PLUGINS_PRE`): a discovered document can
@@ -1805,7 +1924,7 @@ fn dispatch_plugins(
     // account on that date (#2649).
     if options.auto_accounts {
         for name in rustledger_plugin::plugin_parts("beancount.plugins.auto", false) {
-            if registry.find_synth(name).is_some() == want_synth {
+            if selected(name, false) {
                 entries.push(PluginInvocation {
                     name: name.to_string(),
                     config: None,
@@ -1828,9 +1947,9 @@ fn dispatch_plugins(
     // #1432 module-name rejection) lives in `resolve_plugin`; execution lives in
     // `ResolvedPlugin::run`. Building wrappers and applying ops here — once, not
     // once per runtime — is the point of the resolve/run split.
-    let pass_kind = match pass {
-        PluginPass::PreBookingSynth => rustledger_plugin::PluginPass::Synth,
-        PluginPass::PostBooking => rustledger_plugin::PluginPass::Regular,
+    let pass_kind = match (pass, only) {
+        (_, Some(_)) | (PluginPass::PostBooking, None) => rustledger_plugin::PluginPass::Regular,
+        (PluginPass::PreBookingSynth, None) => rustledger_plugin::PluginPass::Synth,
     };
     for invocation in &entries {
         // A native-only host skips WASM and Python references BEFORE

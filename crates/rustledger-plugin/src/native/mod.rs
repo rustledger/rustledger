@@ -8,10 +8,13 @@
 //! Plugins run in one of two passes — see the loader's `PluginPass`
 //! enum:
 //!
-//! - **Pre-booking synth pass**: synthesizers like `auto_accounts`
-//!   and `document_discovery` that inject directives the Early
-//!   validator depends on (e.g. `Open` directives so account-
-//!   presence checks see them).
+//! - **Pre-booking synth pass**: `document_discovery`, which beancount
+//!   runs first of all (`PLUGINS_PRE`) and whose `Document` directives
+//!   carry no amounts, so running it ahead of booking is invisible.
+//!   `auto_accounts` was here too; it is a regular plugin now, run where
+//!   it is declared as beancount runs it, and Early validation reads its
+//!   opens from a provisional view instead (the loader's
+//!   `early_validation_view`).
 //! - **Post-booking regular pass**: transformations on already-
 //!   booked directives — most plugins, including the cost-spec-
 //!   reading ones (`implicit_prices`, `unrealized`, etc.) that need
@@ -97,11 +100,12 @@ pub trait NativePlugin: Send + Sync {
 
 /// Marker trait: a plugin that runs in the **pre-booking synth pass**.
 ///
-/// Synth plugins inject directives the Early validator depends on —
-/// e.g. `auto_accounts` injects `Open` directives so account-
-/// presence checks (E1001) see accounts that user code references
-/// without explicitly opening. They run BEFORE booking and BEFORE
-/// validation.
+/// Synth plugins inject directives before booking and before
+/// validation. Only `document_discovery` is one: its output carries no
+/// amounts and beancount runs it before every other plugin, so the order
+/// is not observable. A plugin whose place among the others IS observable
+/// (`auto_accounts`: a `close_tree` declared before it must not see its
+/// opens) is a regular plugin.
 ///
 /// Implement this trait (in addition to [`NativePlugin`]) for any
 /// plugin that synthesizes directives. The registry's
@@ -133,9 +137,10 @@ pub trait RegularPlugin: NativePlugin {}
 /// regular-pass plugin can't be returned from `find_synth` even on a
 /// name collision.
 ///
-/// The loader still gates two **implicit** synth-pass invocations on
-/// `LoadOptions` / `Options` flags (`options.auto_accounts` and the
-/// `option "documents"` directive that drives `document_discovery`),
+/// The loader still gates two **implicit** invocations on `LoadOptions` /
+/// `Options` flags (`options.auto_accounts`, in the regular pass after the
+/// file's plugins, and the `option "documents"` directive that drives
+/// `document_discovery`, in the synth pass),
 /// but those flow through the same unified dispatch loop as
 /// file-declared and CLI plugins — there's no per-plugin special
 /// case at the dispatch site.
@@ -159,11 +164,9 @@ fn plugin_short_name(name: &str) -> &str {
 /// `LazyLock` below; broken out as a named function so the call stack
 /// reflects what's happening at first access.
 fn build_global_registry() -> NativePluginRegistry {
-    let synth: Vec<Box<dyn SynthPlugin>> = vec![
-        Box::new(AutoAccountsPlugin),
-        Box::new(DocumentDiscoveryPlugin),
-    ];
+    let synth: Vec<Box<dyn SynthPlugin>> = vec![Box::new(DocumentDiscoveryPlugin)];
     let regular: Vec<Box<dyn RegularPlugin>> = vec![
+        Box::new(AutoAccountsPlugin),
         Box::new(ImplicitPricesPlugin),
         Box::new(CheckCommodityPlugin),
         Box::new(AutoTagPlugin::new()),

@@ -252,8 +252,8 @@ proptest! {
         let input1 = make_input(directives.clone());
         let _output1 = plugin1.process(input1);
 
-        // Then run a synth-pass plugin on the SAME original input
-        let plugin2 = registry.find_synth("auto_accounts").unwrap();
+        // Then run another plugin on the SAME original input
+        let plugin2 = registry.find_regular("auto_accounts").unwrap();
         let input2 = make_input(directives);
         let _output2 = plugin2.process(input2);
 

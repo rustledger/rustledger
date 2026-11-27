@@ -254,6 +254,39 @@ def _included_file_plugins(m) -> bool:
     )
 
 
+def _weight_currency(p: dict) -> str | None:
+    for part in ("cost", "price", "units"):
+        v = p.get(part)
+        if isinstance(v, dict) and v.get("currency"):
+            return v["currency"]
+    return None
+
+
+def _grouped_by_weight_currency(postings: list) -> list:
+    order: list = []
+    groups: dict = {}
+    for p in postings:
+        c = _weight_currency(p)
+        if c not in groups:
+            order.append(c)
+            groups[c] = []
+        groups[c].append(p)
+    return [p for c in order for p in groups[c]]
+
+
+def _currency_group_order(m) -> bool:
+    """Known Difference 22 (Posting Order in a Multi-Currency Transaction):
+    beancount's booking regroups a transaction's postings by the currency
+    they weigh in, groups in the order they first appear, while rledger keeps
+    them as written. Same postings, same amounts. Explains a first
+    difference that is only the order of a transaction's postings, when
+    regrouping rledger's postings that way gives beancount's order exactly."""
+    d = m.diff
+    if d.path != "postings.order" or not isinstance(d.impl, list):
+        return False
+    return _grouped_by_weight_currency(d.impl) == d.oracle
+
+
 def _currency_accounts_order(m) -> bool:
     """Plugin Differences, `currency_accounts`: rledger appends the
     neutralizing postings after the written ones, where beancount moves
@@ -298,6 +331,12 @@ DEVIATIONS = [
         f"{COMPAT} Plugin Differences (The `currency_accounts` Plugin)",
         _currency_accounts_order,
         "neutralizing postings appended after the written ones",
+    ),
+    Deviation(
+        "currency-group-posting-order",
+        f"{COMPAT} #22 (Posting Order in a Multi-Currency Transaction)",
+        _currency_group_order,
+        "postings kept as written, not regrouped by weight currency",
     ),
     Deviation(
         "average-booking",

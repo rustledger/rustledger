@@ -639,6 +639,94 @@ Pinned by the `booking-average` and
 `grammar-cost-merge` cases in `crates/rustledger/tests/fixtures/upstream-checks/`
 (see [Upstream Check Coverage](upstream-checks.md)).
 
+## Parse-Error Differences
+
+rledger reports beancount 3.2.3's syntax errors on the same lines and in the
+same number, as measured by `scripts/compat-parse-error-parity.py`. The
+parser computes them from a reference model of beancount's parser: a
+clean-room LALR grammar and lexer specification from
+[pta-standards](https://github.com/rustledger/pta-standards)
+(`formats/beancount/v3/grammar/`, MIT), replayed with bison's error recovery
+(`crates/rustledger-parser/src/cst/oracle/`). Where rledger deliberately
+reports differently, the difference is one named overlay in
+`cst/oracle/beancount/overlays.rs`, documented below. The parity harness
+normalizes the same differences.
+
+### P1. A BOM at the Start of the File
+
+A UTF-8 byte-order mark at byte 0 is stripped, and the file parses as if it
+were not there. beancount reads it as the start of an invalid token and
+reports `Invalid token` on line 1. Overlay `byte-0-bom`. A BOM anywhere else
+is reported (`P0026`).
+
+### P2. An Error at the End of a Line
+
+A syntax error found at the end of a line (`option "title"` with no value)
+is reported on that line. beancount reports it on the next line, because
+bison takes the line from its lexer, which has already read the `\n`. Overlay
+`eol-error-on-failing-line` (issue #2993). An error at the end of the file is
+on the statement's line on both.
+
+### P3. A Stray Carriage Return
+
+A `\r` that is not part of a CRLF line end is a blank to beancount's lexer.
+rledger reports one before a token, or at the start of a line, as an error of
+its own, and the line it is on keeps rledger's errors. Overlay
+`stray-carriage-return` (issue #2980).
+
+### P4. A Tag Line After the First Posting
+
+A line of tags or links after a transaction's first posting is reported on
+that line. beancount's builder reports it on the transaction's first line.
+Overlay `tags-after-first-posting` (issue #2575).
+
+### P5. An Indented Comment After a Gap
+
+A line of blanks and a `;` comment after a blank line, a column-0 comment, a
+line beancount's lexer skips, or the top of the file (other such lines
+between) is a comment. beancount reports `syntax error, unexpected INDENT`
+there, since its grammar takes an indented line only inside an entry, and its
+error recovery then stays quiet for a few tokens. After a directive that
+takes no indented lines (`option`, `pushtag`, ...) both report it. Overlay
+`indented-comment-after-gap`.
+
+### P6. A BOM on an Orphan Indented Line
+
+On an indented line that no entry continues, beancount reports the indent and
+then each invalid token on the line. Where the line's invalid token holds a
+BOM, rledger's BOM diagnostic (`P0026`) names it and stands for both, so the
+line has one error where beancount has two. Overlay `bom-orphan-line`.
+
+### P7. An Entry Before an Unreadable Line
+
+beancount drops an entry whose next column-0 line starts with an invalid
+token (its parser is still waiting for the entry's indented lines when the
+token arrives), and with it the errors its builder would report (too many
+strings, an invalid booking method). rledger keeps the entry and those
+errors. Overlay `kept-entries`.
+
+### P8. Cost Merging
+
+rledger supports cost merging (`{*}`, see section 20 above). beancount's
+builder refuses it (`Cost merging is not supported yet`). It is no syntax
+error to either. Overlay `cost-merge`.
+
+### P9. An Expression That Cannot Be Evaluated
+
+An arithmetic expression that divides by zero or overflows is reported where
+it is (`invalid arithmetic expression`). beancount's C parser crashes on some
+of these and, on a division by zero, replaces the next token with a lexer
+error, so its errors there depend on what follows. This is a beancount bug
+rledger does not copy (Python compatibility policy: fixable locally). Overlay
+`divide-by-zero`.
+
+### P10. Numbers Beyond 28 Digits
+
+A number with more significant digits than rledger's decimal type holds
+(about 28) is an error, where beancount's arbitrary-precision decimals accept
+it. See "Decimal Precision" in the project's `AGENTS.md`. Overlay
+`decimal-precision`.
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

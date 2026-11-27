@@ -2035,10 +2035,16 @@ fn test_cause_bom_free_line_as_on_main_needs_main_count() {
 /// main's count moves (moving beancount's makes it another rule's line).
 #[test]
 fn test_cause_listed_exception_needs_its_reason_counts() {
-    let ((tail, l), reason) = exceptions()
-        .into_iter()
-        .next()
-        .expect("at least one listed exception");
+    // No line is listed since the error oracle: each one the list held
+    // matches beancount now. With one listed again, this checks its counts.
+    let Some(((tail, l), reason)) = exceptions().into_iter().next() else {
+        assert!(
+            EXCEPTIONS
+                .lines()
+                .all(|l| l.starts_with('#') || l.is_empty())
+        );
+        return;
+    };
     let (input, mut counts) = table_row(tail);
     let lines: Vec<&str> = input.split('\n').collect();
     let get = |m: &BTreeMap<usize, usize>| m.get(&l).copied().unwrap_or(0);
@@ -2130,26 +2136,30 @@ fn test_cause_glued_in_error_line_needs_more_errors_than_beancount() {
 /// `inner-bom-under-line-error` explains one error fewer than beancount's,
 /// where a `P0026` stands for the line's first error and the line has a BOM
 /// inside one of beancount's invalid tokens: on its own table row
-/// (`x0<BOM>y x1<BOM>y`, beancount 2, rledger 1 with one `P0026`, main 1, a
-/// BOM inside each token), and not with no inner BOM, with no `P0026`, or with
-/// rledger counting more than beancount. (Where the line's first invalid
+/// (`x0<BOM>y x1<BOM>y`, beancount 2, a BOM inside each token) at the counts
+/// rledger gave before its error oracle (1, with one `P0026`; main 1), and
+/// not with no inner BOM, with no `P0026`, or with rledger counting more than
+/// beancount. rledger counts that row 2 now, as beancount does, so the counts
+/// the rule is checked on are those older ones. (Where the line's first invalid
 /// token holds no BOM, `$n0 x1<BOM>y`, the `P0026` stands for that token and
 /// `x1<BOM>y` has its own error, as in beancount.)
 #[test]
 fn test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic() {
     let tail = "x0<BOM>y x1<BOM>y\\n";
-    let (input, counts) = table_row(tail);
+    let (input, mut counts) = table_row(tail);
     let lines: Vec<&str> = input.split('\n').collect();
     let get = |m: &BTreeMap<usize, usize>| m.get(&3).copied().unwrap_or(0);
     assert_eq!(
-        (
-            get(&counts.bc),
-            get(&counts.rl),
-            get(&counts.main),
-            get(&counts.rl_bom)
-        ),
-        (2, 1, 1, 1)
+        (get(&counts.bc), get(&counts.rl), get(&counts.main)),
+        (2, 2, 1),
+        "rledger counts the row as beancount does"
     );
+    // The counts before the error oracle: rledger's `P0026` alone.
+    let before = |c: &mut Counts| {
+        c.rl.insert(3, 1);
+        c.rl_bom.insert(3, 1);
+    };
+    before(&mut counts);
     assert!(
         counts
             .roles
@@ -2160,6 +2170,7 @@ fn test_cause_inner_bom_under_line_error_needs_fewer_errors_and_a_bom_diagnostic
     );
     let cause_with = |change: &dyn Fn(&mut Counts)| {
         let mut counts = table_row(tail).1;
+        before(&mut counts);
         change(&mut counts);
         cause(&lines, 3, &counts, &input, tail)
     };
@@ -2927,18 +2938,21 @@ fn test_cause_glued_in_error_line_needs_exactly_the_difference() {
 }
 
 /// `inner-bom-under-line-error`'s rewrite makes each inner BOM a `$`, which
-/// starts no token: a letter could finish a keyword. Real counts
+/// starts no token: a letter could finish a keyword. Recorded counts
 /// (`recorded_row`): `x0<BOM>y t<BOM>n`, beancount 2 (two invalid tokens, a
-/// BOM inside each), rledger 1 (its `P0026`); rledger counts `x0$y t$n` 2,
-/// but `x0yy txn` 1.
+/// BOM inside each), and rledger 1 (its `P0026`) as it counted before its
+/// error oracle (it counts 2 now, as beancount does); rledger counts
+/// `x0$y t$n` 2, but `x0yy txn` 1.
 #[test]
 fn test_cause_inner_bom_under_line_error_rewrites_to_no_token() {
+    let tail = "x0<BOM>y t<BOM>n\\n";
+    let (input, mut counts) = recorded_row(tail, "3:2 3:1 3:2 3:2 3:2 3:2 - 52,58 -");
+    assert_eq!(counts.rl.get(&3), Some(&2), "as beancount counts it");
+    counts.rl.insert(3, 1);
+    counts.rl_bom.insert(3, 1);
+    let lines: Vec<&str> = input.split('\n').collect();
     assert_eq!(
-        recorded_cause(
-            "x0<BOM>y t<BOM>n\\n",
-            "3:2 3:1 3:2 3:2 3:2 3:2 - 52,58 -",
-            3
-        ),
+        cause(&lines, 3, &counts, &input, "recorded row, in no data file"),
         Some("inner-bom-under-line-error")
     );
 }
@@ -3397,10 +3411,11 @@ fn test_stale_exceptions_needs_the_listing_to_explain_the_line() {
         stale_exceptions([(ruled, 3)], &excepted_of(ruled)),
         vec![format!("{ruled} line 3")]
     );
-    let ((tail, l), _) = exceptions()
-        .into_iter()
-        .next()
-        .expect("at least one listed exception");
+    // None is listed since the error oracle (see
+    // `test_cause_listed_exception_needs_its_reason_counts`).
+    let Some(((tail, l), _)) = exceptions().into_iter().next() else {
+        return;
+    };
     let excepted = excepted_of(tail);
     assert!(excepted.contains(&(tail.to_string(), l)));
     assert_eq!(
@@ -3579,10 +3594,10 @@ fn test_check_row_excepts_only_listed_exception_lines() {
             .unwrap_or_else(|| panic!("no table row for {tail:?}"));
         assert!(check_row(row).excepted.is_empty(), "{causes}: {tail}");
     }
-    // (Ten since `extra-construct-error` lost its one row of its own: that
-    // row's pipe after a header failure gives no warning now, as in
-    // beancount.)
-    assert!(seen.len() >= 10, "{seen:?}");
+    // (Five since the error oracle: the rows of the other causes match
+    // beancount now. Ten before it, eleven before `extra-construct-error`
+    // lost its one row of its own.)
+    assert!(seen.len() >= 5, "{seen:?}");
 }
 
 /// `list_diff` lists what is gone, then what is new, and nothing when the

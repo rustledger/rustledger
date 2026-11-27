@@ -787,7 +787,12 @@ use crate::types::{Error, LedgerOptions};
 /// cost (`{10 USD} @ USD`) is a booking failure where it was ignored. A
 /// file with bytes that are not UTF-8 reports them (the loader's v82), but
 /// WASM takes text, so only its pin moves for that.
-pub const CACHE_VERSION: u32 = 147;
+/// v148: loader v82, unchanged; parse errors move: the parser holds them to
+/// beancount's grammar (its error oracle), so a line beancount reports has as
+/// many errors, and a line its recovery swallows none. Parsed directives do
+/// not move, and a source with a parse error keeps one, which the loader's
+/// cache is never saved for.
+pub const CACHE_VERSION: u32 = 148;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

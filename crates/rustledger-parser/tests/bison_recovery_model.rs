@@ -585,17 +585,18 @@ fn test_parse_undated_declaration_failing_mid_line_is_reported() {
     );
 }
 
-/// An indented line inside a recovery on which bison shifts a date that
-/// starts no statement (`    date: 2024-01-02`, a metadata line) does not
-/// end the recovery: its line end is not taken after the date, so the count
-/// is back at three, as after any indented line.
+/// An undated directive on a transaction's body line fails at its keyword,
+/// and bison's recovery shifts that keyword and its two strings, which ends
+/// the recovery: the directive is built, and the next line's indent is an
+/// error of its own (bean-check 3.2.3 reports lines 2, 3 and 6). The date on
+/// the metadata line after it changes nothing.
 #[test]
 fn test_parse_date_on_an_indented_line_does_not_end_the_recovery() {
     assert_counts(&with_crlf(vec![(
         format!(
             "{T}  option \"title\" \"x\"\n  Assets:A 1 USD\n    date: 2024-01-02\n\n  Assets:a 1 USD\n"
         ),
-        vec![(2, 1), (6, 1)],
+        vec![(2, 1), (3, 1), (6, 1)],
     )]));
 }
 

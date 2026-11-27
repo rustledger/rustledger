@@ -20,6 +20,7 @@ pub mod lr;
 mod overlays;
 pub mod tables;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use self::lexer::{Lexeme, Lexer};
@@ -77,8 +78,13 @@ impl ReferenceOracle for BeancountOracle {
             .map(|&(a, b)| a as usize..b as usize)
             .collect();
         let rebuilt = rebuilt_statements(text, &outcome.statements, &recovery);
+        let mut slots: Vec<Slot> = outcome.events.iter().map(|e| slot_of(text, e)).collect();
+        if full_trace {
+            slots.extend(unbalanced_pops(text, &outcome.statements));
+            slots.sort_by_key(|s| s.span.start);
+        }
         let mut reference = Reference {
-            slots: outcome.events.iter().map(|e| slot_of(text, e)).collect(),
+            slots,
             recovery,
             rebuilt,
             statements: outcome
@@ -101,10 +107,12 @@ impl ReferenceOracle for BeancountOracle {
     }
 }
 
-/// The statements bison's recovery started away from a line start (in the
-/// middle of a line it was discarding, or on an indented line) and then
-/// built: beancount BUILDS such an entry, and the indented lines after it are
-/// its body, so its errors there are the ones that entry's own parse gives
+/// The dated entries bison's recovery started (their first token shifted
+/// while it was recovering) away from a line start (in the middle of a line
+/// it was discarding, or on an indented line) and then built.
+///
+/// beancount BUILDS such an entry, and the indented lines after it are its
+/// body, so its errors there are the ones that entry's own parse gives
 /// (rledger does not emit the entry itself, a recovery artifact).
 fn rebuilt_statements(
     src: &str,
@@ -114,7 +122,7 @@ fn rebuilt_statements(
     let b = src.as_bytes();
     statements
         .iter()
-        .filter(|s| s.built)
+        .filter(|s| s.built && !s.directive)
         .map(|s| s.start as usize..s.end as usize)
         .filter(|s| {
             let in_recovery = recovery
@@ -128,9 +136,79 @@ fn rebuilt_statements(
                     }
                 })
                 .is_ok();
-            in_recovery && s.start > 0 && b.get(s.start - 1) != Some(&b'\n')
+            let mid_line = s.start > 0 && b.get(s.start - 1) != Some(&b'\n');
+            in_recovery && mid_line
         })
         .collect()
+}
+
+/// Takes one push of `name` off `pushed`, if there is one.
+fn pop(pushed: &mut HashMap<&str, usize>, name: &str) -> bool {
+    match pushed.get_mut(name) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// beancount's builder's errors for the `poptag` / `popmeta` directives its
+/// grammar built (in order, `statements` holding every built one) that pop a
+/// tag or key no built `pushtag` / `pushmeta` pushed: `Attempting to pop
+/// absent tag`, on the directive's line. rledger reports these itself for
+/// the directives it builds, but beancount's recovery also builds some
+/// rledger does not (`2024-01-03 2024-01-04 poptag #t`, `$` then
+/// `\t1poptag #t`), so their lines would otherwise lose the error.
+fn unbalanced_pops(src: &str, statements: &[lr::Statement]) -> Vec<Slot> {
+    // How many times each tag and key is pushed: a pop needs one, whichever.
+    let mut tags: HashMap<&str, usize> = HashMap::new();
+    let mut keys: HashMap<&str, usize> = HashMap::new();
+    let mut out = Vec::new();
+    // Where line counting has got to: statements come in source order.
+    let (mut at, mut line) = (0usize, 1u32);
+    for s in statements.iter().filter(|s| s.built && s.directive) {
+        let (start, end) = (s.start as usize, (s.end as usize).min(src.len()));
+        let Some(text) = src.get(start..end) else {
+            continue;
+        };
+        let mut toks = Lexer::new(text.as_bytes());
+        let (Some(head), Some(arg)) = (toks.next(), toks.next()) else {
+            continue;
+        };
+        let name = text
+            .get(arg.start as usize..arg.end as usize)
+            .unwrap_or_default();
+        let absent = match head.tok {
+            Tok::Pushtag => {
+                *tags.entry(name).or_default() += 1;
+                None
+            }
+            Tok::Pushmeta => {
+                *keys.entry(name).or_default() += 1;
+                None
+            }
+            Tok::Poptag => (!pop(&mut tags, name))
+                .then(|| format!("poptag of tag `{name}`, which was never pushed")),
+            Tok::Popmeta => (!pop(&mut keys, name))
+                .then(|| format!("popmeta of key `{name}`, which was never pushed")),
+            _ => None,
+        };
+        if let Some(message) = absent {
+            let before = src.as_bytes().get(at..start).unwrap_or_default();
+            line += before.split(|&b| b == b'\n').count() as u32 - 1;
+            at = start.max(at);
+            out.push(Slot {
+                span: start + head.start as usize..start + head.end as usize,
+                // The line of the directive's keyword: beancount reports a
+                // builder error on the directive's first line.
+                line: line + head.line - 1,
+                kind: SlotKind::Semantic,
+                message,
+            });
+        }
+    }
+    out
 }
 
 /// The slot for one parser event, on beancount's own line (an overlay may
@@ -354,6 +432,7 @@ pub fn overlaid_slots(src: &str) -> Vec<(u32, &'static str)> {
                 SlotKind::Lexical => "lexical",
                 SlotKind::Syntax => "syntax",
                 SlotKind::Fatal => "fatal",
+                SlotKind::Semantic => "semantic",
             };
             (s.line, kind)
         })
@@ -421,7 +500,22 @@ pub fn reconcile_errors(source: &str, errors: Vec<ParseError>) -> Vec<ParseError
     claims.own_lines.sort_unstable();
     claims.own_lines.dedup();
     let lines = LineIndex::new(source);
-    super::reconcile(&lines, errors, &reference, &claims, classify, synthesize)
+    let first = errors.first().cloned();
+    let out = super::reconcile(&lines, errors, &reference, &claims, classify, synthesize);
+    never_clean(out, first)
+}
+
+/// A parse rledger found an error in never comes out clean: the error oracle
+/// decides where its errors are and how many, not whether it has any. (So a
+/// source keeps a parse error exactly when it had one, which the loader's
+/// cache relies on.) `first` is rledger's first error before reconciling.
+fn never_clean(mut out: Vec<ParseError>, first: Option<ParseError>) -> Vec<ParseError> {
+    if out.is_empty()
+        && let Some(e) = first
+    {
+        out.push(e);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -440,6 +534,49 @@ mod tests {
                 Event::Exhausted(l) => (l.line, "memory exhausted".to_string()),
             })
             .collect()
+    }
+
+    /// `(line, message)` of the builder slots on `src`.
+    fn pops(src: &str) -> Vec<(u32, String)> {
+        reference(src, true)
+            .slots
+            .into_iter()
+            .filter(|s| s.kind == SlotKind::Semantic)
+            .map(|s| (s.line, s.message))
+            .collect()
+    }
+
+    #[test]
+    fn test_unbalanced_pops_replays_beancounts_tag_and_key_stacks() {
+        assert_eq!(pops("pushtag #t\npoptag #t\n"), [] as [(u32, String); 0]);
+        assert_eq!(
+            pops("\npoptag #t\n"),
+            [(2, "poptag of tag `#t`, which was never pushed".to_string())]
+        );
+        assert_eq!(
+            pops("pushmeta kk: 1\npopmeta kk:\npopmeta kk:\n"),
+            [(3, "popmeta of key `kk`, which was never pushed".to_string())]
+        );
+        // Built by bison's recovery in the middle of a line rledger fails.
+        assert_eq!(
+            pops("2024-01-02 123\n2024-01-03 2024-01-04 poptag #t\n").len(),
+            1
+        );
+        assert_eq!(pops("$\n\t1poptag #t\n")[0].0, 2);
+        // A push inside a line bison fails is not built, so its pop is absent.
+        assert_eq!(pops("pushtag #t $\npoptag #t\n")[0].0, 2);
+    }
+
+    #[test]
+    fn test_never_clean_keeps_an_error_where_there_was_one() {
+        let e = ParseError::new(ParseErrorKind::SyntaxError("x".into()), Span::new(0, 1));
+        assert_eq!(
+            never_clean(Vec::new(), Some(e.clone())),
+            std::slice::from_ref(&e)
+        );
+        assert_eq!(never_clean(Vec::new(), None), [] as [ParseError; 0]);
+        let other = ParseError::new(ParseErrorKind::SyntaxError("y".into()), Span::new(2, 3));
+        assert_eq!(never_clean(vec![other.clone()], Some(e)), [other]);
     }
 
     #[test]
@@ -511,7 +648,7 @@ mod tests {
     /// near the sixteen a quadratic step would.
     #[test]
     fn test_reference_work_is_linear_in_the_input() {
-        let shapes: [(&str, fn(usize) -> String); 14] = [
+        let shapes: [(&str, fn(usize) -> String); 15] = [
             ("invalid lines", |n| "$\n".repeat(n)),
             ("indented comments after a gap", |n| {
                 "; c\n".to_string() + &"  ; c\n".repeat(n)
@@ -544,6 +681,7 @@ mod tests {
                 "2024-01-01 open Assets:A\n$\n".repeat(n)
             }),
             ("ignored lines", |n| "* heading\n#!x\n".repeat(n)),
+            ("unbalanced pops", |n| "poptag #t\npushtag #u\n".repeat(n)),
         ];
         for (label, make) in shapes {
             let (small, large) = (make(LINEAR_N), make(4 * LINEAR_N));

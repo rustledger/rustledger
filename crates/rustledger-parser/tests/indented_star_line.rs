@@ -189,14 +189,15 @@ fn test_parse_indented_star_line_with_quote_is_not_silent() {
 
 /// A `*` after a BOM is not at column 0 either. `parse` strips one leading
 /// BOM, so it takes a second one, or a BOM then indentation, to get here;
-/// beancount rejects the BOM (`Invalid token`), as rledger does before a
-/// directive.
+/// beancount rejects the BOM with the `*` glued to it (`Invalid token`), as
+/// rledger does before a directive, and then each invalid run after it
+/// (bean-check 3.2.3: three errors on the line either way).
 #[test]
 fn test_parse_star_after_bom_is_reported() {
     for case in [
         Case {
             src: "\u{feff}\u{feff}* h x\n2024-01-02 open Assets:B\n",
-            errors: &[(6, 12)],
+            errors: &[(6, 12), (8, 9), (10, 11)],
             comments: &[],
             opens: &[B],
         },

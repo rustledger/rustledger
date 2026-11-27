@@ -41,14 +41,15 @@ thread_local! {
     pub static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// The switch from the environment: `RLEDGER_ERROR_ORACLE=1` turns the
-/// reconciliation on while it is off by default.
+/// The switch from the environment: the reconciliation is on unless
+/// `RLEDGER_ERROR_ORACLE=0`, which turns it off to compare against the
+/// hand-modeled passes alone while they are retired.
 static FROM_ENV: OnceLock<bool> = OnceLock::new();
 
 /// Whether parses reconcile their errors with the reference oracle.
 pub fn enabled() -> bool {
     OVERRIDE.with(Cell::get).unwrap_or_else(|| {
-        *FROM_ENV.get_or_init(|| std::env::var("RLEDGER_ERROR_ORACLE").is_ok_and(|v| v == "1"))
+        *FROM_ENV.get_or_init(|| std::env::var("RLEDGER_ERROR_ORACLE").map_or(true, |v| v != "0"))
     })
 }
 
@@ -96,6 +97,9 @@ pub enum SlotKind {
     Syntax,
     /// The reference's parser gave up (for example, its stack overflowed).
     Fatal,
+    /// The reference's grammar built the statement and a check it makes
+    /// right after rejected it (a pop of something never pushed).
+    Semantic,
 }
 
 /// One error the reference reports.
@@ -318,9 +322,12 @@ pub fn reconcile(
     }
     let has_slots = |line: u32| groups.binary_search_by_key(&line, |(l, _)| *l).is_ok();
 
-    let mut out: Vec<ParseError> = Vec::with_capacity(errors.len());
+    // Each kept diagnostic with its place in `errors`, so the result keeps
+    // rledger's order among diagnostics that start together; a synthesized
+    // one comes after them.
+    let mut out: Vec<(usize, ParseError)> = Vec::with_capacity(errors.len());
     // rledger's syntax diagnostics on lines with slots, to assign to them.
-    let mut pending: Vec<(u32, ParseError)> = Vec::new();
+    let mut pending: Vec<(u32, usize, ParseError)> = Vec::new();
     // Lines with slots where a diagnostic stands anyway (an overlay's claim,
     // one the oracle does not model): each already reports the line, so it
     // takes the place of one slot no syntax diagnostic covers.
@@ -328,21 +335,21 @@ pub fn reconcile(
     for (i, e) in errors.into_iter().enumerate() {
         let line = lines.line_of(e.span.start);
         if owned_line(line) {
-            out.push(e);
+            out.push((i, e));
         } else if claims.own.get(i).copied().unwrap_or(false) || classify(&e) == ErrorClass::Other {
             if has_slots(line) {
                 standing.push(line);
             }
-            out.push(e);
+            out.push((i, e));
         } else if has_slots(line) {
-            pending.push((line, e));
+            pending.push((line, i, e));
         } else if !quiet(line) {
             // The reference reports nothing here and was not recovering:
             // rledger's own verdict on the line stands.
-            out.push(e);
+            out.push((i, e));
         }
     }
-    pending.sort_by_key(|(line, e)| (*line, e.span.start));
+    pending.sort_by_key(|(line, i, e)| (*line, e.span.start, *i));
     standing.sort_unstable();
 
     // Each line's slots take its syntax diagnostics: first a diagnostic on
@@ -352,30 +359,49 @@ pub fn reconcile(
     // diagnostics are both in source order, so one merge pass pairs them.
     let mut pending = pending.into_iter().peekable();
     for (line, slots) in &groups {
-        let mut candidates: Vec<Option<ParseError>> = Vec::new();
-        while let Some((_, e)) = pending.next_if(|(l, _)| l == line) {
-            candidates.push(Some(e));
+        let mut candidates: Vec<Option<(usize, ParseError)>> = Vec::new();
+        while let Some((_, i, e)) = pending.next_if(|(l, _, _)| l == line) {
+            candidates.push(Some((i, e)));
         }
         if owned_line(*line) {
             continue;
         }
         let mut stand_ins =
             standing.partition_point(|&l| l <= *line) - standing.partition_point(|&l| l < *line);
-        let mut taken: Vec<Option<ParseError>> = Vec::with_capacity(slots.len());
+        let mut taken: Vec<Option<(usize, ParseError)>> = Vec::with_capacity(slots.len());
         let mut j = 0;
         for slot in slots {
             // Diagnostics wholly before this slot cannot overlap a later one.
-            while candidates
-                .get(j)
-                .is_some_and(|c| c.as_ref().is_some_and(|e| ends_before(e.span, &slot.span)))
-            {
+            while candidates.get(j).is_some_and(|c| {
+                c.as_ref()
+                    .is_some_and(|(_, e)| ends_before(e.span, &slot.span))
+            }) {
                 j += 1;
             }
-            let hit = candidates
-                .get_mut(j)
-                .filter(|c| c.as_ref().is_some_and(|e| overlaps(e.span, &slot.span)))
+            // Of the diagnostics on the slot's token, the tightest names it
+            // best (an invalid date over a whole-amount "trailing tokens").
+            // A few at most overlap one token; the window is capped so a
+            // pathological line stays linear.
+            let best = candidates
+                .iter()
+                .enumerate()
+                .skip(j)
+                .take(8)
+                .take_while(|(_, c)| {
+                    c.as_ref()
+                        .is_none_or(|(_, e)| e.span.start < slot.span.end.max(slot.span.start + 1))
+                })
+                .filter_map(|(k, c)| {
+                    c.as_ref()
+                        .filter(|(_, e)| overlaps(e.span, &slot.span))
+                        .map(|(_, e)| (e.span.end - e.span.start, k))
+                })
+                .min()
+                .map(|(_, k)| k);
+            let hit = best
+                .and_then(|k| candidates.get_mut(k))
                 .and_then(Option::take);
-            if hit.is_some() {
+            if best == Some(j) {
                 j += 1;
             }
             taken.push(hit);
@@ -387,12 +413,12 @@ pub fn reconcile(
             } else if stand_ins > 0 {
                 stand_ins -= 1;
             } else {
-                out.push(synthesize(slot));
+                out.push((usize::MAX, synthesize(slot)));
             }
         }
     }
-    out.sort_by_key(|e| e.span.start);
-    out
+    out.sort_by_key(|(i, e)| (e.span.start, *i));
+    out.into_iter().map(|(_, e)| e).collect()
 }
 
 /// Whether a diagnostic ends before a slot's token starts (and so overlaps

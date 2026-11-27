@@ -1,0 +1,8 @@
+plugin "beancount.plugins.implicit_prices"
+plugin "beancount.plugins.unique_prices"
+2020-01-01 open Assets:Euro
+2020-01-01 open Assets:Cash
+2020-01-02 price EUR 2 USD
+2020-01-02 * "an implied price that disagrees with the price directive"
+  Assets:Euro   1 EUR @ 1 USD
+  Assets:Cash  -1 USD

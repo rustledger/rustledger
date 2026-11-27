@@ -1,0 +1,2 @@
+plugin "beancount.plugins.check_commodity"
+2020-01-01 open Assets:Cash USD

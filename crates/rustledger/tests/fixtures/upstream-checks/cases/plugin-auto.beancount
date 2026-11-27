@@ -1,0 +1,4 @@
+plugin "beancount.plugins.auto"
+2020-01-02 * "no opens"
+  Assets:Cash      1 USD
+  Equity:Opening  -1 USD

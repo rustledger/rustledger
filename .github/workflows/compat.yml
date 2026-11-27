@@ -1704,7 +1704,11 @@ jobs:
           set -o pipefail
           # `ag-rledger`: python_plugin_wasi also checks that ag-rledger
           # carries the Python runtime's notices in its envelope (#2566).
-          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance --test options_plugins_parity -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          # upstream_checks_test: every check the installed beancount can
+          # report is in tests/fixtures/upstream-checks/checks.toml, and each
+          # row's case ledger gives bean-check the lines the row says (its
+          # rledger side runs in every cargo test, not only here).
+          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance --test options_plugins_parity --test upstream_checks_test -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
           # check_option_expiry's config rules against beancount-options'
           # shared expiry_config.json (BEANCOUNT_OPTIONS_DIR).

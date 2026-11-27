@@ -1,0 +1,13 @@
+plugin "beancount.plugins.check_closing"
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-02 * "buy"
+  Assets:Stock   1 HOOL {10 USD}
+  Assets:Cash  -10 USD
+2020-01-03 * "a sale marked closing that leaves a unit"
+  Assets:Stock  -1 HOOL {10 USD}
+    closing: TRUE
+  Assets:Cash   10 USD
+2020-01-03 * "buy again"
+  Assets:Stock   1 HOOL {10 USD}
+  Assets:Cash  -10 USD

@@ -1,0 +1,8 @@
+plugin "beancount.plugins.close_tree"
+2020-01-01 open Assets:Cash
+2020-01-01 open Assets:Cash:Wallet
+2020-01-01 open Equity:Opening
+2020-02-01 close Assets:Cash
+2020-03-01 * "child closed with its parent"
+  Assets:Cash:Wallet   1 USD
+  Equity:Opening      -1 USD

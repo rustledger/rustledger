@@ -1,0 +1,2 @@
+plugin "beancount.plugins.check_average_cost" "not-a-float"
+2020-01-01 open Assets:Cash

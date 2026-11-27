@@ -1,0 +1,2 @@
+plugin "beancount.plugins.commodity_attr" "['not', 'a', 'dict']"
+2020-01-01 commodity USD

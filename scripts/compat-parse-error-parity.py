@@ -369,6 +369,7 @@ NOT_PARSE_ERRORS = (
     "may not be set",
     "Renamed to '",
     "Allowing pipe separator",
+    "Allowing None for tags and link",
     "Cost merging is not supported yet",
 )
 

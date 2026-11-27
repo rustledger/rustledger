@@ -1,0 +1,9 @@
+plugin "beancount.plugins.onecommodity"
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Opening
+2020-01-02 * "usd"
+  Assets:Cash      1 USD
+  Equity:Opening  -1 USD
+2020-01-03 * "eur"
+  Assets:Cash      1 EUR
+  Equity:Opening  -1 EUR

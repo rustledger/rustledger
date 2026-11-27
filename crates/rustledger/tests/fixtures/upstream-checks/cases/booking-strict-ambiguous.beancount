@@ -1,0 +1,11 @@
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-02 * "buy"
+  Assets:Stock   1 HOOL {10 USD}
+  Assets:Cash  -10 USD
+2020-01-03 * "buy"
+  Assets:Stock   1 HOOL {11 USD}
+  Assets:Cash  -11 USD
+2020-01-04 * "sell which?"
+  Assets:Stock  -1 HOOL {}
+  Assets:Cash   10 USD

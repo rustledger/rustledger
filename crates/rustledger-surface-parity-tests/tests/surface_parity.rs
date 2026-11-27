@@ -107,8 +107,12 @@ const ALLOWED: &[Allowed] = &[
             (WASM_PLUGIN, "PLUGIN", 0),
             (GRAMMAR_PLUGIN, "E8004", 0),
             (PYTHON_PLUGINS, "PLUGIN", 21),
+            (UC_PLUGIN_IMPORT, "E8004", 0),
+            (UC_PLUGIN_AUTO, "E8004", 0),
         ],
         surface: &[
+            (UC_PLUGIN_IMPORT, "E8006", 1),
+            (UC_PLUGIN_AUTO, "E8006", 1),
             (UNKNOWN_PLUGIN, "E8006", 3),
             (WASM_PLUGIN, "E8006", 2),
             (GRAMMAR_PLUGIN, "E8006", 2),
@@ -130,6 +134,8 @@ const ALLOWED: &[Allowed] = &[
         surfaces: &[SINGLE_SOURCE, VFS],
         check: &[
             (DOC_DISCOVERY_UNKNOWN, "PLUGIN", 0),
+            (UC_DOC_INVALID_DATE, "PLUGIN", 0),
+            (UC_DOC_MISSING_ROOT, "E7006", 1),
             (OPTION_LIST, "E7006", 1),
             (OPTION_LIST, "E7006", 2),
             (OPTION_LIST, "E7006", 3),
@@ -198,6 +204,7 @@ const ALLOWED: &[Allowed] = &[
             (INCLUDE_CYCLE, "E0004", 1),
             (INCLUDE_DUPLICATE, "E0004", 1),
             (INCLUDE_RELATIVE, "E0001", 1),
+            (UC_DUPLICATE_INCLUDE, "E0004", 1),
         ],
         surface: &[
             (CYCLE_A, "E0002", 2),
@@ -207,11 +214,23 @@ const ALLOWED: &[Allowed] = &[
             (INCLUDE_CYCLE, "E0004", 1),
             (INCLUDE_DUPLICATE, "E0004", 1),
             (INCLUDE_RELATIVE, "E0001", 1),
+            (UC_DUPLICATE_INCLUDE, "E0004", 1),
         ],
         reason: "The same load error, code and line, in the file map's words: its \
                  files are named by their keys (`cycle_a.beancount`), not their paths \
                  on disk, and a missing one is `file not found in virtual filesystem`, \
                  not the operating system's error.",
+    },
+    // OPEN, not a decision: found by the upstream-check case ledgers. A
+    // balance assertion `check_closing` synthesizes is located at
+    // `<check_closing>`, 0 by `check` (as beancount places it), and in the
+    // ledger file, at line 0, by every other surface.
+    Allowed {
+        surfaces: &[SINGLE_SOURCE, &["lsp"]],
+        check: &[(UC_CHECK_CLOSING, "E2001", 0)],
+        surface: &[(UC_CHECK_CLOSING, "E2001", 0)],
+        reason: "OPEN: `check` names a plugin-synthesized balance's placeholder file \
+                 (`<check_closing>`), the other surfaces the ledger file.",
     },
 ];
 
@@ -239,6 +258,19 @@ const INCLUDE_ABSOLUTE: &str = "tests/fixtures/lima-tests/ParserInclude.IncludeA
 const INCLUDE_CYCLE: &str = "tests/fixtures/lima-tests/ParserInclude.IncludeCycle.beancount";
 const INCLUDE_CYCLE_INCLUDED: &str =
     "tests/fixtures/lima-tests/ParserInclude.IncludeCycle/Included1.beancount";
+// The upstream-check case ledgers (`crates/rustledger/tests/upstream_checks_test.rs`).
+const UC_PLUGIN_IMPORT: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/loader-plugin-import-error.beancount";
+const UC_PLUGIN_AUTO: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/plugin-auto.beancount";
+const UC_DOC_INVALID_DATE: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/documents-invalid-date.beancount";
+const UC_DOC_MISSING_ROOT: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/documents-missing-root.beancount";
+const UC_DUPLICATE_INCLUDE: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/loader-duplicate-include.beancount";
+const UC_CHECK_CLOSING: &str =
+    "crates/rustledger/tests/fixtures/upstream-checks/cases/plugin-check-closing.beancount";
 const INCLUDE_DUPLICATE: &str =
     "tests/fixtures/lima-tests/ParserInclude.IncludeDuplicate.beancount";
 const INCLUDE_RELATIVE: &str =

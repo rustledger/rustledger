@@ -29,6 +29,7 @@ const KNOWN_OPTIONS: &[&str] = &[
     "render_commas",
     "display_precision",
     "allow_pipe_separator",
+    "allow_deprecated_none_for_tags_and_links",
     "long_string_maxlines",
     "documents",
     "insert_pythonpath",
@@ -46,6 +47,10 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
     match key {
         "inferred_tolerance_multiplier" => Some("Renamed to 'tolerance_multiplier'."),
         "allow_pipe_separator" => Some("Option 'allow_pipe_separator' is deprecated"),
+        // beancount's descriptor message, word for word.
+        "allow_deprecated_none_for_tags_and_links" => {
+            Some("Allowing None for tags and link will go away eventually.")
+        }
         _ => None,
     }
 }
@@ -156,6 +161,7 @@ pub fn option_value_kind(key: &str) -> Option<&'static str> {
         | "use_precise_interpolation"
         | "render_commas"
         | "allow_pipe_separator"
+        | "allow_deprecated_none_for_tags_and_links"
         | "insert_pythonpath" => "bool",
         "booking_method" => "booking method",
         // Any value is accepted (beancount has no converter and never reads
@@ -178,7 +184,8 @@ pub const DEFAULT_CURRENT_CONVERSIONS: &str = "Conversions:Current";
 /// beancount has two, and they disagree on `yes` and `on`:
 ///
 /// * The options with a converter (`render_commas`, `use_precise_interpolation`,
-///   `allow_pipe_separator`, `insert_pythonpath`) go through
+///   `allow_pipe_separator`, `allow_deprecated_none_for_tags_and_links`,
+///   `insert_pythonpath`) go through
 ///   `options_validate_boolean`: `value.lower() in ("1", "true", "yes")`.
 /// * `infer_tolerance_from_cost` has no converter, so `grammar.option`'s bool
 ///   branch reads it: `value.lower() in {"true", "on"} or value == "1"`.
@@ -1733,6 +1740,18 @@ impl Options {
                 self.warn_if_deprecated(key, value);
                 self.allow_pipe_separator = self.read_bool(key, value, BoolVocabulary::Converter);
             }
+            "allow_deprecated_none_for_tags_and_links" => {
+                // Deprecated in beancount, which reports it (DeprecatedError)
+                // and still reads it with the boolean converter. It lets a
+                // Python plugin hand back `None` for a transaction's tags or
+                // links, which rledger's directives cannot hold, so the value
+                // has no effect here: recorded as written, like
+                // `insert_pythonpath`, with an unrecognized word reported.
+                // It used to be an unknown option (E7001).
+                self.warn_if_deprecated(key, value);
+                self.read_bool(key, value, BoolVocabulary::Converter);
+                self.custom.insert(key.to_string(), value.to_string());
+            }
             "insert_pythonpath" => {
                 // A boolean with the converter in beancount. rledger records
                 // the value as written (it has no field), but reports an
@@ -2992,6 +3011,28 @@ mod tests {
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7004");
         assert!(opts.warnings[0].message.contains("deprecated"));
+    }
+
+    /// beancount's third deprecated option is deprecated here too, with
+    /// beancount's message, not an unknown option (E7001) as it was.
+    #[test]
+    fn test_set_allow_deprecated_none_for_tags_and_links_is_deprecated() {
+        for value in ["TRUE", "FALSE"] {
+            let mut opts = Options::new();
+            opts.set("allow_deprecated_none_for_tags_and_links", value);
+            let codes: Vec<_> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7004"], "{value}: {:?}", opts.warnings);
+            assert_eq!(
+                opts.warnings[0].message,
+                "Allowing None for tags and link will go away eventually."
+            );
+        }
+        // An unrecognized boolean word is reported, as for the other
+        // converter booleans.
+        let mut opts = Options::new();
+        opts.set("allow_deprecated_none_for_tags_and_links", "maybe");
+        let codes: Vec<_> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7004", "E7011"], "{:?}", opts.warnings);
     }
 
     #[test]

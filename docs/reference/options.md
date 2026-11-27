@@ -299,6 +299,7 @@ directory below the filesystem root.
 | `insert_pythonpath` | bool | FALSE | Accepted for compatibility; no effect in rledger |
 | `display_precision` | string | - | Per-currency display precision (e.g. `USD:0.01`) |
 | `allow_pipe_separator` | bool | FALSE | Allow pipe separator (deprecated) |
+| `allow_deprecated_none_for_tags_and_links` | bool | FALSE | Accepted for compatibility; no effect in rledger (deprecated, `E7004`) |
 | `documents` | string | - | Documents root directory |
 | `plugin_processing_mode` | string | default | Plugin mode |
 | `plugin` | string | - | Read-only (`E7005`); use the `plugin` directive |

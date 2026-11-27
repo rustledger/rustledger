@@ -1,19 +1,17 @@
-//! Drift guard for [`BcLexer`], the recovery model's port of beancount
-//! 3.2.3's lexer: on every pinned input, its tokens must be beancount's own,
-//! as `beancount.parser.lexer.lex_iter_string` reports them (called as a
-//! black box, through pta-standards' `ptadiff` package, whose forked workers
-//! survive beancount's segfaults).
+//! Drift guard for the reference oracle's lexer
+//! ([`super::oracle::beancount::lexer`], written from pta-standards'
+//! clean-room `LEXICAL.md`): on every pinned input, its tokens must be
+//! beancount 3.2.3's own, as `beancount.parser.lexer.lex_iter_string` reports
+//! them (called as a black box, through pta-standards' `ptadiff` package,
+//! whose forked workers survive beancount's segfaults).
 //!
 //! Compared per token: beancount's token name and the token's byte span. The
-//! recovery model ([`super::recovery`]) predicts which lines beancount
-//! reports from these tokens, so a token it reads differently is a wrong
-//! prediction waiting for an input to hit it; the parse-error parity harness
-//! only sees such a drift once it changes a reported line.
-//!
-//! `BcLexer` lumps punctuation and the `TRUE` / `FALSE` / `NULL` literals
-//! into [`Bc::Other`]; the recovery never needs them apart. Each `Other`
-//! token's text names exactly one beancount token (`beancount_name`), so the
-//! comparison is as strict as a split class would make it.
+//! oracle replays beancount's grammar over these tokens to say which lines
+//! beancount reports, so a token it reads differently is a wrong line waiting
+//! for an input to hit it; the parse-error parity harness only sees such a
+//! drift once it changes a reported line. (The oracle's whole verdict, its
+//! syntax errors included, is checked against beancount by
+//! `scripts/compat-beancount-oracle-drift.py`.)
 //!
 //! Inputs: every git-tracked `.beancount` / `.bean` file and the two parser
 //! fuzz targets' crash regressions; with `RLEDGER_BC_LEXER_DRIFT_FUZZ_DIR`,
@@ -34,85 +32,12 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::recovery::{Bc, BcLexer, Kw};
-
-/// beancount's name for a token `BcLexer` reads as `t` over `text`.
-fn beancount_name(t: Bc, text: &str) -> &'static str {
-    match t {
-        Bc::Eol => "EOL",
-        Bc::Eof => "EOF",
-        Bc::Indent => "INDENT",
-        Bc::Date => "DATE",
-        Bc::Txn => "TXN",
-        Bc::Flag => "FLAG",
-        Bc::Asterisk => "ASTERISK",
-        Bc::Hash => "HASH",
-        Bc::Capital => "CAPITAL",
-        Bc::Str => "STRING",
-        Bc::Account => "ACCOUNT",
-        Bc::Currency => "CURRENCY",
-        Bc::Number => "NUMBER",
-        Bc::Tag => "TAG",
-        Bc::Link => "LINK",
-        Bc::Key => "KEY",
-        Bc::Colon => "COLON",
-        Bc::Pipe => "PIPE",
-        Bc::Error => "error",
-        Bc::Kw(k) => match k {
-            Kw::Balance => "BALANCE",
-            Kw::Open => "OPEN",
-            Kw::Close => "CLOSE",
-            Kw::Commodity => "COMMODITY",
-            Kw::Pad => "PAD",
-            Kw::Event => "EVENT",
-            Kw::Price => "PRICE",
-            Kw::Note => "NOTE",
-            Kw::Document => "DOCUMENT",
-            Kw::Query => "QUERY",
-            Kw::Custom => "CUSTOM",
-            Kw::Pushtag => "PUSHTAG",
-            Kw::Poptag => "POPTAG",
-            Kw::Pushmeta => "PUSHMETA",
-            Kw::Popmeta => "POPMETA",
-            Kw::Option => "OPTION",
-            Kw::Plugin => "PLUGIN",
-            Kw::Include => "INCLUDE",
-        },
-        Bc::Other => match text {
-            "," => "COMMA",
-            "~" => "TILDE",
-            "+" => "PLUS",
-            "-" => "MINUS",
-            "/" => "SLASH",
-            "(" => "LPAREN",
-            ")" => "RPAREN",
-            "@@" => "ATAT",
-            "@" => "AT",
-            "{{" => "LCURLCURL",
-            "}}" => "RCURLCURL",
-            "{" => "LCURL",
-            "}" => "RCURL",
-            "TRUE" | "FALSE" => "BOOL",
-            "NULL" => "NONE",
-            // Unreachable while `Other` covers only the texts above; a new
-            // one shows up as a mismatch naming it.
-            _ => "OTHER?",
-        },
-    }
-}
-
-/// `(name, start, end)` for each of `BcLexer`'s tokens over `src`, without
-/// its end-of-input token (beancount's iterator has none).
+/// `(name, start, end)` for each of the reference lexer's tokens over `src`
+/// (it has no end-of-input token, as beancount's iterator has none).
 fn bc_lexer_tokens(src: &str) -> Vec<(String, usize, usize)> {
-    BcLexer::at_line_start(src, 0)
-        .filter(|(t, _)| *t != Bc::Eof)
-        .map(|(t, r)| {
-            (
-                beancount_name(t, &src[r.clone()]).to_string(),
-                r.start,
-                r.end,
-            )
-        })
+    super::oracle::beancount::reference_tokens(src)
+        .into_iter()
+        .map(|(name, _, start, end)| (name.to_string(), start, end))
         .collect()
 }
 
@@ -354,14 +279,14 @@ fn test_bc_lexer_matches_beancount_lex_iter_string() {
         let lo = at.saturating_sub(2);
         let _ = writeln!(
             report,
-            "{id}: {text:?}\n   BcLexer   {:?}\n   beancount {:?}",
+            "{id}: {text:?}\n   reference {:?}\n   beancount {:?}",
             &mine[lo..mine.len().min(at + 3)],
             &theirs[lo..theirs.len().min(at + 3)],
         );
     }
     assert!(
         differ.is_empty(),
-        "BcLexer reads {} of {compared} inputs differently from beancount's lexer \
+        "the reference lexer reads {} of {compared} inputs differently from beancount's lexer \
          ({crashed} crashed beancount's lexer); first ones:\n{report}",
         differ.len()
     );

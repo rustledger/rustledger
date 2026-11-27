@@ -12,7 +12,7 @@
 # fall in each ptadiff category key (`#@category-key`), computed with
 # pta-standards' tooling/differential at `#@ptadiff-rev`.
 #@fuzz-commit 9bc79f4f35f52c50813164f43307e7d151d70d8c
-#@ptadiff-rev 2b844dc283f5feded147c13fb3be4474a73af0e6
+#@ptadiff-rev 3eacb4c1c31b2bbfd565fdd95ccd26a1de222a4b
 #@category-key shape
 #@generators g1:1:2000 g1b:1:2000 g2:1:2000 g2b:1:2000 g3:1:2000 g3b:1:2000
 #@inputs fuzz 44589

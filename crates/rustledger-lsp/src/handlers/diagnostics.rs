@@ -1188,7 +1188,12 @@ pub fn all_diagnostics(
                 .chain(parse_result_to_plugins(&result.plugins, current_fid))
                 .collect();
 
-            if merged_plugins.is_empty() {
+            // Not only for `plugin` lines: `option "documents"` runs document
+            // discovery, an implicit synth plugin, as `check` runs it
+            // (`rustledger_loader::run_plugins`). Without a `plugin` line it
+            // was skipped, so a ledger's discovered documents and their
+            // warnings were missing.
+            if merged_plugins.is_empty() && ledger.options.documents.is_empty() {
                 None
             } else {
                 Some(PluginContext {
@@ -1197,7 +1202,7 @@ pub fn all_diagnostics(
                     source_map: &ledger.source_map,
                 })
             }
-        } else if !result.plugins.is_empty() {
+        } else {
             // Single-file mode: build plugin list from ParseResult
             merged_plugins = parse_result_to_plugins(&result.plugins, 0);
             single_file_options = {
@@ -1207,27 +1212,36 @@ pub fn all_diagnostics(
                 }
                 opts
             };
-            // Build a SourceMap with the current buffer so run_plugins()
-            // can attach filename/line info to wrappers and reconstruct
-            // spans when converting back. Use an absolute path so that
-            // document directory resolution in run_plugins (which uses
-            // the first file's parent as base_dir) doesn't produce an
-            // empty path.
-            single_file_source_map = {
-                let mut sm = SourceMap::new();
-                sm.add_file(
-                    std::path::PathBuf::from("/tmp/rustledger-lsp-buffer.beancount"),
-                    SourceText::from(source),
-                );
-                sm
-            };
-            Some(PluginContext {
-                plugins: &merged_plugins,
-                file_options: &single_file_options,
-                source_map: &single_file_source_map,
-            })
-        } else {
-            None
+            // As for a loaded ledger above: `option "documents"` alone runs
+            // document discovery too.
+            if merged_plugins.is_empty() && single_file_options.documents.is_empty() {
+                None
+            } else {
+                // Build a SourceMap with the current buffer so run_plugins()
+                // can attach filename/line info to wrappers and reconstruct
+                // spans when converting back. Its path is the buffer's own,
+                // as the loader's is the file's: document discovery resolves
+                // relative `option "documents"` directories against it and
+                // places the documents it finds in it, as `check` does. A
+                // buffer with no path on disk gets an absolute stand-in, so
+                // the resolution does not produce an empty path.
+                single_file_source_map = {
+                    let mut sm = SourceMap::new();
+                    sm.add_file(
+                        current_file_path.filter(|p| p.is_absolute()).map_or_else(
+                            || std::path::PathBuf::from("/tmp/rustledger-lsp-buffer.beancount"),
+                            std::path::Path::to_path_buf,
+                        ),
+                        SourceText::from(source),
+                    );
+                    sm
+                };
+                Some(PluginContext {
+                    plugins: &merged_plugins,
+                    file_options: &single_file_options,
+                    source_map: &single_file_source_map,
+                })
+            }
         };
 
         let validation_diagnostics = validation_errors_to_diagnostics(
@@ -1434,7 +1448,9 @@ pub(crate) fn ledger_diagnostics_multi(
         .iter()
         .map(|(fid, parsed)| (*fid, parsed.directives.as_slice()))
         .collect();
-    let plugin_ctx = if merged_plugins.is_empty() {
+    // `option "documents"` alone runs document discovery, as in
+    // `all_diagnostics`.
+    let plugin_ctx = if merged_plugins.is_empty() && ledger.options.documents.is_empty() {
         None
     } else {
         Some(PluginContext {
@@ -3181,6 +3197,60 @@ plugin "auto_accounts"
             !codes.iter().any(|c| c == "E1001"),
             "auto_accounts should still auto-generate opens. Got: {codes:?}"
         );
+    }
+
+    /// `option "documents"` runs document discovery, as `rledger check` runs
+    /// it, with or without a `plugin` line, its relative directory resolved
+    /// next to the buffer's file. The LSP ran it only beside a `plugin` line,
+    /// and then resolved the directory next to a stand-in path in `/tmp`, so
+    /// a document filed under an account no directive names went unreported
+    /// (found by the cross-surface drift guard,
+    /// `rustledger-surface-parity-tests`).
+    #[test]
+    fn test_document_discovery_runs_as_check_runs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/Expenses/Gone")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/Expenses/Gone/2024-01-01.bill.pdf"),
+            "x",
+        )
+        .unwrap();
+        let path = dir.path().join("ledger.beancount");
+        for plugin in ["", "plugin \"beancount.plugins.leafonly\"\n"] {
+            let source =
+                format!("option \"documents\" \"docs\"\n{plugin}2024-01-01 open Assets:Bank\n");
+            std::fs::write(&path, &source).unwrap();
+            let result = parse(&source);
+            let diagnostics = all_diagnostics(
+                &result,
+                &source,
+                None,
+                None,
+                Some(&path),
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let found: Vec<(String, &str)> = diagnostics
+                .iter()
+                .map(|d| (get_code(d), d.message.as_str()))
+                .collect();
+            let expected = format!(
+                "1 document(s) reference unknown account 'Expenses:Gone' and were skipped \
+                 (no directive names that account): {}",
+                // Joined by component, so the separators are the platform's.
+                dir.path()
+                    .join("docs")
+                    .join("Expenses")
+                    .join("Gone")
+                    .join("2024-01-01.bill.pdf")
+                    .display()
+            );
+            assert_eq!(
+                found,
+                [("PLUGIN".to_string(), expected.as_str())],
+                "with {plugin:?}"
+            );
+        }
     }
 
     /// Companion to the multi-file case: the SINGLE-FILE site, reached when

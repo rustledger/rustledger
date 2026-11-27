@@ -321,6 +321,7 @@ fn options(o: ffi::LedgerOptions) -> wit::LedgerOptions {
 }
 
 /// `ledger.load` — parse + book `source`, returning a typed load result.
+///
 /// `expand_pads` materializes `pad` directives into synthesized `Padding`
 /// transactions (balance consumers opt in); default-off is source-faithful (#1628).
 pub fn load(source: &str, filename: &str, expand_pads: bool) -> out::LoadResult {
@@ -1341,13 +1342,15 @@ pub fn load_file(
     }
 }
 
-/// Validate the ledger at `path` as `rledger check` does: loaded as a file,
-/// its includes resolved (confined to the ledger's tree, as `load-file` and
-/// `query-file` confine them by default), and validated by the canonical
-/// pipeline, so every finding is reported at its own file and line (#2935).
-/// It used to read the text and validate it as one source, with no include
-/// resolution, so a ledger split across files was validated without most of
-/// its directives. A load failure becomes an invalid result carrying it.
+/// Validate the ledger at `path` as `rledger check` does.
+///
+/// It is loaded as a file, its includes resolved (confined to the ledger's
+/// tree, as `load-file` and `query-file` confine them by default), and
+/// validated by the canonical pipeline, so every finding is reported at its
+/// own file and line (#2935). It used to read the text and validate it as one
+/// source, with no include resolution, so a ledger split across files was
+/// validated without most of its directives. A load failure becomes an
+/// invalid result carrying it.
 pub fn validate_file(path: &str) -> out::ValidateResult {
     let fs = Box::new(HostDecryptFs(rustledger_loader::DiskFileSystem));
     match ffi::helpers::load_file_with_fs(std::path::Path::new(path), true, Some(fs), true) {
@@ -1365,12 +1368,14 @@ pub fn validate_file(path: &str) -> out::ValidateResult {
     }
 }
 
-/// Run a single BQL query against the ledger at `path`, loaded as a file, as
-/// a [`SessionState::from_file`] with no extra plugins loads it: its includes
-/// resolve (confined to the ledger's tree, as `load-file` confines them by
-/// default) and the source columns name the real files, as bean-query's do
-/// (#2825). It used to read the text and query it as an unnamed source, with
-/// no include resolution. A load failure becomes an errored result.
+/// Run a single BQL query against the ledger at `path`.
+///
+/// It is loaded as a file, as a `SessionState::from_file` with no extra
+/// plugins loads it: its includes resolve (confined to the ledger's tree, as
+/// `load-file` confines them by default) and the source columns name the real
+/// files, as bean-query's do (#2825). It used to read the text and query it
+/// as an unnamed source, with no include resolution. A load failure becomes an
+/// errored result.
 pub fn query_file(path: &str, query_str: &str) -> out::QueryResult {
     SessionState::from_file(path, false, &[]).query(query_str)
 }

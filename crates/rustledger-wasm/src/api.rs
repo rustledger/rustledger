@@ -120,6 +120,14 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
 /// Returns a `ValidationResult` indicating whether the ledger is valid.
 #[wasm_bindgen(js_name = "validateSource")]
 pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
+    to_js(&validate_source_result(source))
+}
+
+/// What [`validate_source`] answers with, as Rust, so the cross-surface drift
+/// guard (`rustledger-surface-parity-tests`) runs the export's own body.
+// `pub` for `crate::surface_probe`. `api` is a private module, so this is
+// crate-private anyway, and `pub(crate)` trips `clippy::redundant_pub_crate`.
+pub fn validate_source_result(source: &str) -> ValidationResult {
     let load = load_and_book(source);
     // Validation runs whatever loaded, as `rledger check` does (#2937); an
     // invalid option, reported beside it, does not stop it (#2299).
@@ -129,13 +137,12 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     let mut errors = load.reported_errors_beside_validation();
     errors.extend(validation_errors);
 
-    let result = ValidationResult {
+    ValidationResult {
         // Warnings do not invalidate a ledger (matching `rledger check`, which
         // exits 0 on warning-only input); only actual errors do.
         valid: !has_fatal(&errors),
         errors,
-    };
-    to_js(&result)
+    }
 }
 
 /// Run a BQL query on a Beancount source string.
@@ -711,8 +718,6 @@ pub fn validate_with_filesystem(
 /// Returns a `ValidationResult` indicating whether the ledger is valid.
 #[wasm_bindgen(js_name = "validateMultiFile")]
 pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, JsError> {
-    use rustledger_loader::VirtualFileSystem;
-
     // Parse the JavaScript object to a HashMap
     let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
         .map_err(|e| JsError::new(&format!("Invalid files object: {e}")))?;
@@ -721,17 +726,33 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
         return Err(JsError::new("Files map cannot be empty"));
     }
 
+    to_js(&validate_file_map(file_map, entry_point).map_err(|e| JsError::new(&e))?)
+}
+
+/// What [`validate_multi_file`] answers with once the files are a map, as
+/// Rust, so the cross-surface drift guard runs the export's own body.
+///
+/// # Errors
+///
+/// The message `validateMultiFile` throws when `entry_point` is not in the map.
+// `pub` for `crate::surface_probe` (see `validate_source_result`).
+pub fn validate_file_map(
+    file_map: HashMap<String, String>,
+    entry_point: &str,
+) -> Result<ValidationResult, String> {
+    use rustledger_loader::VirtualFileSystem;
+
     // Create virtual filesystem with all files
     let vfs = VirtualFileSystem::from_files(file_map);
 
     // Check entry point exists using VFS path normalization
     if !vfs.exists(Path::new(entry_point)) {
-        return Err(JsError::new(&format!(
+        return Err(format!(
             "Entry point '{entry_point}' not found in files map"
-        )));
+        ));
     }
 
-    to_js(&validate_with_filesystem(Box::new(vfs), entry_point))
+    Ok(validate_with_filesystem(Box::new(vfs), entry_point))
 }
 
 /// Validate a ledger whose files the HOST supplies, one at a time.

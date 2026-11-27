@@ -3237,8 +3237,12 @@ plugin "auto_accounts"
             let expected = format!(
                 "1 document(s) reference unknown account 'Expenses:Gone' and were skipped \
                  (no directive names that account): {}",
+                // Joined by component, so the separators are the platform's.
                 dir.path()
-                    .join("docs/Expenses/Gone/2024-01-01.bill.pdf")
+                    .join("docs")
+                    .join("Expenses")
+                    .join("Gone")
+                    .join("2024-01-01.bill.pdf")
                     .display()
             );
             assert_eq!(

@@ -734,21 +734,25 @@ pub(crate) fn map_validation_to_diagnostics(
             // shaped (a typo of a native plugin) gets no E8006: the loader
             // reports it as E8001 "Plugin not found" instead (#2486).
             // A plugin's pass is not known here, so it is native if it is
-            // native in either; same lookup as resolution.
-            let is_native = [
-                rustledger_plugin::PluginPass::Synth,
-                rustledger_plugin::PluginPass::Regular,
-            ]
-            .into_iter()
-            .any(|pass| {
-                rustledger_plugin::find_native_plugin(
-                    &plugin.name,
-                    plugin.force_python,
-                    pass,
-                    registry,
-                )
-                .is_some()
-            });
+            // native in either; same lookup as resolution. `auto` is native
+            // when each of its parts is, each in its own pass.
+            let is_native =
+                rustledger_plugin::plugin_parts(&plugin.name, plugin.force_python).all(|name| {
+                    [
+                        rustledger_plugin::PluginPass::Synth,
+                        rustledger_plugin::PluginPass::Regular,
+                    ]
+                    .into_iter()
+                    .any(|pass| {
+                        rustledger_plugin::find_native_plugin(
+                            name,
+                            plugin.force_python,
+                            pass,
+                            registry,
+                        )
+                        .is_some()
+                    })
+                });
             if is_native {
                 continue;
             }

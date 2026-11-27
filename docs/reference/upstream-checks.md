@@ -42,7 +42,7 @@ row for each. Their full parity is the job of the parse-error-parity CI job.
 A row's `case` names a small ledger in `cases/`. The test runs that ledger
 through both `rledger check` and beancount's `bean-check`, and checks that:
 
-- rledger reports the row's `code` on exactly the row's lines. A row with no
+- rledger reports the row's `code` on exactly the row's lines. A `code` of the form `E8004|E8005` accepts any of the listed codes, for a code that depends on the build's features. A row with no
   `code` must produce no errors at all.
 - beancount reports the row's message on exactly the row's lines. The message
   is matched against the template in the id, or against the substring in

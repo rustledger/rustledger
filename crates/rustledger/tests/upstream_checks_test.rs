@@ -332,7 +332,10 @@ fn upstream_checks_rledger_matches_the_table() {
         } else {
             errors
                 .iter()
-                .filter(|d| d["code"] == code)
+                // `E8004|E8005`: any of these. A code can depend on the
+                // build's features (a Python module name is E8004 with the
+                // Python runtime compiled in, E8005 without it).
+                .filter(|d| code.split('|').any(|c| d["code"] == c))
                 .filter_map(|d| d["line"].as_i64())
                 .collect()
         };

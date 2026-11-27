@@ -10097,57 +10097,6 @@ fn quiet_after_invalid_tokens(
     });
 }
 
-/// Whether `line` holds a number beancount's lexer rejects: a run of digits
-/// and commas, ending in a digit, whose commas are not thousands separators
-/// (`1,50`, `1234,567`, `1,000,0`; beancount reports `ValueError: Invalid
-/// number format`). Its integer part must be one to three digits and then
-/// groups of three (`01,000`, `12,345,678` are numbers). One more form passes
-/// beancount's validator, though its documented rule does not allow it: a
-/// single digit, a doubled comma, then groups of three (`1,,000`,
-/// `1,,000,000`, `0,,111`; `11,,111` and `1,,111,,111` are errors), checked
-/// against bean-check 3.2.3 over every run of digits and commas up to nine
-/// long (#2976). The lexer here reads
-/// such a run as numbers and commas, which the grammar rejects. A run starts
-/// where a number token starts, so the digits of a date or an account do not
-/// count. Linear in the line.
-fn holds_a_misgrouped_number(line: &str) -> bool {
-    use crate::logos_lexer::{Token, TokenIter};
-    if !line.contains(',') {
-        return false;
-    }
-    let bytes = line.as_bytes();
-    let mut scanned_to = 0usize;
-    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
-        if !matches!(token, Token::Number(_)) || span.start < scanned_to {
-            return false;
-        }
-        let mut end = span.start;
-        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b',') {
-            end += 1;
-        }
-        while end > span.start && bytes[end - 1] == b',' {
-            end -= 1;
-        }
-        scanned_to = end;
-        let run = &line[span.start..end];
-        if !run.contains(',') {
-            return false;
-        }
-        let mut groups = run.split(',').peekable();
-        let first = groups.next().map_or(0, str::len);
-        // beancount's one doubled comma: right after a single leading digit.
-        if first == 1 && groups.peek().is_some_and(|g| g.is_empty()) {
-            groups.next();
-        }
-        let mut any = false;
-        let rest_ok = groups.all(|g| {
-            any = true;
-            g.len() == 3
-        });
-        !((1..=3).contains(&first) && any && rest_ok)
-    })
-}
-
 /// Whether `line` holds a lone capital beancount reads as the start of an
 /// invalid token, which the lexer here reads as a one-letter currency or
 /// flag: one glued to the character after it (`T#!`, `A$`, `B\r` on a CRLF
@@ -10371,143 +10320,32 @@ fn report_no_metadata_continuations(
     }
 }
 
-/// Whether the transaction `source` starts with holds an invalid token, by
-/// the rule the parser itself applies (`holds_an_invalid_token`).
+/// Whether beancount discards the transaction `source` starts with: its
+/// grammar builds no statement there (`drops_statement`, from the reduction
+/// trace of beancount's own parse, the error oracle's).
 ///
 /// `source` is a transaction's own text, from its date to the end of its
-/// last line, as its directive's span gives it. beancount's grammar never
-/// builds such a transaction (its recovery discards the whole statement),
-/// while rledger keeps it under error recovery (#2932) with what recovery
-/// could read: a posting's price or cost after the token is gone. The
-/// validator asks this before it reports a balance residual for a
-/// transaction (#2954), so the parser's rule is the only one. `false` when
+/// last line, as its directive's span gives it, and the line after it.
+/// rledger keeps such a transaction under error recovery (#2932) with what
+/// recovery could read: a posting's price or cost after an invalid token is
+/// gone. The validator asks this before it reports a balance residual for a
+/// transaction (#2954): beancount checks no balance on a statement it does
+/// not build. That covers an invalid token or a grammar failure on the
+/// transaction's own lines (`  2024-13-45`, `  5`, `  1,23`; #2987), and a
+/// line right after it led by a token beancount's lexer rejects, where its
+/// statement still waits for an indented line (a BOM, `$x`, `2024-13-45`;
+/// #2956, #2976). A builder's error, or one of rledger's own, builds the
+/// statement all the same and leaves the residual reported. `false` when
 /// `source` does not start with a transaction.
-///
-/// A line led by a token beancount's lexer rejects right where the
-/// transaction's block would go on (the next line, with no blank or
-/// column-0 comment line between; an indented comment does not end the
-/// block) counts too: a line a BOM starts (#2956), or one led by any other
-/// invalid token (`$x`, `x`, `2024-13-45`, `1,50`, `T@`; #2976,
-/// `line_leads_with_an_invalid_token`). beancount's statement fails at
-/// that token and is discarded with everything before it, while here the
-/// block ends at the line and the transaction is kept with the postings
-/// above it. A directive's span runs to the next directive's start, so
-/// `source` holds that line when there is one. After a blank or column-0
-/// comment line the transaction is complete in beancount too, and kept with
-/// its findings; so it is when the line starts with a token beancount lexes
-/// (an account, a number, `~`, `*`) or with BOMs that start an account in
-/// beancount (`<BOM>Assets:A`, `<BOM>assets:A`: `bom_led_account`), where
-/// its grammar reduces the transaction before it fails at that token.
-///
-/// So does an error on the transaction's own lines at which beancount's
-/// grammar or lexer fails the statement (`  2024-13-45`, `  5`; #2987,
-/// `fails_inside`); an error its builder reports while it still builds the
-/// transaction, or one of rledger's own, leaves the residual reported.
 #[must_use]
 pub fn transaction_holds_invalid_token(source: &str) -> bool {
     let root = super::parser::parse_structured(source);
-    let Some(txn) = root
-        .children()
+    root.children()
         .find(|n| n.kind() == crate::SyntaxKind::TRANSACTION)
-    else {
-        return false;
-    };
-    holds_an_invalid_token(txn.green())
-        || txn
-            .next_sibling()
-            .and_then(|next| next.first_token())
-            .is_some_and(|t| line_leads_with_an_invalid_token(source, &t))
-        || fails_inside(source, txn.text_range())
-}
-
-/// Whether the parser reports an error inside `range`, the transaction's own
-/// node in `source`, at which beancount's grammar or lexer fails the
-/// statement (#2987, [`fails_the_statement`]). Its recovery then discards the
-/// transaction: no residual. `holds_an_invalid_token` already answers for an
-/// invalid token, so this runs the full parse only for a transaction that
-/// holds none.
-fn fails_inside(source: &str, range: rowan::TextRange) -> bool {
-    // `source` starts at the transaction's date, so it has no leading BOM
-    // and the parser's spans are the tree's offsets.
-    let span = usize::from(range.start())..usize::from(range.end());
-    crate::parse(source)
-        .errors
-        .iter()
-        .any(|e| span.contains(&e.span.start) && fails_the_statement(&e.kind))
-}
-
-/// Whether `kind` is an error at which beancount's lexer or grammar fails a
-/// statement, so its recovery builds no transaction there (#2987): a date
-/// that is no calendar date (its lexer raises), a character or string its
-/// lexer refuses, and the parser's grammar failures, "unexpected input" (the
-/// line's tokens fit no rule; `  5`, `  "s"`, `  1,50`) and an unclosed cost
-/// spec.
-///
-/// An allow-list on purpose: every other error keeps the transaction's
-/// residual. Those include the checks beancount's builder makes while it
-/// still builds the transaction (a duplicate cost, a negative price, cost and
-/// price currencies that differ, a tag line after the first posting, a
-/// repeated metadata key) and rledger's own diagnostics that beancount does
-/// not give (an amount past `Decimal`'s precision, the deprecated pipe, a
-/// BOM read into an account, trailing tokens after an amount that beancount
-/// reads as one number, `1,,000`). A new diagnostic is on that side too until
-/// it is added here, so it can only leave a residual reported, never drop one
-/// beancount reports. "unexpected input" is the parser's one generic grammar
-/// error, identified by its message as the other recovery passes do.
-fn fails_the_statement(kind: &crate::ParseErrorKind) -> bool {
-    use crate::ParseErrorKind as K;
-    match kind {
-        K::InvalidDate(_)
-        | K::InvalidDateValue(_)
-        | K::UnexpectedChar(_)
-        | K::UnexpectedEof
-        | K::UnclosedString
-        | K::InvalidEscape(_)
-        | K::IndentationError => true,
-        K::SyntaxError(message) => {
-            message == "unexpected input"
-                || message.starts_with("unexpected input: ")
-                || message.starts_with("unclosed cost specification")
-        }
-        _ => false,
-    }
-}
-
-/// Whether `first`, the first token of the line after a transaction's block,
-/// starts that line and is a token beancount's lexer rejects (#2976): an
-/// invalid token here (`$x`, `x`, `k:`, a control character), a date that is
-/// no calendar date (`2024-13-45`: `parse_date_token`), a number beancount
-/// refuses (`1,50`: `holds_a_misgrouped_number`), or a lone capital glued to
-/// what follows it (`T@`: `holds_a_glued_lone_capital`), which this lexer
-/// reads as tokens of their own. beancount's statement fails at that token,
-/// and its recovery discards the transaction before it. A token beancount
-/// lexes (an account, a number, `~`, `*`, a tag, a keyword) fails its grammar
-/// only once the transaction is reduced, so the transaction is kept; so it is
-/// for BOMs beancount reads into an account (`<BOM>Assets:A`,
-/// `bom_led_account`), #2956.
-fn line_leads_with_an_invalid_token(source: &str, first: &crate::SyntaxToken) -> bool {
-    use crate::SyntaxKind as K;
-    let start = usize::from(first.text_range().start());
-    if start == 0 || source.as_bytes()[start - 1] != b'\n' {
-        return false;
-    }
-    let rest = &source[start..];
-    let line = rest.find('\n').map_or(rest, |end| &rest[..=end]);
-    // The token's word, with the blank after it when there is one, so a
-    // lone capital is glued only to what is in the word.
-    let word = line.find([' ', '\t']).map_or(line, |blank| &line[..=blank]);
-    match first.kind() {
-        K::ERROR_TOKEN => {
-            !is_line_start_bom_token(source, start, first.text())
-                || crate::logos_lexer::bom_led_account(rest).is_none()
-        }
-        K::DATE => parse_date_token(first.text()).is_none(),
-        K::NUMBER => holds_a_misgrouped_number(word),
-        K::CURRENCY | K::FLAG => {
-            first.text().len() == 1 && holds_a_glued_lone_capital(word, !line.ends_with('\n'))
-        }
-        _ => false,
-    }
+        .is_some_and(|txn| {
+            let at = usize::from(txn.text_range().start());
+            source.get(at..).is_some_and(super::drops_statement)
+        })
 }
 
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than

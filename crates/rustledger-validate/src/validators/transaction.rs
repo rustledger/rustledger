@@ -181,19 +181,34 @@ fn kept_under_error_recovery(
     options: &crate::ValidationOptions,
     location: Option<(rustledger_parser::Span, u16)>,
 ) -> bool {
-    let Some((span, file_id)) = location else {
-        return false;
-    };
-    let Some(lines) = options.source_lines.as_ref() else {
-        return false;
-    };
-    lines
-        .text(file_id, span.start..span.end)
-        .map(|mut text| {
-            text.push_str(&line_at(lines, file_id, span.end));
-            text
-        })
+    directive_text(options, location)
         .is_some_and(|text| rustledger_parser::transaction_holds_invalid_token(&text))
+}
+
+/// Whether beancount discards the directive at `location`, read from its
+/// source text ([`rustledger_parser::beancount_drops_directive`]): it builds
+/// nothing there, so it checks nothing either. Asked only once a check has
+/// found something. `false` without a location or without the text.
+pub fn dropped_by_beancount(
+    options: &crate::ValidationOptions,
+    location: Option<(rustledger_parser::Span, u16)>,
+) -> bool {
+    directive_text(options, location)
+        .is_some_and(|text| rustledger_parser::beancount_drops_directive(&text))
+}
+
+/// The text of the directive at `location` and the line after it
+/// ([`line_at`]), if the source text is at hand.
+fn directive_text(
+    options: &crate::ValidationOptions,
+    location: Option<(rustledger_parser::Span, u16)>,
+) -> Option<String> {
+    let (span, file_id) = location?;
+    let lines = options.source_lines.as_ref()?;
+    lines.text(file_id, span.start..span.end).map(|mut text| {
+        text.push_str(&line_at(lines, file_id, span.end));
+        text
+    })
 }
 
 /// The line of file `file_id` that starts at byte `start`, with its line

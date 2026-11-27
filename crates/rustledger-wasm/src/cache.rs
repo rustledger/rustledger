@@ -795,7 +795,11 @@ use crate::types::{Error, LedgerOptions};
 /// v149: loader v82, unchanged; parse errors move: the hand-modeled
 /// recovery pass is gone and the error oracle alone decides the lines
 /// beancount's recovery keeps quiet. A source with a parse error keeps one.
-pub const CACHE_VERSION: u32 = 149;
+/// v150: loader v82, unchanged; validation findings move: a transaction or a
+/// `balance` beancount's grammar discards gets no balance finding (E3001,
+/// E2001, E2002) beside its parse error. Every such source has a parse error,
+/// which the loader's cache is never saved for.
+pub const CACHE_VERSION: u32 = 150;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

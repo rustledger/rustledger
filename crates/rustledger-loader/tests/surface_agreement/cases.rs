@@ -207,6 +207,43 @@ garbage
         closes_nonempty: false,
         refused: &[],
     },
+    // beancount's grammar discards a transaction whose posting holds a number
+    // its lexer rejects (`1,23`) and a `balance` whose tolerance stands after
+    // its currency: each statement's one error is its parse error, and
+    // beancount checks neither. rledger kept both under error recovery and
+    // reported a residual (E3001) and a tolerance failure (E2002) beside it.
+    // The error oracle's reduction trace says which statements beancount
+    // drops (`beancount_drops_directive`).
+    SurfaceCase {
+        name: "no balance check for a transaction holding a misgrouped number",
+        source: "2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-01-02 * \"x\"
+  Assets:A  1,23 USD
+  Assets:B  -1.23 USD
+",
+        findings: &[Finding {
+            code: "P0012",
+            line: 5,
+            message: "parse error: unexpected trailing tokens after posting amount",
+        }],
+        closes_nonempty: false,
+        refused: &[],
+    },
+    SurfaceCase {
+        name: "no balance check for a balance beancount's grammar discards",
+        source: "2024-01-01 open Assets:A
+2024-01-02 balance Assets:A 1 USD ~ 0.1
+",
+        findings: &[Finding {
+            code: "P0012",
+            line: 2,
+            message: "parse error: unexpected \"~\" in the balance directive",
+        }],
+        closes_nonempty: false,
+        refused: &[],
+    },
     SurfaceCase {
         name: "no balance check for a transaction holding an invalid token",
         source: "2024-01-01 open Assets:A

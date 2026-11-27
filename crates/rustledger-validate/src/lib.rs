@@ -1024,7 +1024,18 @@ fn validate_phase_inner<D: ValidatableDirective>(
             }
             (Phase::Late, Directive::Balance(bal)) => {
                 validate_balance_account(state, bal, &mut errors);
+                let before = errors.len();
                 validate_balance_late(state, bal, index, &mut errors);
+                // A `balance` beancount's grammar discards (`1 USD ~ 0.1`,
+                // the tolerance after the currency) is checked nowhere
+                // there: its comparison here would be a finding about a
+                // directive beancount never built, beside the parse error
+                // already reported for it.
+                if errors.len() > before
+                    && validators::transaction::dropped_by_beancount(&state.options, d.span_info())
+                {
+                    errors.truncate(before);
+                }
                 validate_balance_duplicate(state, bal, &mut errors);
             }
             // ── Everything else: skipped in this phase ──

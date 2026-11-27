@@ -381,17 +381,10 @@ impl CacheEntry {
             // genuinely non-UTF-8 file pays for the lossy rebuild, and that
             // branch produces the identical string.
             if let Ok(bytes) = fs::read(&path) {
-                let content = match String::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-                };
+                let content = crate::SourceText::from_utf8_lossy(bytes);
                 // Identity re-derived the way the loader derives it.
                 let canonical = crate::FileSystem::normalize(&crate::DiskFileSystem, &path);
-                ids.push(Some(source_map.add_opened_file(
-                    canonical,
-                    path,
-                    content.into(),
-                )));
+                ids.push(Some(source_map.add_opened_file(canonical, path, content)));
                 continue;
             }
             ids.push(None);
@@ -921,13 +914,19 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     (`; c\rmore`, which an older entry holds as `; c`). The layout is
 ///     unchanged. `rustledger-wasm` archives the same directives, so it bumps
 ///     its own version too.
+/// v82: CACHED VALUES changed (after #3060's v81). A file with bytes that
+///     are not UTF-8 has parse errors now (an invalid token, or an
+///     undecodable string) where it had none, and a load with parse errors
+///     is never cached; an older entry for such a file would keep serving
+///     the error-free load. The layout is unchanged; `rustledger-wasm` only
+///     moves its pin.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 81;
+pub const CACHE_VERSION: u32 = 82;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1830,7 +1829,8 @@ mod tests {
         // moves, so the arrays still hold.
         // v81 runs a comment through a mid-line `\r` (parser output only);
         // no archived encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 81;
+        // v82 reports invalid UTF-8; no archived encoding moves.
+        const FIXTURE_VERSION: u32 = 82;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -2003,7 +2003,8 @@ mod tests {
         // moves, so the hash below is unchanged.
         // v81 runs a comment through a mid-line `\r` (parser output only);
         // the `MetaValue` layout does not move, so the hash is unchanged.
-        const FIXTURE_VERSION: u32 = 81;
+        // v82 reports invalid UTF-8; no archived encoding moves.
+        const FIXTURE_VERSION: u32 = 82;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

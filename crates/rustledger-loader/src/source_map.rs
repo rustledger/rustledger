@@ -17,8 +17,13 @@ use std::sync::Arc;
 /// `SourceText::from(&*arc)`, which copies. Like `Arc<str>`, it derefs to
 /// `str` and implements `Display`, `Hash` and `Borrow<str>`, so it formats
 /// as the text and a `HashMap<SourceText, _>` can be looked up by `&str`.
+///
+/// A file whose bytes are not all UTF-8 is decoded lossily (each invalid
+/// sequence becomes U+FFFD) by [`SourceText::from_utf8_lossy`], which keeps
+/// where those sequences were ([`SourceText::invalid_utf8`]), so the loader
+/// can report them as beancount does instead of accepting them silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceText(Arc<String>);
+pub struct SourceText(Arc<String>, Option<Arc<[std::ops::Range<usize>]>>);
 
 // Hand-written rather than derived so the `Borrow<str>` contract is explicit:
 // a `SourceText` must hash exactly as its `str` contents do.
@@ -46,17 +51,48 @@ impl SourceText {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Decode `bytes` as UTF-8, replacing each invalid sequence with U+FFFD
+    /// and recording where each replacement is (see [`Self::invalid_utf8`]).
+    ///
+    /// Valid input keeps its allocation (`String::from_utf8` takes the `Vec`
+    /// by value); only a genuinely non-UTF-8 file pays for the rebuild.
+    #[must_use]
+    pub fn from_utf8_lossy(bytes: Vec<u8>) -> Self {
+        let bytes = match String::from_utf8(bytes) {
+            Ok(s) => return Self::from(s),
+            Err(e) => e.into_bytes(),
+        };
+        let mut text = String::with_capacity(bytes.len() + 16);
+        let mut invalid = Vec::new();
+        for chunk in bytes.utf8_chunks() {
+            text.push_str(chunk.valid());
+            if !chunk.invalid().is_empty() {
+                let start = text.len();
+                text.push(char::REPLACEMENT_CHARACTER);
+                invalid.push(start..text.len());
+            }
+        }
+        Self(Arc::new(text), Some(invalid.into()))
+    }
+
+    /// The byte ranges of the decoded text that replaced bytes which were not
+    /// UTF-8 (each a U+FFFD), in order. Empty for text that was valid.
+    #[must_use]
+    pub fn invalid_utf8(&self) -> &[std::ops::Range<usize>] {
+        self.1.as_deref().unwrap_or(&[])
+    }
 }
 
 impl From<&str> for SourceText {
     fn from(s: &str) -> Self {
-        Self(Arc::new(s.to_owned()))
+        Self(Arc::new(s.to_owned()), None)
     }
 }
 
 impl From<String> for SourceText {
     fn from(s: String) -> Self {
-        Self(Arc::new(s))
+        Self(Arc::new(s), None)
     }
 }
 

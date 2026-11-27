@@ -120,13 +120,11 @@ impl FileSystem for DiskFileSystem {
             include_site: None,
         })?;
 
-        // Try zero-copy conversion first (common case), fall back to lossy
-        let content = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-        };
-
-        Ok(content.into())
+        // Zero-copy for UTF-8 (the common case). Otherwise lossy, keeping
+        // where the invalid bytes were: the loader reports each one as
+        // beancount does (an invalid token, or an undecodable string), and
+        // accepts them in comments only. They used to be accepted silently.
+        Ok(SourceText::from_utf8_lossy(bytes))
     }
 
     fn exists(&self, path: &Path) -> bool {

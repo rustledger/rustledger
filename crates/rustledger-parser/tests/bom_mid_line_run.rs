@@ -883,3 +883,17 @@ fn test_parse_header_after_two_leading_boms_names_its_invalid_token() {
         );
     }
 }
+
+/// A line's BOM diagnostic stands for its first invalid token when that token
+/// holds no BOM (`$`, `$x`): a run with a BOM inside it later on the line is
+/// then one more `Invalid token`, as in beancount (2 and 3 errors).
+#[test]
+fn test_parse_inner_bom_run_after_a_plain_first_token_is_reported() {
+    for (src, n) in [
+        ("2024-01-02 $ o<\u{FEFF}6\n", 2),
+        ("foo $x y\u{FEFF}z\n", 3),
+    ] {
+        let result = parse_both(src);
+        assert_eq!(result.errors.len(), n, "{src:?}: {:?}", result.errors);
+    }
+}

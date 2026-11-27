@@ -23,52 +23,11 @@
 # main is listed by hand, with its reason, in
 # bom_combination_matrix_worse_than_main.tsv, which no update writes.
 x0<BOM>y x1<BOM>y\n	3:1	inner-bom-under-line-error
-$n0 x1<BOM>y\n	3:1	inner-bom-under-line-error
 x0<BOM>y <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
 x0<BOM>y x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
 x0<BOM>y x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
 x0<BOM>y $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-$n0 <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-$n0 x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
-$n0 x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
-$n0 x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
-$n0 $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y\n	3:1	inner-bom-under-line-error
-foo <BOM>a0 x1<BOM>y\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y <BOM>a1\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y x1<BOM>y\n	3:1	inner-bom-under-line-error
-foo x0<BOM>y $n1\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y <BOM>Assets:A1\n	3:1	inner-bom-under-line-error
-foo x0<BOM>y A<BOM>b1\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y <BOM>assets:A1\n	3:1	inner-bom-under-line-error
-foo x0<BOM>y <BOM>Assets:A1$x\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y <BOM>assets:A1$x\n	3:2	inner-bom-under-line-error
-foo $n0 x1<BOM>y\n	3:2	inner-bom-under-line-error
-foo <BOM>Assets:A0 x1<BOM>y\n	3:1	inner-bom-under-line-error
-foo A<BOM>b0 x1<BOM>y\n	3:2	inner-bom-under-line-error
-foo <BOM>assets:A0 x1<BOM>y\n	3:1	inner-bom-under-line-error
-foo <BOM>Assets:A0$x x1<BOM>y\n	3:2	inner-bom-under-line-error
-foo <BOM>assets:A0$x x1<BOM>y\n	3:2	inner-bom-under-line-error
-foo <BOM>a0 <BOM>a1 x2<BOM>y\n	3:3	inner-bom-under-line-error
-foo <BOM>a0 x1<BOM>y <BOM>a2\n	3:3	inner-bom-under-line-error
-foo <BOM>a0 x1<BOM>y x2<BOM>y\n	3:2	inner-bom-under-line-error
-foo <BOM>a0 x1<BOM>y $n2\n	3:3	inner-bom-under-line-error
-foo <BOM>a0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
-foo x0<BOM>y <BOM>a1 <BOM>a2\n	3:3	inner-bom-under-line-error
-foo x0<BOM>y <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y <BOM>a1 $n2\n	3:3	inner-bom-under-line-error
-foo x0<BOM>y x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
-foo x0<BOM>y x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y $n1 <BOM>a2\n	3:3	inner-bom-under-line-error
-foo x0<BOM>y $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-foo x0<BOM>y $n1 $n2\n	3:3	inner-bom-under-line-error
-foo $n0 <BOM>a1 x2<BOM>y\n	3:3	inner-bom-under-line-error
-foo $n0 x1<BOM>y <BOM>a2\n	3:3	inner-bom-under-line-error
-foo $n0 x1<BOM>y x2<BOM>y\n	3:2	inner-bom-under-line-error
-foo $n0 x1<BOM>y $n2\n	3:3	inner-bom-under-line-error
-foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 313 x0<BOM>y\n	3:1	inner-bom-under-line-error
 313 <BOM>a0 x1<BOM>y\n	3:2	inner-bom-under-line-error
 313 x0<BOM>y <BOM>a1\n	3:2	inner-bom-under-line-error
@@ -106,7 +65,6 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 313 $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02\n	3:1	eol-reported-on-next-line
 2024-01-02 x0<BOM>y x1<BOM>y\n	3:1	inner-bom-under-line-error
-2024-01-02 $n0 x1<BOM>y\n	3:1	inner-bom-under-line-error
 2024-01-02 <BOM>Assets:A0 x1<BOM>y\n	3:1	inner-bom-under-line-error
 2024-01-02 <BOM>assets:A0 x1<BOM>y\n	3:1	inner-bom-under-line-error
 2024-01-02 <BOM>Assets:A0$x x1<BOM>y\n	3:2	inner-bom-under-line-error
@@ -116,11 +74,6 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
 2024-01-02 x0<BOM>y x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
 2024-01-02 x0<BOM>y $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-2024-01-02 $n0 <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-2024-01-02 $n0 x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
-2024-01-02 $n0 x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
-2024-01-02 $n0 x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
-2024-01-02 $n0 $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0~<BOM>1:A\n	3:2	bom-glued-to-account
 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0~<BOM>1:A;c $x\n	3:2	bom-glued-to-account
 <BOM>g 2024-01-02 price USD 1 <BOM>:A\t{1 USD} <BOM>assets:A0~<BOM>1:A\n	3:3	bom-glued-to-account
@@ -132,8 +85,6 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 open Assets:C USD "BAD"\n  kk: <BOM>Assets:D\n	3:1,4:1	bom-glued-to-account
 2024-01-02 open Assets:C USD "BAD"\n  kk: <BOM>assets:D\n	3:1,4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>-:A\t#t<BOM>a-b:C@\n	3:2	bom-glued-to-account-in-error-line
-x $<BOM>a:B\n	3:1	inner-bom-under-line-error
-x 1.5.<BOM>a:B\n	3:1	inner-bom-under-line-error
 2024-01-02 *\n  ab:<BOM>a:B\n	4:1	bom-glued-to-account
 2024-01-02 ;c<BOM>\n2024-01-03 open Assets:C\n	3:1	eol-reported-on-next-line
 2024-01-02 ;<BOM>\n	3:1	eol-reported-on-next-line
@@ -177,14 +128,11 @@ option "title" "T"\n    pk: 2\t<BOM>*\t1  #!d A\tx<BOM>y\n	4:3	mid-line-hash-ban
 <BOM>2024-01-02 event "e" "v"\n  ; c\n2024-01-02 custom "b" 1  <BOM>Ü:A \tT#!  #t <BOM>Assets:A\n	3:1,5:2	bom-glued-to-account
 option "title" "T"\r\n  kk: "v" foo \t<BOM>*  ^l <BOM> <BOM>12$\r\n<BOM>  Assets:A  1 USD x<BOM>y <BOM>a <BOM>"s"  {1 USD}\t"s"\r\n	4:4,5:4	like-main-without-bom
 * Heading A  A<BOM>b \tT#! ! "s"\nA\tx<BOM>y\tT#! <BOM>"s"  <BOM>\n2024-01-02 custom "b" 1\n	4:4	mid-line-hash-bang
-<BOM>2024-01-02 note Assets:A "n" \t<BOM> \tA<BOM>b  <BOM>12$\t%\r\n<BOM>  %  <BOM>#t $x A\r\n	3:4,4:3	lone-capital-glued-to-tokens
 popmeta kk:  x<BOM>y <BOM>a x<BOM>y kk:\tA\r\noption "title" "T"\r\n  #t ^l\r\nÜ:A open\t* <BOM>\r\n	3:3,5:1,6:1	like-main-without-bom
 2024-01-02 event "e" "v"  #!d -2.5 \t<BOM>\t,\n  kk: "v"\tA  @@ \t!  <BOM>* \t<BOM>Assets:A\nplugin "p" \t, \t^l \t<BOM>"s"  <BOM>#t\n2024-01-02 price USD 1 EUR |  <BOM>"s"  #!d ~\n	3:3,4:1,5:3,6:2	mid-line-hash-bang
 2024-01-02 custom "b" 1\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\tfoo x<BOM>y #+x -2.5\n  ; c\npopmeta kk: <BOM>* <BOM>"s"  {1 USD} \tA<BOM>b\n<BOM>  #t ^l <BOM>Ü:A foo\t#+x 1 ;c\n  kk: "v" \t<BOM>"s"\t<BOM>Assets:A\tkk:\tfoo	4:3,6:3,7:3,8:2	mid-line-hash-bang
 #!d @@ <BOM>Ü:A <BOM>12$ A<BOM>b\n  <BOM>$x \t~  @@ \t~\t#+x\n<BOM>pushtag #t\n    pk: 2  <BOM>12$  <BOM>12$ (1 + 2) <BOM>12$\n	4:2,5:1,6:3	mid-line-hash-bang
-<BOM>2024-01-02 *\r\n<BOM>1 *\t(1 + 2) A\r\n\t1  <BOM>a\t<BOM>a\t"a<BOM>b" T#!\r\n	3:1,4:1,5:3	lone-capital-glued-to-tokens
 "s"  x<BOM>y  foo\t|\n	3:2	inner-bom-under-line-error
-foo \t1 * $x\tx<BOM>y\n	3:2	inner-bom-under-line-error
   {1 USD} @@ \t<BOM>#t\t% \tx<BOM>y\r\n	3:2	inner-bom-under-line-error
 * Heading\n  Assets:A  1 HOOL {2 USD} @ 3 USD ,  open\t$x\t! <BOM>12$\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  <BOM> \tx<BOM>y x<BOM>y  <BOM>Ü:A\n	4:3,5:2	inner-bom-under-line-error
 poptag #t\r\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\r\n  #t ^l x<BOM>y <BOM>Ü:A  1\t@@\r\n<BOM>\t% {1 USD} \t~\r\n2024-01-02 event "e" "v"  1 2024-01-02 \tÜ:A T#!\r\n<BOM>  kk: "v"  A<BOM>b -2.5  @@  <BOM>"s" A\r\n  #t ^l\t<BOM>  <BOM>#t <BOM>Ü:A \t<BOM>"s"\t;c\r\n	3:1,4:1,5:1,6:1,7:2,8:3,9:3	lone-capital-glued-to-tokens
@@ -192,10 +140,8 @@ poptag #t\r\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\r\n  #t ^l x<BOM>y <BOM>Ü:A 
 \t#+x  |\topen\t<BOM>Ü:A x<BOM>y\n<BOM>2024-01-02 * "p" "n"\n	3:2,4:1	mid-line-hash-bang
 2024-01-02 custom "b" 1 -2.5 <BOM>Assets:A  @@ \tA\n<BOM>  kk: "v" *  <BOM>#t {1 USD}\tfoo\n<BOM>pushtag #t <BOM>Assets:A <BOM>*  1\t<BOM>"s" \tT#!\n	3:2,4:3,5:4	bom-glued-to-account
 Assets:A \tA<BOM>b #t \tx<BOM>y\npoptag #t\n  #t ^l\n<BOM>  #t ^l * <BOM>"s" \t,  A <BOM>"s"\n2024-01-02 price USD 1 EUR\n	3:2,4:1,5:1,6:3	inner-bom-under-line-error
-<BOM>Assets:A\t<BOM>Ü:A #+x\t| ,\n  foo <BOM>a ^l\t<BOM>#t x<BOM>y\n| <BOM>  "a<BOM>b" <BOM>#t  !\n	3:2,4:3,5:2	inner-bom-under-line-error
 2024-01-02 pad Assets:A Assets:B <BOM>Assets:A  <BOM>Assets:A 2024-01-02\t;c\n    pk: 2\t<BOM>Ü:A  open\t%\t<BOM>Ü:A\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\tA<BOM>b  x<BOM>y \tÜ:A #t\n	3:1,4:1,5:3	indented-line-after-error
 plugin "p"\r\n<BOM>    pk: 2\r\n2024-01-02 price USD 1 EUR <BOM>Assets:A\tUSD foo <BOM>#t\r\n  kk: "v"\r\n<BOM>  kk: "v"\tx<BOM>y @\t~\t@ A\r\n	4:1,5:3,7:2	lone-capital-glued-to-tokens
-foo  <BOM>a \tx<BOM>y \t%\t<BOM>12$\n<BOM>2024-01-02 price USD 1 EUR \tfoo ;c \t{1 USD}\t|\n<BOM>2024-01-02 pad Assets:A Assets:B\n<BOM>    pk: 2\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD <BOM>Assets:A\tfoo \tA<BOM>b\t<BOM>* USD\n	3:3,4:2,5:1,6:1,7:3	inner-bom-under-line-error
 | \t"a<BOM>b"\t<BOM>"s"  x<BOM>y \t(1 + 2)\n	3:2	inner-bom-under-line-error
 <BOM>pushtag #t  <BOM>12$ <BOM>a  open  <BOM>a\t<BOM>a\n2024-01-02 commodity EUR\n  ; c <BOM> <BOM>12$  | <BOM>12$\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \t<BOM>a foo  x<BOM>y \t#!d\n	3:5,6:4	mid-line-hash-bang
 \t@@ A x<BOM>y *\r\n2024-01-02 balance Assets:A 1 USD !\t<BOM>* <BOM>a\t<BOM>#t\t!\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD  @ <BOM>Ü:A  USD \t-2.5\t<BOM>12$\r\n<BOM>  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\r\n2024-01-02 close Assets:C <BOM>*\t%  <BOM>"s" <BOM>Assets:A\r\n	3:1,4:4,5:1,6:1,7:2	inner-bom-under-line-error
@@ -205,10 +151,8 @@ $x \tA<BOM>b <BOM>12$\t#!d\npopmeta kk:\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \
 2024-01-02 * "p" "n" \tx<BOM>y \t*  2024-01-02 ~\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD %\t<BOM>Assets:A\t"a<BOM>b"\t<BOM>Ü:A\r\npopmeta kk:\r\n  #t ^l #+x x<BOM>y \t<BOM>12$\t(1 + 2) \t"a<BOM>b"\r\n  Assets:A  1 USD\r\n2024-01-02 *  %\tfoo A<BOM>b \t* kk:\r\n	3:1,5:1,6:3,8:3	mid-line-hash-bang
 #!d \t<BOM>Assets:A  #!d \t*\n2024-01-02 price USD 1 EUR\n|\t% "s"\tx<BOM>y %\n	5:1	inner-bom-under-line-error
 @ T#! x<BOM>y  <BOM>12$\n2024-01-02 commodity EUR\n2024-01-02 pad Assets:A Assets:B \t! foo \tA  <BOM>"s"	3:3,5:3	mid-line-hash-bang
-  foo \tx<BOM>y \t<BOM>Ü:A \tkk:  !\r\n	3:1	inner-bom-under-line-error
 <BOM>poptag #t\r\n<BOM>  Assets:A  1 USD \t1 \t#t ^l \t#t\r\n<BOM>2024-01-02 *  {1 USD} \t<BOM>Ü:A  ,  #t\r\n<BOM>  kk: "v" \t!\tT#! @ A<BOM>b\t<BOM>\r\n2024-01-02 price USD 1 EUR  1 <BOM>a\t~  *\r\n	3:1,4:1,5:1,6:4,7:1	like-main-without-bom
 2024-01-02 event "e" "v"\n  ; c\n  #t ^l\t<BOM>Assets:A \tx<BOM>y * <BOM>12$ <BOM>*\n2024-01-02 price USD 1 EUR\n2024-01-02 query "q" "select 1"\n    pk: 2\n	5:3	inner-bom-under-line-error
-  $x x<BOM>y  <BOM>Assets:A \t2024-01-02\n2024-01-02 * "p" "n" \t<BOM>"s" Assets:A * 2024-01-02 \t@\n<BOM>  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n2024-01-02 event "e" "v"\n  ; c\n<BOM>  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  2024-01-02\t*\t<BOM>* "s"\t<BOM>#t\n	3:1,4:1,5:1,8:3	inner-bom-under-line-error
 <BOM><BOM>"s"  | A<BOM>b  Ü:A\r\n2024-01-02 close Assets:C\t#t  {1 USD} %\t#+x\t<BOM>12$\r\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\r\n2024-01-02 close Assets:C\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD x<BOM>y\t"s" #!d \t;c\r\n	3:2,4:3,5:1,7:2	mid-line-hash-bang
   "a<BOM>b" <BOM>12$ ~ ! x<BOM>y\n<BOM>2024-01-02 open Assets:C USD USD\t%\t<BOM>Assets:A  A<BOM>b  <BOM>Assets:A\n2024-01-02 price USD 1 EUR\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD \t<BOM>#t\tT#!\t$x <BOM>Assets:A \t#!d\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\tx<BOM>y\t<BOM>a \t<BOM>#t ~ <BOM>"s"\n	3:2,4:2,6:5,7:4	inner-bom-under-line-error
   A<BOM>b  @@ \tÜ:A  1\npopmeta kk: @ |  A<BOM>b \tkk:\t;c\n  #t ^l\n  Assets:A  1 USD <BOM>* x<BOM>y x<BOM>y\t2024-01-02 <BOM>"s"\n<BOM>foo  ;c @ \t<BOM>12$ #t	3:1,4:2,6:3,7:1	inner-bom-under-line-error
@@ -216,7 +160,6 @@ popmeta kk: <BOM>* \t| \t<BOM>Assets:A 2024-01-02\n<BOM>2024-01-02 custom "b" 1\
 \t2024-01-02 A<BOM>b <BOM>12$  <BOM>* <BOM>*\noption "title" "T"\n  ; c\n2024-01-02 * <BOM>Assets:A  @ <BOM>\t;c |\n	3:4,5:1,6:2	like-main-without-bom
 %  <BOM>Assets:A <BOM>Ü:A "s"\t<BOM>a\n* Heading\n  ; c kk:\topen  *  USD\n<BOM>  ; c  A<BOM>b\t<BOM>a\topen\t"s"\tx<BOM>y\n^l\t#t A<BOM>b\tA<BOM>b <BOM>#t\n	6:1,7:3	bom-free-line-as-on-main
 \t|\t% <BOM>"s" #t <BOM>12$\n<BOM>2024-01-02 * 2024-01-02\topen\t<BOM>Assets:A \tÜ:A A\n  Assets:A  1 USD\n	3:3,4:2,5:1	indented-line-after-error
-$x \tx<BOM>y \tUSD\topen\n2024-01-02 custom "b" 1\n  Assets:A  1 USD\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n2024-01-02 * "p" "n" #t\t~\t{1 USD} <BOM>*\n    pk: 2  <BOM>a \t<BOM>Ü:A \t% <BOM> A<BOM>b\n	3:1,5:1,7:2,8:3	inner-bom-under-line-error
 <BOM>2024-01-02 * ~ "s" \t<BOM>Ü:A\t<BOM>* <BOM>Assets:A\r\n    pk: 2  %\t@@ <BOM>#t \tAssets:A  -2.5\r\n<BOM>    pk: 2\tfoo\t<BOM>Ü:A x<BOM>y\tA\r\n	3:2,4:1,5:3	lone-capital-glued-to-tokens
 2024-01-02 note Assets:A "n" % \t^l <BOM>"s"\tA<BOM>b\n  Assets:A  1 HOOL {2 USD} @ 3 USD x<BOM>y\tx<BOM>y  foo\t1\n<BOM>pushtag #t  "a<BOM>b"\tT#!  open -2.5 \t!\n<BOM>  #t ^l , <BOM>#t 2024-01-02\tT#! <BOM>*\n2024-01-02 document Assets:A "d.pdf"\t1 <BOM>#t USD  <BOM>a\n	3:3,4:2,5:2,6:4,7:3	inner-bom-under-line-error
 , Assets:A \tx<BOM>y\t;c  <BOM>Assets:A\n<BOM>2024-01-02 close Assets:C \tx<BOM>y  A ~ <BOM>* \t1\n	3:1,4:3	inner-bom-under-line-error
@@ -228,14 +171,12 @@ A <BOM>#t x<BOM>y %\n<BOM>2024-01-02 document Assets:A "d.pdf" Ü:A  <BOM>* A<BO
 x<BOM>y \t<BOM> USD  <BOM>* x<BOM>y\n* <BOM>a <BOM>\t~\n	3:3	inner-bom-under-line-error
 2024-01-02 custom "b" 1 <BOM>Ü:A ^l \t| \t<BOM>12$\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\n	3:3,4:1	bom-glued-to-account
 \t(1 + 2) \t! <BOM>"s"\tx<BOM>y <BOM>Ü:A\n* Heading open USD \t@ \tA\n  ; c  open \t<BOM>*  Assets:A\t|\n	3:2	inner-bom-under-line-error
-2024-01-02 query "q" "select 1"\r\n    pk: 2 <BOM>Assets:A open T#!\t<BOM>"s"\r\noption "title" "T"\r\n    pk: 2 ^l foo ~ $x  !\r\n  ; c A<BOM>b #!d \tUSD \t<BOM>a  ~\r\n$x <BOM>Ü:A\t*  A	4:3,6:3,8:1	bom-account-under-line-diagnostic
 * Heading\tT#! \t<BOM> \t$x \t2024-01-02  <BOM>Ü:A\r\n  #t ^l\t"a<BOM>b"\tT#! \tkk: \tx<BOM>y\r\n<BOM>  kk: "v"\r\n  <BOM><BOM>Ü:A \tAssets:A <BOM>\t(1 + 2)\r\n	4:2,5:1,6:1	mid-line-hash-bang
 2024-01-02 ! #t ^l\r\nplugin "p" \t"a<BOM>b" #+x  <BOM>"s" A	4:3	mid-line-hash-bang
 2024-01-02 pad Assets:A Assets:B\n2024-01-02 query "q" "select 1"\n  Assets:A  1 HOOL {2 USD} @ 3 USD \tx<BOM>y <BOM>"s"\tfoo <BOM>#t\n<BOM>  ; c \t@@ <BOM>#t\t* %\n	5:4,6:1	inner-bom-under-line-error
 popmeta kk:\n2024-01-02 price USD 1 EUR\n<BOM>  #t ^l\n  Assets:A  1 USD\nplugin "p"\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD 2024-01-02 USD foo x<BOM>y	3:1,5:1,8:2	inner-bom-under-line-error
 \t"s"  %\t#+x x<BOM>y\npushtag #t  Assets:A \t<BOM>a \t#+x \t<BOM>a\n  kk: "v"  <BOM>a <BOM>Ü:A \t%\t<BOM>Ü:A \t<BOM>Assets:A\n<BOM>  ; c\t2024-01-02 A<BOM>b <BOM>#t 1\n	3:2,4:4,5:1,6:1	mid-line-hash-bang
 USD #+x <BOM>Assets:A <BOM>#t\r\nplugin "p"\t<BOM>"s" , \t;c (1 + 2)\t*\r\n<BOM>  #t ^l  USD ~ @@  @@ (1 + 2)\r\n  Assets:A  1 HOOL {2 USD} @ 3 USD  x<BOM>y <BOM> ^l <BOM>"s"\tx<BOM>y\r\n	3:3,4:1,5:1,6:3	inner-bom-under-line-error
-2024-01-02 * "p" "n" \t~  |\t% <BOM>*\n  #t ^l -2.5 #!d USD "a<BOM>b"\n  kk: "v"\t"s" <BOM>Assets:A  T#! <BOM>#t\n2024-01-02 custom "b" 1\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n<BOM>option "title" "T"\n<BOM>  kk: "v"\n	3:3,4:1,5:2,7:1,8:1,9:1	extra-construct-error
 <BOM>12$  ~ \tA (1 + 2)\tT#!\n<BOM>  "a<BOM>b"  <BOM>#t\topen  2024-01-02 \t!\n-2.5 \t<BOM>12$\t<BOM>a  x<BOM>y open	3:2,4:2,5:3	inner-bom-under-line-error
 2024-01-02 balance Assets:A 1 USD  , Ü:A (1 + 2) foo ~\n	3:1	bom-free-line-as-on-main
 2024-01-02 balance Assets:A 1 USD A<BOM>b \t<BOM>#t \t<BOM>Ü:A  T#!\n2024-01-02 note Assets:A "n"\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD  ~\t~\t<BOM>Ü:A\t<BOM>12$ \t;c\n2024-01-02 document Assets:A "d.pdf"\n  Assets:A  1 HOOL {2 USD} @ 3 USD \tfoo\t<BOM>Ü:A <BOM>Ü:A A x<BOM>y\n  ; c\n	3:3,5:2,7:2	inner-bom-under-line-error
@@ -244,16 +185,12 @@ USD #+x <BOM>Assets:A <BOM>#t\r\nplugin "p"\t<BOM>"s" , \t;c (1 + 2)\t*\r\n<BOM>
 * Heading Assets:A\t% 2024-01-02 \topen <BOM>a\nUSD , \tx<BOM>y  <BOM>\n2024-01-02 note Assets:A "n"\t<BOM>Assets:A <BOM>12$ <BOM> \t<BOM>a \t1\n<BOM>  ; c\n	4:2,5:4,6:1	inner-bom-under-line-error
 (1 + 2) !\tx<BOM>y\t|\n	3:1	inner-bom-under-line-error
 <BOM>plugin "p"  #+x <BOM>#t \t<BOM>#t  <BOM>*  open\n    pk: 2\t<BOM>#t  open 2024-01-02 \t#+x\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n2024-01-02 custom "b" 1\n  Assets:A  1 USD  x<BOM>y  <BOM>12$\tA  -2.5 A<BOM>b\n<BOM>2024-01-02 document Assets:A "d.pdf"\n  Assets:A  1 USD\n  #t ^l\t2024-01-02  Assets:A @ |  ;c\n	3:5,4:2,7:3,8:1	inner-bom-under-line-error
-<BOM>2024-01-02 price USD 1 EUR <BOM>12$ \tT#! \tA<BOM>b \t#t\n$x\tx<BOM>y\t(1 + 2) "a<BOM>b"\n<BOM>  ;c -2.5 \t<BOM>12$ <BOM>Assets:A\n	3:4,4:1,5:1	inner-bom-under-line-error
 2024-01-02 balance Assets:A 1 USD\n  #t ^l "a<BOM>b" \t1 \t<BOM>Assets:A <BOM>Ü:A\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n<BOM>  ;c  Assets:A <BOM>Assets:A @  |\n\t"a<BOM>b" <BOM>a kk: ~  {1 USD}\n	4:1,5:1,6:1,7:1	indented-line-after-error
 x<BOM>y  <BOM>a \t<BOM>Ü:A \t<BOM>"s" x<BOM>y\n<BOM>2024-01-02 query "q" "select 1" "a<BOM>b" <BOM>#t <BOM>"s" %\n	3:3,4:3	inner-bom-under-line-error
   ^l\t<BOM>Assets:A  x<BOM>y  (1 + 2)	3:1	inner-bom-under-line-error
 popmeta kk:  #+x #+x \t|  ;c\n  Assets:A  1 USD x<BOM>y A x<BOM>y \t<BOM>#t\n<BOM>  Assets:A  1 HOOL {2 USD} @ 3 USD\n\t$x ;c <BOM>Assets:A 1 <BOM>Assets:A\n	3:3,4:2,5:1,6:1	inner-bom-under-line-error
-  T#!\t<BOM>a x<BOM>y  1 {1 USD}\n	3:2	mid-line-hash-bang
-popmeta kk:\tA<BOM>b  2024-01-02  !  <BOM>12$  T#!\n  ; c\n\tfoo <BOM>Assets:A x<BOM>y\t*\n<BOM>2024-01-02 query "q" "select 1"\n  ; c\n	3:3,5:1,6:1	inner-bom-under-line-error
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM><BOM>\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B \t-2.5\n	3:1	bom-glued-to-account
-$x <BOM>a-b:C "x"$x~<BOM>1:A\n	3:1	inner-bom-under-line-error
 2024-01-02 *\n  kk: <BOM>assets:A\t<BOM>"s" <BOM>\n	4:3	bom-glued-to-account
 2024-01-02 *\n  <BOM>Assets:A\t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>-:A T#!\t.b\n	4:3	bom-glued-to-account	4:3	a lone capital glued to a non-blank (`T#!`, `U~SD`) is now one invalid token, as in beancount (#2982), so it is counted where it went uncounted; the line was already off from beancount by its other errors
@@ -311,7 +248,6 @@ $x <BOM>a-b:C "x"$x~<BOM>1:A\n	3:1	inner-bom-under-line-error
 2024-01-02 custom "b" 1 <BOM>Assets:A,Ü:A{\t^l\n	3:2	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A;c\t<BOM>1.5 <BOM> ^l\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM>.b\n	4:2	bom-glued-to-account
-$x <BOM>Ü:A~<BOM>1:A'b~<BOM>1:A\n	3:1	inner-bom-under-line-error
 2024-01-02 custom "b" 1 <BOM><BOM>kk:<BOM>^l<BOM>x\n	3:3	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM>1:A<BOM>x\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B\t.b\t<BOM> #t\n	3:3	bom-glued-to-account

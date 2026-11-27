@@ -617,3 +617,81 @@ fn test_parse_grammar_failure_counts_beside_the_invalid_tokens() {
         (format!("{T}  Z   1,50  2 HOOL\n"), vec![(2, 1)]),
     ]));
 }
+
+/// A stray `\r` (one not part of a CRLF line end) is a blank to beancount's
+/// lexer. Bison's recovery from a statement that fails on such a line keeps
+/// the lines after it quiet, as from any other failed line: a posting under
+/// it, a second-date entry, a body under an `open` that failed past its
+/// account (#2980). That holds whether this parser reads the `\r` as a blank
+/// too (before an invalid token, `pushtag #a\r$`) or reports it, on purpose,
+/// as an error of its own (a `\r` before a token that lexes, or at a line
+/// start), where that line keeps its own error.
+#[test]
+fn test_parse_recovery_runs_through_a_line_holding_a_stray_cr() {
+    assert_counts(&[
+        ("\r$\n  Assets:A 1 USD\n".to_string(), vec![(1, 1)]),
+        (
+            "pushtag #a\r$\n2024-01-02 2024-01-03 * \"n\"\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "option \"a\"\r$\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "\r  5\n2024-01-02 2024-01-03 * \"n\"\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (
+            "2024-01-02 open Assets:B \r5\n  \"a\"\n  Assets:A\n".to_string(),
+            vec![(1, 1)],
+        ),
+        // A line whose blanks before its content hold a `\r` has no indent
+        // to beancount: its content is a column-0 statement.
+        ("\r  $x\n  Assets:A 1 USD\n".to_string(), vec![(1, 1)]),
+        (
+            " \r$x\n2024-01-02 2024-01-03 * \"n\"\n  Assets:A 1 USD\n".to_string(),
+            vec![(1, 1)],
+        ),
+        (format!("{P}\r  $\n  Assets:A 1 USD\n"), vec![(2, 1)]),
+        // CRLF line ends throughout.
+        ("\r$\r\n  Assets:A 1 USD\r\n".to_string(), vec![(1, 1)]),
+    ]);
+}
+
+/// Where this parser reports a stray `\r` before a token that lexes, that
+/// error stays (a deliberate difference, #2980:
+/// `test_parse_cr_with_more_of_the_line_after_it_stays_an_error`), and the
+/// lines after are counted as beancount counts them: here beancount builds
+/// the `open` and fails at the string under it, whose window keeps the line
+/// after it quiet.
+#[test]
+fn test_parse_stray_cr_error_stays_and_the_lines_after_follow_beancount() {
+    assert_counts(&[(
+        "2024-01-02 open\rAssets:B\n  \"a\"\n  Assets:A\n".to_string(),
+        vec![(1, 1), (2, 1)],
+    )]);
+}
+
+/// A misgrouped number inside the recovery is reported on a line with a BOM
+/// that is one token on both sides, or none: a BOM-led invalid token, which
+/// runs to the next blank in beancount and here (`<BOM>x`), or a BOM inside
+/// an account beancount's lexer reads (`Assets:<BOM>A`, an `ACCOUNT` there).
+#[test]
+fn test_parse_misgrouped_number_beside_a_bom_token_is_reported() {
+    assert_counts(&[
+        ("$\n  \u{feff}x 1,50\n".to_string(), vec![(1, 1), (2, 2)]),
+        (
+            "\t2024-01-02 Assets:\u{feff}A pushmeta txn $ 1,50\n".to_string(),
+            vec![(1, 3)],
+        ),
+        (
+            format!("{P}Assets:\u{feff}A k: 2024-02-30 1,50\n"),
+            vec![(2, 4)],
+        ),
+        (
+            format!("{P}}} popmeta Assets:\u{feff}A\n \u{feff}x 1,50 , : {{\n"),
+            vec![(2, 1), (3, 2)],
+        ),
+    ]);
+}

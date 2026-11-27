@@ -61,6 +61,17 @@
 //! no error for is added where this parser reads the text as something else:
 //! a lone capital glued to a `\r` (an invalid token) or a misgrouped number
 //! (`1,50`, `InvalidNumber`).
+//!
+//! A stray `\r` (one not part of a CRLF line end) is a blank to beancount's
+//! lexer. This parser reports one before a token that lexes, or at a line
+//! start, as an error of its own, on purpose (#2980), and reads the line
+//! around it in its own way, so the machine above cannot start from such a
+//! line. Instead the input is parsed once more as beancount reads it
+//! ([`stray_cr_analog`]: each stray `\r` a space, a line whose leading
+//! blanks hold one moved to column 0), and from the first line holding a
+//! stray `\r` on, every line has that parse's errors, but a line where this
+//! parser reports a stray `\r` itself, which keeps its own
+//! ([`model_stray_cr_lines`]).
 
 use std::ops::Range;
 
@@ -1510,8 +1521,11 @@ pub(super) fn quiet_bison_recovery(
             // with a BOM whose diagnostic this parser counts its own way
             // (#2956), the two lexers' runs part, and the count with them.
             // But for the BOM run whose diagnostic failed the line (the
-            // window's own start), and a BOM beancount reads as an invalid
-            // token of its own: each is one token on both sides.
+            // window's own start), a BOM that starts an invalid token of
+            // beancount's (alone or BOM-led, `<BOM>x`, which runs to the next
+            // blank on both sides, #2928), and a BOM inside an account
+            // beancount's lexer reads (`Assets:<BOM>A`): each is one token, or
+            // none, on both sides.
             let real_errors = || {
                 lexer_errors[la..lb]
                     .iter()
@@ -1524,13 +1538,37 @@ pub(super) fn quiet_bison_recovery(
                     crate::ParseErrorKind::BomInDirectiveBody
                 );
             let trigger_run = real_errors().next().filter(|_| bom_trigger);
+            // The accounts beancount's lexer reads on the line, a BOM in one
+            // of which is no token of its own (`Assets:<BOM>A`, an `ACCOUNT`
+            // there): read only for a line with a BOM no check above takes.
+            let mut accounts: Option<Vec<Range<usize>>> = None;
             let simple = real <= 4
                 && stripped[line_from..line_to]
                     .match_indices(crate::bom::BOM_CHAR)
                     .all(|(i, _)| {
                         let at = line_from + i;
                         trigger_run.is_some_and(|&(s, e)| (s..e).contains(&at))
-                            || real_errors().any(|&(s, e)| s == at && e == at + crate::bom::BOM_LEN)
+                            || real_errors().any(|&(s, _)| s == at)
+                            || accounts
+                                .get_or_insert_with(|| {
+                                    BcLexer::at_line_start(stripped, line_start(line_from))
+                                        .take_while(|(t, r)| {
+                                            r.start < line_to && !matches!(t, Bc::Eof)
+                                        })
+                                        .filter(|(t, _)| *t == Bc::Account)
+                                        .map(|(_, r)| r)
+                                        .collect()
+                                })
+                                .binary_search_by(|r| {
+                                    if r.end <= at {
+                                        std::cmp::Ordering::Less
+                                    } else if r.start > at {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                })
+                                .is_ok()
                     });
             // An orphan indented line that failed at its indent
             // (`syntax error, unexpected INDENT`), whose error here stands
@@ -2050,6 +2088,252 @@ fn posting_prefix_reads(tokens: &[(Bc, Range<usize>)], src: &str) -> bool {
     }
 }
 
+/// A line of the input rewritten by [`stray_cr_analog`] whose text moved: a
+/// line whose leading blanks hold a stray `\r` (no `INDENT` to beancount),
+/// whose content now starts at its line start, `lead` bytes earlier, with
+/// `lead` blanks after it (`content` bytes long), so the lines after keep
+/// their offsets.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MovedLine {
+    start: usize,
+    lead: usize,
+    content: usize,
+}
+
+/// The input as beancount reads it, where it holds a stray `\r` (a `\r` not
+/// part of a CRLF line end, #2980): every stray `\r` is a blank to
+/// beancount's lexer (`[ \t\r]+`), so it is replaced by a space, of the same
+/// length, so every other byte keeps its offset. Two of `lexer.l`'s rules
+/// tell a `\r` from a space, and are kept:
+///
+/// * `^[ \t]+/[^ \t\r\n]`, the indent: a line whose leading blanks run into a
+///   stray `\r` has none, so its content is read as a column-0 statement.
+///   Its content is moved to the line start, and the blanks put after it
+///   (`MovedLine`). Not where the content starts with a character beancount's
+///   lexer skips a line at at column 0 (`*`, `:`, a flag, a `#` that starts no
+///   tag), nor a BOM at the start of the input, which no line start reads as
+///   beancount reads it after a `\r`: such a line is left as it is;
+/// * `[A-Z]/[ \t\n]`, a lone capital, which a `\r` after it makes an invalid
+///   token: a line with one is left as it is.
+///
+/// A `\r` inside a string is a space too (its text is no structure). Lines
+/// are found with beancount's own lexer ([`BcLexer`]), so a line start inside
+/// a string that runs over line ends is no line start. `None` where nothing
+/// is rewritten. One pass over the input.
+pub(super) fn stray_cr_analog(src: &str) -> Option<(String, Vec<MovedLine>)> {
+    let b = src.as_bytes();
+    let is_stray = |i: usize| b[i] == b'\r' && b.get(i + 1) != Some(&b'\n');
+    if !(0..b.len()).any(is_stray) {
+        return None;
+    }
+    // Strings that run over a line end, and where each lone capital
+    // beancount's lexer reads as an invalid token ends, in order.
+    let mut multiline: Vec<Range<usize>> = Vec::new();
+    let mut after_capital: Vec<usize> = Vec::new();
+    for (t, r) in BcLexer::at_line_start(src, 0) {
+        match t {
+            Bc::Str if src[r.clone()].contains('\n') => multiline.push(r),
+            Bc::Error if r.len() == 1 && b[r.start].is_ascii_uppercase() => {
+                after_capital.push(r.end);
+            }
+            _ => {}
+        }
+    }
+    let in_string = |at: usize| {
+        let i = multiline.partition_point(|r| r.start < at);
+        i.checked_sub(1).is_some_and(|i| multiline[i].end > at)
+    };
+    let mut out = String::with_capacity(src.len());
+    let mut moved = Vec::new();
+    let mut ls = 0;
+    while ls < b.len() {
+        let nl = src[ls..].find('\n').map_or(b.len(), |i| ls + i);
+        let next = (nl + 1).min(b.len());
+        let line = &src[ls..nl];
+        // The line's end, before the `\r` of a CRLF.
+        let body_end = if nl < b.len() && nl > ls && b[nl - 1] == b'\r' {
+            nl - 1
+        } else {
+            nl
+        };
+        if !(ls..body_end).any(is_stray) {
+            out.push_str(&src[ls..next]);
+            ls = next;
+            continue;
+        }
+        let blank_run = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let lead = if !in_string(ls) && ls + blank_run < body_end && is_stray(ls + blank_run) {
+            let run = src[ls..body_end].len()
+                - src[ls..body_end]
+                    .trim_start_matches([' ', '\t', '\r'])
+                    .len();
+            Some(run)
+        } else {
+            None
+        };
+        let content_start = ls + lead.unwrap_or(0);
+        let content = &src[content_start..body_end];
+        let skipped_at_column_0 = |s: &str| {
+            let cb = s.as_bytes();
+            match cb.first() {
+                Some(b'*' | b':' | b'!' | b'&' | b'?' | b'%') => true,
+                Some(b'#') => !cb.get(1).is_some_and(|&c| {
+                    c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'/' | b'.')
+                }),
+                _ => false,
+            }
+        };
+        let kept = lead.is_some_and(|_| {
+            !content.is_empty()
+                && (skipped_at_column_0(content)
+                    || ls == 0 && content.starts_with(crate::bom::BOM_CHAR))
+        }) || (content_start..body_end).any(|i| is_stray(i) && after_capital.binary_search(&i).is_ok())
+            // (A lone capital the moved content ends with, an invalid token
+            // before the line end, would be one before a blank.)
+            || lead.is_some() && after_capital.binary_search(&body_end).is_ok();
+        if kept {
+            out.push_str(&src[ls..next]);
+            ls = next;
+            continue;
+        }
+        let blanked = |s: &str, at: usize| -> String {
+            s.char_indices()
+                .map(|(i, c)| {
+                    if c == '\r' && is_stray(at + i) {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        };
+        match lead {
+            Some(n) if !content.is_empty() => {
+                out.push_str(&blanked(content, content_start));
+                out.extend(std::iter::repeat_n(' ', n));
+                moved.push(MovedLine {
+                    start: ls,
+                    lead: n,
+                    content: content.len(),
+                });
+            }
+            _ => out.push_str(&blanked(&src[ls..body_end], ls)),
+        }
+        out.push_str(&src[body_end..next]);
+        ls = next;
+    }
+    #[cfg(test)]
+    crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES
+        .with(|c| c.set(c.get() + src.len()));
+    (out != src).then_some((out, moved))
+}
+
+thread_local! {
+    /// Set while the input's stray-`\r` analog is parsed
+    /// ([`model_stray_cr_lines`]), so that parse does not start another.
+    static IN_STRAY_CR_ANALOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Where a position of the analog ([`stray_cr_analog`]) is in the input.
+fn analog_to_input(at: usize, moved: &[MovedLine]) -> usize {
+    let i = moved.partition_point(|m| m.start <= at);
+    match i.checked_sub(1).map(|i| moved[i]) {
+        Some(m) if at < m.start + m.content => at + m.lead,
+        Some(m) if at < m.start + m.content + m.lead => m.start + m.content + m.lead,
+        _ => at,
+    }
+}
+
+/// bison's recovery through a line holding a stray `\r` (#2980). rledger
+/// reports a stray `\r` before a token that lexes as an error, on purpose
+/// (`test_parse_cr_with_more_of_the_line_after_it_stays_an_error`), where
+/// beancount's lexer reads a blank; from such a line on, rledger's errors and
+/// beancount's recovery part. So the input is parsed once more as beancount
+/// reads it ([`stray_cr_analog`]), and from the first line holding a stray `\r`
+/// on, each line has that parse's errors, but a line where rledger reports a
+/// stray `\r` itself, which keeps its own. One more parse, only for an input
+/// with an error and a stray `\r`, never nested.
+pub(super) fn model_stray_cr_lines(
+    errors: &mut Vec<crate::ParseError>,
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    use_green: bool,
+) {
+    use rowan::Language as _;
+    if errors.is_empty()
+        || PHANTOM_DEPTH.with(std::cell::Cell::get) > 0
+        || IN_STRAY_CR_ANALOG.with(std::cell::Cell::get)
+    {
+        return;
+    }
+    let Some((analog, moved)) = stray_cr_analog(stripped) else {
+        return;
+    };
+    // (A BOM at its start would be stripped, and every offset move.)
+    if analog.starts_with(crate::bom::BOM_CHAR) {
+        return;
+    }
+    let off = bom_offset as usize;
+    let b = stripped.as_bytes();
+    let is_stray = |i: usize| b.get(i) == Some(&b'\r') && b.get(i + 1) != Some(&b'\n');
+    let line_ends: Vec<usize> = stripped.match_indices('\n').map(|(i, _)| i).collect();
+    let line_of = |at: usize| line_ends.partition_point(|&nl| nl < at);
+    let Some(first) = (0..b.len()).find(|&i| is_stray(i)) else {
+        return;
+    };
+    let first_line = line_of(first);
+    // The lines where rledger reads a stray `\r` as an invalid token of its
+    // own, whose errors stand for it.
+    let mut own: Vec<usize> = Vec::new();
+    let mut stack = vec![(root.green(), 0usize)];
+    while let Some((node, start)) = stack.pop() {
+        let mut pos = start;
+        for el in node.children() {
+            let len = usize::from(el.text_len());
+            match el {
+                rowan::NodeOrToken::Node(n) => stack.push((n, pos)),
+                rowan::NodeOrToken::Token(t)
+                    if crate::BeancountLanguage::kind_from_raw(t.kind())
+                        == crate::SyntaxKind::ERROR_TOKEN =>
+                {
+                    if let Some(i) = (pos..pos + len).find(|&i| is_stray(i)) {
+                        own.push(line_of(i));
+                    }
+                }
+                rowan::NodeOrToken::Token(_) => {}
+            }
+            pos += len;
+        }
+    }
+    own.sort_unstable();
+    own.dedup();
+    IN_STRAY_CR_ANALOG.with(|f| f.set(true));
+    let sub = super::convert::parse_analog_errors(&analog, use_green);
+    IN_STRAY_CR_ANALOG.with(|f| f.set(false));
+    let keeps_its_own = |line: usize| line < first_line || own.binary_search(&line).is_ok();
+    // A push left open at the end of the input is about the state of the
+    // whole file, which is this parser's, where a line it reports a stray
+    // `\r` on adds no push and no pop: from this parse, wherever its push is.
+    let unclosed = |e: &crate::ParseError| {
+        matches!(
+            e.kind,
+            crate::ParseErrorKind::UnclosedPushtag(_) | crate::ParseErrorKind::UnclosedPushmeta(_)
+        )
+    };
+    errors.retain(|e| unclosed(e) || keeps_its_own(line_of(e.span.start.saturating_sub(off))));
+    for mut e in sub {
+        let start = analog_to_input(e.span.start, &moved);
+        if keeps_its_own(line_of(start)) || unclosed(&e) {
+            continue;
+        }
+        let end = analog_to_input(e.span.end, &moved).max(start);
+        e.span = crate::Span::new(start + off, end + off);
+        errors.push(e);
+    }
+    errors.sort_by_key(|e| e.span.start);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Bc, BcLexer, Kw, accepts};
@@ -2161,6 +2445,34 @@ mod tests {
         assert!(!accepts(&[B::Kw(Kw::Option), B::Str], B::Eol));
     }
 
+    /// The input as beancount reads it: a stray `\r` is a blank, a line whose
+    /// leading blanks hold one has no indent (its content moves to the line
+    /// start, the blanks after it), and every other byte keeps its offset.
+    /// Kept as written: a line whose content beancount would skip at column
+    /// 0, or with a lone capital before a `\r` (an invalid token there).
+    #[test]
+    fn test_stray_cr_analog_reads_a_stray_cr_as_a_blank() {
+        let analog = |src: &str| super::stray_cr_analog(src).map(|(text, _)| text);
+        assert_eq!(analog("a\r\nb\n"), None);
+        assert_eq!(analog("pushtag #a\r$\n").as_deref(), Some("pushtag #a $\n"));
+        assert_eq!(analog("\r  $x\r\nb\n").as_deref(), Some("$x   \r\nb\n"));
+        assert_eq!(analog(" \r\n").as_deref(), None);
+        assert_eq!(analog(" \r \n").as_deref(), Some("   \n"));
+        assert_eq!(
+            analog("\"a\r\n\r  b\"\n").as_deref(),
+            Some("\"a\r\n   b\"\n")
+        );
+        assert_eq!(analog("\r* x\n"), None);
+        assert_eq!(analog("x P\r$\n"), None);
+        assert_eq!(analog(" \rT\r\n"), None);
+        let (text, moved) = super::stray_cr_analog("x\n \r$x y\n").expect("rewritten");
+        assert_eq!(text, "x\n$x y  \n");
+        assert_eq!(super::analog_to_input(2, &moved), 4);
+        assert_eq!(super::analog_to_input(7, &moved), 8);
+        assert_eq!(super::analog_to_input(9, &moved), 9);
+        assert_eq!(super::analog_to_input(0, &moved), 0);
+    }
+
     /// The model lexes each byte a bounded number of times, and parses each
     /// entry bison builds mid-line once, however many failed lines, quiet
     /// lines and such entries the input holds.
@@ -2233,6 +2545,17 @@ mod tests {
                 "orphan lines in a long body",
                 "2024-01-01 open Assets:A\n".to_string()
                     + &"  $x\n  kk: \"v\"\n  kk: \"v\"\n  kk: \"v\"\n".repeat(N),
+            ),
+            // Each parsed twice, the second time as beancount reads it
+            // (`model_stray_cr_lines`).
+            ("stray `\\r` lines", "\r$\n  Assets:A 1 USD\n".repeat(N)),
+            (
+                "stray `\\r` errors and bodies",
+                "2024-01-02 open\rAssets:A\n  \"a\"\n  Assets:A\n".repeat(N),
+            ),
+            (
+                "moved lines and entries after them",
+                " \r$x\n\r  2024-01-02 * \"n\"\n  Assets:A 1 USD\n".repeat(N),
             ),
         ] {
             RECOVERY_SHIFT_SCANNED_BYTES.with(|c| c.set(0));

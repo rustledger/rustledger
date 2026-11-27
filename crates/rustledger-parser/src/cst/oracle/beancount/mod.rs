@@ -541,9 +541,15 @@ pub fn reconcile_errors(source: &str, errors: Vec<ParseError>) -> Vec<ParseError
     claims.own_lines.sort_unstable();
     claims.own_lines.dedup();
     let lines = LineIndex::new(source);
-    let mut out = super::reconcile(&lines, errors, &reference, &claims, classify, |slot| {
-        synthesize(source, slot)
-    });
+    let mut out = super::reconcile(
+        &lines,
+        errors,
+        &reference,
+        &claims,
+        classify,
+        |slot| synthesize(source, slot),
+        |from, to| line_ends_inside_strings(source, from, to),
+    );
     name_invalid_tokens(source, &mut out, &reference);
     never_clean(out, first)
 }
@@ -606,6 +612,29 @@ fn name_invalid_tokens(source: &str, out: &mut [ParseError], reference: &Referen
             super::super::convert::invalid_token_name(text)
         ));
     }
+}
+
+/// Whether every line end in bytes `from..to` of `src` is inside a string:
+/// a statement runs over a line end only inside one (`event "x\nb" x`). The
+/// text is read from `from` on, so a string open before it is not seen; an
+/// rledger error starts at a statement's token, never inside a string.
+/// Linear in the range.
+fn line_ends_inside_strings(src: &str, from: usize, to: usize) -> bool {
+    let Some(text) = src.as_bytes().get(from..to.min(src.len())) else {
+        return false;
+    };
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in text {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'\n' if !in_string => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// `errors` plus the builder errors of the entries bison's recovery builds

@@ -806,7 +806,10 @@ use crate::types::{Error, LedgerOptions};
 /// invalid token is reported at the token and named by it, where a
 /// hand-modeled pass kept its line's error. A source with a parse error
 /// keeps one.
-pub const CACHE_VERSION: u32 = 152;
+/// v153: loader v82, unchanged; parse errors at a multi-line string are
+/// placed by the error oracle's reconciler, not by a hand-modeled pass. A
+/// source with a parse error keeps one.
+pub const CACHE_VERSION: u32 = 153;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

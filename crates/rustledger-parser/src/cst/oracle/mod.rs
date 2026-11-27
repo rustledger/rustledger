@@ -381,7 +381,10 @@ pub struct Claims {
 ///
 /// `classify` sorts rledger's diagnostics, `claims` holds what overlays
 /// claimed, and `synthesize` builds the diagnostic for a slot no rledger
-/// diagnostic covers. The result is sorted by start.
+/// diagnostic covers. `one_statement(from, to)` says whether the text between
+/// the two offsets can be one statement's: its line ends, if any, are inside
+/// tokens (strings) the format lets run over them. The result is sorted by
+/// start.
 pub fn reconcile(
     lines: &LineIndex,
     errors: Vec<ParseError>,
@@ -389,6 +392,7 @@ pub fn reconcile(
     claims: &Claims,
     classify: impl Fn(&ParseError) -> ErrorClass,
     synthesize: impl Fn(&Slot) -> ParseError,
+    one_statement: impl Fn(usize, usize) -> bool,
 ) -> Vec<ParseError> {
     let owned_line = |line: u32| claims.own_lines.binary_search(&line).is_ok();
     // A diagnostic made for a slot starts on the line the slot is reported
@@ -417,6 +421,33 @@ pub fn reconcile(
         }
     }
     let has_slots = |line: u32| groups.binary_search_by_key(&line, |(l, _)| *l).is_ok();
+    // The slots in source order, for `relocate`.
+    let mut in_order: Vec<&Slot> = reference.slots.iter().collect();
+    in_order.sort_by_key(|s| s.span.start);
+    // An error that starts on a line with no slot of its own and holds (or
+    // ends right at) a slot the reference reports on a later line, within one statement
+    // (`one_statement`), reports that slot: it moves to the line the
+    // reference reports it on (#2994: bean-check puts `"a\nb"` at column 0 on
+    // line 2, and the failure after it, `event "x\nb" x` or the end of
+    // `option "a\nb"`, on line 2 too). Every surface maps a span's start to
+    // its line, so the start moves there; the end, and the message, stay.
+    let relocate = |e: &mut ParseError| {
+        let line = lines.line_of(e.span.start);
+        if in_order.is_empty() || has_slots(line) || owned_line(line) {
+            return;
+        }
+        // The first slot at or after its start, on its span or right after
+        // it (the end of the line it fails at, `option "a\nb"`).
+        let k = in_order.partition_point(|s| s.span.start < e.span.start);
+        let Some(slot) = in_order.get(k).filter(|s| s.span.start <= e.span.end) else {
+            return;
+        };
+        if slot.line <= line || !one_statement(e.span.start, slot.span.start) {
+            return;
+        }
+        let start = lines.line_start(slot.line);
+        e.span = crate::Span::new(start, e.span.end.max(start));
+    };
 
     // Each kept diagnostic with its place in `errors`, so the result keeps
     // rledger's order among diagnostics that start together; a synthesized
@@ -431,9 +462,14 @@ pub fn reconcile(
     // the oracle does not model is taken only after those.
     let mut own_on_slot_lines: Vec<(u32, usize, ParseError)> = Vec::new();
     let mut standing: Vec<u32> = Vec::new();
-    for (i, e) in errors.into_iter().enumerate() {
-        let line = lines.line_of(e.span.start);
+    for (i, mut e) in errors.into_iter().enumerate() {
         let class = classify(&e);
+        // Only a syntax diagnostic reports a token; the others stand where
+        // rledger put them.
+        if class == ErrorClass::Syntax {
+            relocate(&mut e);
+        }
+        let line = lines.line_of(e.span.start);
         if owned_line(line) || class == ErrorClass::FileLevel {
             out.push((i, e));
         } else if !has_slots(line) && swallowed_lines.binary_search(&line).is_ok() {
@@ -617,6 +653,7 @@ mod tests {
                 _ => ErrorClass::Other,
             },
             |s| err(s.span.start, s.span.end, &s.message),
+            |_, _| false,
         )
         .into_iter()
         .map(|e| format!("{}:{}", lines.line_of(e.span.start), e.message()))
@@ -676,6 +713,40 @@ mod tests {
                 &reference
             ),
             ["1:parse error: bom"]
+        );
+    }
+
+    #[test]
+    fn test_reconcile_moves_an_error_to_its_slots_later_line() {
+        let src = "aa \"b\nc\" d\nee\n";
+        let reference = Reference {
+            slots: vec![slot(10..11, 2)],
+            ..Reference::default()
+        };
+        let run_with = |one_statement: bool| {
+            let lines = LineIndex::new(src);
+            reconcile(
+                &lines,
+                vec![err(0, 11, "at d")],
+                &reference,
+                &Claims::default(),
+                |_| ErrorClass::Syntax,
+                |s| err(s.span.start, s.span.end, &s.message),
+                |_, _| one_statement,
+            )
+            .into_iter()
+            .map(|e| (lines.line_of(e.span.start), e.span.end, e.message()))
+            .collect::<Vec<_>>()
+        };
+        // Within one statement it moves, keeping its end and message.
+        assert_eq!(run_with(true), [(2, 11, "parse error: at d".to_string())]);
+        // Otherwise it stands where it is, and the slot gets its own.
+        assert_eq!(
+            run_with(false),
+            [
+                (1, 11, "parse error: at d".to_string()),
+                (2, 11, "parse error: synth".to_string())
+            ]
         );
     }
 

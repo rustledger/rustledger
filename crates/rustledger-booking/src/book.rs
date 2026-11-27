@@ -5328,24 +5328,19 @@ mod tests {
     /// the validator and `cmd/check.rs` use.
 
     // =========================================================================
-    // Regression test for issue #875 / beancount#889
+    // Issue #875's ledger, decided as beancount decides it
     //
-    // Scenario: buy stock with cost, sell without cost spec (leaves a simple
-    // negative position), then buy more with cost spec. The third transaction
-    // must succeed as an augmentation, not fail as a reduction.
+    // Buy at a cost, sell without a cost spec (leaving a simple negative
+    // position), then buy at a cost again. bean-check 3.2.3 refuses the third
+    // transaction (`No position matches`): its `is_reduced_by` sees the
+    // opposite-sign simple position, so the purchase is a reduction that
+    // matches no lot. #875 made it an augmentation; the maintainer chose
+    // beancount's answer (question 3 of the semantic differential, #3071).
     // =========================================================================
 
     #[test]
-    fn test_augmentation_after_sell_without_cost_spec() {
-        // Regression test for issue #875 / beancount#889.
-        //
-        // Before the fix, the sell-without-cost-spec left a -25 HOOG simple
-        // position, causing the subsequent buy-with-cost-spec to be
-        // misclassified as a reduction (because is_reduced_by saw opposite
-        // signs without distinguishing cost-bearing vs simple positions).
+    fn test_purchase_at_cost_after_sell_without_cost_spec_is_refused() {
         let mut engine = BookingEngine::new();
-
-        // 2024-01-10: Buy 100 HOOG {1.50 EUR}
         let buy1 = Transaction::new(date(2024, 1, 10), "Buy 100 HOOG")
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(100), "HOOG")).with_cost(
@@ -5355,21 +5350,15 @@ mod tests {
                 ),
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-150), "EUR")));
-
         engine.apply(&buy1).expect("fixture fits in Decimal");
-
-        // 2024-01-15: Sell 25 HOOG without cost spec (price-only)
         let sell = Transaction::new(date(2024, 1, 15), "Sell 25 HOOG without cost spec")
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-25), "HOOG"))
                     .with_price(PriceAnnotation::unit(Amount::new(dec!(1.60), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(40), "EUR")));
-
         engine.apply(&sell).expect("fixture fits in Decimal");
-
-        // 2024-01-20: Buy 50 more HOOG {1.70 EUR} - this MUST succeed
-        let buy2 = Transaction::new(date(2024, 1, 20), "Buy 50 more HOOG - should succeed")
+        let buy2 = Transaction::new(date(2024, 1, 20), "Buy 50 more HOOG")
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(50), "HOOG")).with_cost(
                     CostSpec::empty()
@@ -5378,27 +5367,11 @@ mod tests {
                 ),
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-85), "EUR")));
-
-        // This should NOT fail. Before the fix, the engine would see the
-        // -25 HOOG simple position and try to reduce, which would fail
-        // because the cost spec wouldn't match any existing lot.
-        let result = engine.book(&buy2);
         assert!(
-            result.is_ok(),
-            "Buy with cost spec after sell without cost spec should succeed as augmentation, \
-             but got error: {:?}",
-            result.err()
+            engine.book(&buy2).is_err(),
+            "a purchase at a cost against an opposite uncosted position is a reduction \
+             that matches no lot, as in beancount"
         );
-
-        let booked = result.unwrap();
-        engine
-            .apply(&booked.transaction)
-            .expect("fixture fits in Decimal");
-
-        // Verify final inventory state
-        let inv = engine.inventory(&"Assets:Stocks".into()).unwrap();
-        // 100 (original) - 25 (sold simple) + 50 (new lot) = 125 HOOG total
-        assert_eq!(inv.units("HOOG"), dec!(125));
     }
 
     #[test]

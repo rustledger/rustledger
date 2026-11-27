@@ -97,12 +97,22 @@ impl NativePlugin for ZerosumPlugin {
         let mut txn_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
         for (i, directive) in input.directives.iter().enumerate() {
-            if directive.directive_type == "transaction" {
-                if earliest_date.is_none() || directive.date < *earliest_date.as_ref().unwrap() {
-                    earliest_date = Some(directive.date.clone());
-                }
-
-                if let DirectiveData::Transaction(ref txn) = directive.data {
+            // The matched accounts' opens are dated at the ledger's first
+            // entry, whatever its type, as the Python plugin dates them
+            // (`entries[0].date`): an open at the first matched
+            // transaction's date made the account appear later than
+            // beancount has it (an `open` or `commodity` usually comes
+            // first).
+            if earliest_date
+                .as_ref()
+                .is_none_or(|earliest| directive.date < *earliest)
+            {
+                earliest_date = Some(directive.date.clone());
+            }
+            if directive.directive_type == "transaction"
+                && let DirectiveData::Transaction(ref txn) = directive.data
+            {
+                {
                     for (zs_account, _) in &zerosum_accounts {
                         if txn.postings.iter().any(|p| &p.account == zs_account) {
                             txn_indices.entry(zs_account.clone()).or_default().push(i);
@@ -708,6 +718,73 @@ mod tests {
             accounts[1],
             vec!["Assets:Investment", "Assets:ZeroSum-Matched:Transfers"],
             "leg written SECOND must stay second"
+        );
+    }
+
+    /// The matched account is opened on the ledger's first entry's date,
+    /// whatever that entry is, as the Python plugin opens it
+    /// (`beancount_reds_plugins` 0.4: `entries[0].date`). bean-check 3.2.3
+    /// with this ledger opens `Assets:ZeroSum-Matched:Transfers` on
+    /// 2001-02-03, the `open` before the transfers; the open was dated at the
+    /// first transaction instead (2024-01-01).
+    #[test]
+    fn test_zerosum_opens_the_matched_account_at_the_first_entry() {
+        let config = r"{
+            'zerosum_accounts': {
+                'Assets:ZeroSum:Transfers': ('Assets:ZeroSum-Matched:Transfers', 30)
+            }
+        }";
+        let open = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2001-02-03".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec![],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+        let input = PluginInput {
+            directives: vec![
+                open,
+                create_transfer_txn(
+                    "2024-01-01",
+                    "Assets:Bank",
+                    "Assets:ZeroSum:Transfers",
+                    "100.00",
+                    "USD",
+                ),
+                create_transfer_txn(
+                    "2024-01-03",
+                    "Assets:ZeroSum:Transfers",
+                    "Assets:Investment",
+                    "100.00",
+                    "USD",
+                ),
+            ],
+            options: PluginOptions::default(),
+            config: Some(config.to_string()),
+        };
+        let input_dirs = input.directives.clone();
+        let output = ZerosumPlugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
+        let opened: Vec<(String, String)> = directives
+            .iter()
+            .filter_map(|d| match &d.data {
+                DirectiveData::Open(o) if o.account.contains("Matched") => {
+                    Some((d.date.clone(), o.account.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            opened,
+            [(
+                "2001-02-03".to_string(),
+                "Assets:ZeroSum-Matched:Transfers".to_string()
+            )]
         );
     }
 

@@ -9,7 +9,7 @@
 # An unlisted generated ledger is pinned as matching (or a deviation).
 # `@ ledgers`: source<TAB>id<TAB>verdict<TAB>path, one row per compat file.
 
-#@ptadiff-rev ee62eb6525baa5652a968bc49376fd09209a0110
+#@ptadiff-rev b9ab374e5046d5cea79b3e19d4dc5f709e501d7a
 #@category-key sem
 #@generators s1:1:2500 s2:1:2500 s3:1:2500 s4:1:2500
 #@inputs compat 730

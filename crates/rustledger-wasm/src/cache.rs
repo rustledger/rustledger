@@ -802,7 +802,11 @@ use crate::types::{Error, LedgerOptions};
 /// v151: loader v82, unchanged; parse errors move: a line where beancount
 /// reads a BOM into an account keeps rledger's one BOM diagnostic and no
 /// other syntax error. A source with a parse error keeps one.
-pub const CACHE_VERSION: u32 = 151;
+/// v152: loader v82, unchanged; parse errors move: an error standing for one
+/// invalid token is reported at the token and named by it, where a
+/// hand-modeled pass kept its line's error. A source with a parse error
+/// keeps one.
+pub const CACHE_VERSION: u32 = 152;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -39,7 +39,7 @@
 2024-01-02 *\n  kk: <BOM><BOM>kk:<BOM><BOM>\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM>1:A:B \t-2.5\n	3:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>Assets:A\t-2.5\n	4:1	bom-glued-to-account
-2024-01-02 *\n  <BOM>1:A{\n	4:1	bom-glued-to-account-in-error-line+eof-error-on-last-line
+2024-01-02 *\n  <BOM>1:A{\n	4:1	eof-error-on-last-line
 2024-01-02 custom "b" 1 <BOM>Ü:A\t;c\t<BOM>1.5 <BOM>x\n	3:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A:B\t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>kk:<BOM>;c\t<BOM>1.5T#! {\n	4:1	bom-glued-to-account
@@ -54,7 +54,7 @@
 2024-01-02 *\n  kk: <BOM>a-b:C<BOM>a-b:C\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A:B<BOM>a-b:C\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>assets:A;c\t<BOM>1.5<BOM>%\n	4:1	bom-glued-to-account
-2024-01-02 *\n  <BOM>Ü:A\t-2.5\t{\n	4:1	bom-glued-to-account-in-error-line+eof-error-on-last-line
+2024-01-02 *\n  <BOM>Ü:A\t-2.5\t{\n	4:1	eof-error-on-last-line
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A;c\t<BOM>1.5\n	3:1	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>kk:<BOM><BOM>x\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>1:A<BOM>x\n	4:1	bom-glued-to-account
@@ -96,7 +96,7 @@
 2024-01-02 *\n  <BOM>assets:A;c\t<BOM>1.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  kk: <BOM><BOM>assets:A<BOM>\t;c\t<BOM>1.5@\n	4:1	bom-glued-to-account
 2024-01-02 custom "b" 1 <BOM><BOM>assets:A ;c\t<BOM>1.5\n	3:1	bom-glued-to-account
-2024-01-02 *\n  <BOM>assets:A{\n	4:1	bom-glued-to-account-in-error-line+eof-error-on-last-line
+2024-01-02 *\n  <BOM>assets:A{\n	4:1	eof-error-on-last-line
 2024-01-02 *\n  kk: <BOM>-:A<BOM>\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM><BOM>assets:A\t-2.5\n	4:1	bom-glued-to-account
 2024-01-02 *\n  <BOM>a-b:C \t-2.5\n	4:1	bom-glued-to-account

@@ -233,23 +233,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // start is what places the error on its line; the failure point is
     // `usize::MAX` when the header grammar finds no defect.
     let mut grammar_failures: Vec<(usize, usize, usize)> = Vec::new();
-    // The span of each transaction node, in order, BOM frame: a body line
-    // there may start with tags and links (`drop_errors_inside_a_line_error`).
-    let mut transactions: Vec<(usize, usize)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
         // alongside its CST node so the post-pass span fixup
         // can index them in parallel.
         let cst_node = directive.syntax().clone();
-        if matches!(directive, ast::Directive::Transaction(_)) {
-            let range = cst_node.text_range();
-            let off = bom_offset as usize;
-            transactions.push((
-                usize::from(range.start()) + off,
-                usize::from(range.end()) + off,
-            ));
-        }
         // `is_directive_producing` tracks whether THIS arm is
         // expected to emit a `Spanned<Directive>` (the 12
         // directive types). The catch-all below uses it to
@@ -519,13 +508,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // holding a quieted one verbatim too (`ParseResult::defect_spans`).
     let defect_spans: Vec<crate::Span> = errors.iter().map(|e| e.span).collect();
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
-    drop_errors_inside_a_line_error(
-        &mut errors,
-        stripped,
-        bom_offset,
-        &grammar_failures,
-        &transactions,
-    );
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
     // Last: every pass above keys on where an error starts.
@@ -5882,10 +5864,6 @@ pub mod test_counters {
         /// hold a bad date, and the stretches between dates, on this thread.
         pub static DATE_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
-        /// Bytes `drop_errors_inside_a_line_error` stepped over: the source
-        /// scan for line starts, and each line prefix it lexed (#2787).
-        pub static ERROR_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
-            const { std::cell::Cell::new(0) };
         /// Work `report_no_metadata_continuations` did: header tokens and
         /// line bytes stepped over, and errors visited (#2813).
         pub static NO_META_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -6256,9 +6234,6 @@ fn fixup_directive_spans(
 mod tests {
     use super::*;
 
-    /// `drop_errors_inside_a_line_error` (#2787) scans the source once for
-    /// line starts and lexes each broken line's prefix once, so many broken
-    /// lines, or many unreadable tokens on one long line, stay linear.
     /// `report_no_metadata_continuations` (#2813) visits each header token,
     /// each checked line and each error once, so many `option` / `pushtag`
     /// lines with an indented line after each, among many other errors,
@@ -6308,25 +6283,6 @@ mod tests {
             .filter(|e| e.to_string().contains("duplicate metadata field on entry"))
             .count();
         assert_eq!(repeats, N);
-    }
-
-    #[test]
-    fn test_drop_errors_inside_a_line_error_is_linear_in_the_input() {
-        const N: usize = 20_000;
-        let head = "2024-01-01 open Assets:A\n2024-01-02 *\n  Assets:A  1 USD\n";
-        let many_lines = format!("{head}{}", "  * h\n".repeat(N));
-        let one_line = format!("{head}  *{}\n", " h".repeat(N));
-        for (label, src, errors) in [("many lines", many_lines, N), ("one line", one_line, N)] {
-            test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(0));
-            let result = crate::parse(&src);
-            let scanned = test_counters::ERROR_LINE_SCANNED_BYTES.with(std::cell::Cell::get);
-            assert!(
-                scanned <= 3 * src.len(),
-                "{label}: stepped over {scanned} bytes of a {}-byte input",
-                src.len()
-            );
-            assert_eq!(result.errors.len(), errors, "{label}");
-        }
     }
 
     /// Reporting bad dates must stay linear in the input (#2868 review): one
@@ -9279,263 +9235,6 @@ mod custom_rejected_values {
     }
 }
 
-/// Make the count of generic errors on a line beancount cannot read match
-/// beancount's (#2787).
-///
-/// Two of our rules can fire for one line: the line (or directive) error,
-/// and an inline error for each `ERROR_TOKEN` on it. `  * h` after a
-/// transaction's postings gave two overlapping errors. Beancount reports an
-/// `Invalid token` error for each token its lexer cannot read, and a syntax
-/// error only when its grammar fails at a readable token first: once the
-/// lexer has reported an error, bison's recovery reports nothing more for
-/// that statement. So `  * h` is one error there (the `*` is a posting
-/// flag, then `h` is unreadable), while `  ** h` and `  @ x` are two (the
-/// grammar fails at the second `*`, at the `@`).
-///
-/// Here the line error stands for beancount's first error on the line. When
-/// the tokens before the first `ERROR_TOKEN` on it are a readable start of
-/// an indented line (nothing, a posting flag, or an optional flag, an
-/// account and a prefix of a plain amount), the grammar has not failed
-/// before it, so that `ERROR_TOKEN`'s own error is the one beancount reports
-/// and the line error already stands for it: it is dropped, and a generic
-/// line error takes over its name (`unexpected input: invalid token 'h'`,
-/// as bean-check's `Invalid token: 'h'`), so the editor still names it.
-/// The same holds on a header line the converter dropped with a whole-node
-/// error, when the header grammar (`grammar_failures`) first fails at that
-/// very token (`2024-01-01 open Ass'ets:A`, #2872).
-/// Every later `ERROR_TOKEN` keeps its error, as each is one more `Invalid
-/// token` there. The line error is the one kept, not the inline one,
-/// because the formatter's verbatim-copy ranges are read from the outer
-/// errors. The outer error may be any syntax error (a
-/// posting's `unexpected trailing tokens` holds the `oops` in
-/// `Assets:A  -1 oops USD`); only a generic inner one is dropped. Errors of
-/// any other kind are left alone, and so is a generic error on a later line
-/// of a multi-line one.
-///
-/// `errors` is sorted by start and stays so. Linear in the number of errors
-/// plus, only when there are two or more syntax errors, the source length
-/// (for the line starts) and one lexing of each covered line's prefix.
-fn drop_errors_inside_a_line_error(
-    errors: &mut Vec<crate::ParseError>,
-    stripped: &str,
-    bom_offset: u32,
-    grammar_failures: &[(usize, usize, usize)],
-    transactions: &[(usize, usize)],
-) {
-    use crate::logos_lexer::Token;
-    let is_generic = |e: &crate::ParseError| match &e.kind {
-        crate::ParseErrorKind::SyntaxError(m) => m == "unexpected input",
-        _ => false,
-    };
-    let is_bom =
-        |e: &crate::ParseError| matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody);
-    // A BOM error takes part only as an inner error: the inline one of a
-    // BOM-led invalid token (#2928), never a line error that holds others.
-    let mut syntax: Vec<usize> = (0..errors.len())
-        .filter(|&i| {
-            matches!(errors[i].kind, crate::ParseErrorKind::SyntaxError(_)) || is_bom(&errors[i])
-        })
-        .collect();
-    if syntax.len() < 2 || !syntax.iter().any(|&i| is_generic(&errors[i])) {
-        return;
-    }
-    // Longest first among equal starts, so a container precedes what it holds.
-    syntax.sort_by_key(|&i| (errors[i].span.start, std::cmp::Reverse(errors[i].span.end)));
-    let bom = bom_offset as usize;
-    #[cfg(test)]
-    test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + stripped.len()));
-    let newlines: Vec<usize> = stripped
-        .bytes()
-        .enumerate()
-        .filter_map(|(i, b)| (b == b'\n').then_some(i + bom))
-        .collect();
-    // The line `at` is on: its start and the position of its `\n`.
-    let line_of = |at: usize| {
-        let k = newlines.partition_point(|&n| n < at);
-        let start = k.checked_sub(1).map_or(bom, |k| newlines[k] + 1);
-        (start, newlines.get(k).copied().unwrap_or(usize::MAX))
-    };
-    // Whether `at` is inside a transaction node: its body lines may also
-    // start with tags and links.
-    let in_transaction = |at: usize| {
-        let k = transactions.partition_point(|&(s, _)| s <= at);
-        k.checked_sub(1).is_some_and(|k| at < transactions[k].1)
-    };
-    // Whether `prefix`, the text of an indented line before its first
-    // unreadable token, is a readable start of one. In a transaction's body
-    // (`tags_links_read`), a run of tags and links is one too: beancount's grammar
-    // reads such a line there (its `posting_or_kv_list INDENT tags_links
-    // EOL`), so `  #tag h` fails first at the `h`, one `Invalid token`
-    // (#2997). Under any other directive the line is a syntax error at the
-    // tag, and both errors are kept.
-    let readable_start = |prefix: &str, tags_links_read: &dyn Fn() -> bool| {
-        #[cfg(test)]
-        test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + prefix.len()));
-        let tokens: Vec<Token<'_>> = crate::logos_lexer::tokenize(prefix)
-            .into_iter()
-            .map(|(t, _)| t)
-            .filter(|t| {
-                !matches!(
-                    t,
-                    Token::Indent(_) | Token::DeepIndent(_) | Token::Whitespace(_)
-                )
-            })
-            .collect();
-        let is_flag = |t: &Token<'_>| {
-            matches!(
-                t,
-                Token::Star | Token::Pending | Token::Flag(_) | Token::Hash
-            )
-        };
-        // A posting's start: an account, then a prefix of a plain amount
-        // (`[-+]? NUMBER CURRENCY`). Anything longer is left to the grammar
-        // (`Assets:A****` fails at the `*`), so both errors are kept.
-        let posting_start = |rest: &[Token<'_>]| match rest {
-            [Token::Account(_), amount @ ..] => {
-                let amount = match amount {
-                    [Token::Minus | Token::Plus, tail @ ..] => tail,
-                    other => other,
-                };
-                matches!(
-                    amount,
-                    [] | [Token::Number(_)] | [Token::Number(_), Token::Currency(_)]
-                )
-            }
-            _ => false,
-        };
-        let tags_links = |rest: &[Token<'_>]| {
-            !rest.is_empty()
-                && rest
-                    .iter()
-                    .all(|t| matches!(t, Token::Tag(_) | Token::Link(_)))
-        };
-        match tokens.as_slice() {
-            [] => true,
-            rest if tags_links(rest) => tags_links_read(),
-            [first] if is_flag(first) => true,
-            [first, rest @ ..] if is_flag(first) => posting_start(rest),
-            rest => posting_start(rest),
-        }
-    };
-    let mut dropped = vec![false; errors.len()];
-    // The outermost syntax error seen so far: its span, the end of its
-    // first line, and whether an error inside it was already considered.
-    let mut cover: Option<(usize, usize, usize, bool, usize)> = None;
-    // The line errors that take over a dropped error's name.
-    let mut renamed: Vec<(usize, usize)> = Vec::new();
-    for &i in &syntax {
-        let span = errors[i].span;
-        match cover.as_mut() {
-            Some((start, end, line_end, seen, outer))
-                if span.start >= *start && span.end <= *end =>
-            {
-                if *seen || span.start >= *line_end {
-                    continue;
-                }
-                // Whether the line's grammar first fails at this token, so
-                // its own error is beancount's first one on the line and the
-                // line error stands for it: a directive the converter
-                // dropped, whose header grammar first fails here
-                // (`2024-01-01 open Ass'ets:A`), or an indented line whose
-                // start before it is one beancount reads. A line that starts
-                // with a stray `\r` counts too: that `\r` is trivia only when
-                // the run it starts reaches this token
-                // (`TokenIter::stray_cr_trivia_end`, #2966), so the prefix is
-                // blanks, which beancount reads as nothing (`\r$` after a
-                // transaction is one `Invalid token` there).
-                //
-                // A transaction's body line may start with tags and links
-                // (`  #tag h`, #2997), except when a lone capital glued to
-                // what follows it (`Z\r`, `Z` at the end of the input) comes
-                // later on the line: beancount reports that as one more
-                // invalid token, which no error here stands for yet, so the
-                // line keeps both its errors there, as before #2997.
-                let fails_here = || {
-                    let (line_start, line_end) = line_of(span.start);
-                    let prefix = stripped
-                        .get(line_start - bom..span.start - bom)
-                        .unwrap_or_default();
-                    let tags_links_read = || {
-                        let at_eof = line_end == usize::MAX;
-                        let rest = stripped
-                            .get(span.start - bom..)
-                            .map(|rest| {
-                                if at_eof {
-                                    rest
-                                } else {
-                                    &rest[..=line_end - span.start]
-                                }
-                            })
-                            .unwrap_or_default();
-                        #[cfg(test)]
-                        test_counters::ERROR_LINE_SCANNED_BYTES
-                            .with(|c| c.set(c.get() + rest.len()));
-                        in_transaction(span.start) && !holds_a_glued_lone_capital(rest, at_eof)
-                    };
-                    grammar_failures
-                        .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
-                        .is_ok_and(|j| grammar_failures[j].2 == span.start)
-                        || (prefix.starts_with([' ', '\t', '\r'])
-                            && readable_start(prefix, &tags_links_read))
-                };
-                // A mid-line BOM-led invalid token where the line's grammar
-                // first fails (`price USD 1 <BOM>EUR`, `  <BOM>a`):
-                // beancount's one `Invalid token` there. The token's own
-                // `BomInDirectiveBody` is that error, and the generic line
-                // error is dropped for it, so the line is one error, reported
-                // at the token, as it was before #2928 merged the BOM into the
-                // token. (Unlike the generic merge below, the inner error is
-                // the one kept here: it already has the right kind and the
-                // token's span. The formatter still copies the directive
-                // verbatim, as the token lies inside its node.) Any other BOM
-                // error is left alone and does not count as the first error
-                // inside the line error.
-                if is_bom(&errors[i]) {
-                    if is_generic(&errors[*outer]) && fails_here() {
-                        *seen = true;
-                        dropped[*outer] = true;
-                    }
-                    continue;
-                }
-                *seen = true;
-                // Another rule's error there first stands for a grammar
-                // failure before any unreadable token: keep everything.
-                if !is_generic(&errors[i]) {
-                    continue;
-                }
-                if fails_here() {
-                    dropped[i] = true;
-                    renamed.push((*outer, i));
-                }
-            }
-            _ if is_bom(&errors[i]) => {}
-            _ => {
-                let (_, line_end) = line_of(span.start);
-                cover = Some((span.start, span.end, line_end, false, i));
-            }
-        }
-    }
-    for (outer, inner) in renamed {
-        if !is_generic(&errors[outer]) {
-            continue;
-        }
-        let span = errors[inner].span;
-        let text = stripped
-            .get(span.start.saturating_sub(bom)..span.end.saturating_sub(bom))
-            .unwrap_or_default();
-        errors[outer].kind = crate::ParseErrorKind::SyntaxError(format!(
-            "unexpected input: invalid token '{}'",
-            invalid_token_name(text)
-        ));
-    }
-    let mut index = 0;
-    errors.retain(|_| {
-        let keep = !dropped[index];
-        index += 1;
-        keep
-    });
-}
-
 /// The `Invalid token` errors of one `ERROR_NODE` line, after its line error
 /// (`emit_error_node_line`, which both parse paths run this from).
 ///
@@ -10095,31 +9794,6 @@ fn quiet_after_invalid_tokens(
         index += 1;
         keep
     });
-}
-
-/// Whether `line` holds a lone capital beancount reads as the start of an
-/// invalid token, which the lexer here reads as a one-letter currency or
-/// flag: one glued to the character after it (`T#!`, `A$`, `B\r` on a CRLF
-/// line), as beancount's `CAPITAL` needs a space, a tab or a `\n` after it
-/// (the rule `invalid_runs` reads a heading's rest by), or one at the very
-/// end of the input (`at_eof`, no line ending after the line). `line` holds
-/// its `\n`, so a CRLF line's `\r` lexes as its line ending. The line's
-/// error stands for that token, as it does on an ordinary error line, so it
-/// is kept. Linear in the line, lexed as the middle of a line.
-fn holds_a_glued_lone_capital(line: &str, at_eof: bool) -> bool {
-    use crate::logos_lexer::{Token, TokenIter};
-    TokenIter::new_mid_line(line, true, 0).any(|(token, span)| {
-        let lone = match token {
-            Token::Currency(c) | Token::Flag(c) => {
-                c.len() == 1 && c.as_bytes()[0].is_ascii_uppercase()
-            }
-            _ => false,
-        };
-        lone && line[span.end..]
-            .chars()
-            .next()
-            .map_or(at_eof, |c| !matches!(c, ' ' | '\t' | '\n'))
-    })
 }
 
 /// Whether beancount's grammar for the indented line `stripped[line_start..

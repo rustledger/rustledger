@@ -541,10 +541,71 @@ pub fn reconcile_errors(source: &str, errors: Vec<ParseError>) -> Vec<ParseError
     claims.own_lines.sort_unstable();
     claims.own_lines.dedup();
     let lines = LineIndex::new(source);
-    let out = super::reconcile(&lines, errors, &reference, &claims, classify, |slot| {
+    let mut out = super::reconcile(&lines, errors, &reference, &claims, classify, |slot| {
         synthesize(source, slot)
     });
+    name_invalid_tokens(source, &mut out, &reference);
     never_clean(out, first)
+}
+
+/// The message rledger's parser gives a token it cannot read, before it is
+/// named.
+const UNNAMED_INVALID_TOKEN: &str = "unexpected input";
+
+/// Names the token in each of rledger's unnamed `unexpected input` errors
+/// that stands for one of beancount's lexer errors (`unexpected input:
+/// invalid token 'h'`, as bean-check's `Invalid token: 'h'`), so the editor
+/// still names it: the narrowest error on the token, which may be a line
+/// error holding it and no other token. `out` is sorted by start, as the
+/// slots are.
+fn name_invalid_tokens(source: &str, out: &mut [ParseError], reference: &Reference) {
+    let lexical: Vec<&Slot> = reference
+        .slots
+        .iter()
+        .filter(|s| s.kind == SlotKind::Lexical && s.span.start < s.span.end)
+        .collect();
+    if lexical.is_empty() {
+        return;
+    }
+    let overlaps = |e: &ParseError, s: &Slot| {
+        s.span.start < e.span.end.max(e.span.start + 1) && e.span.start < s.span.end
+    };
+    let width = |e: &ParseError| e.span.end - e.span.start;
+    // For each error, the first lexical slot it overlaps and how many it
+    // does; for each slot, the narrowest error on it. Both lists are sorted
+    // by start, so each error steps over only the slots it overlaps.
+    let mut narrowest = vec![usize::MAX; lexical.len()];
+    let mut first_slot: Vec<Option<(usize, usize)>> = Vec::with_capacity(out.len());
+    let mut k = 0;
+    for e in out.iter() {
+        while lexical.get(k).is_some_and(|s| s.span.end <= e.span.start) {
+            k += 1;
+        }
+        let n = lexical[k.min(lexical.len())..]
+            .iter()
+            .take_while(|s| overlaps(e, s))
+            .count();
+        for w in &mut narrowest[k..k + n] {
+            *w = (*w).min(width(e));
+        }
+        first_slot.push((n > 0).then_some((k, n)));
+    }
+    for (e, at) in out.iter_mut().zip(first_slot) {
+        // Only an error on one token is named by it, and only the narrowest
+        // there: not a line error holding several tokens, nor one holding a
+        // token another error names.
+        let Some((k, 1)) = at else { continue };
+        if width(e) > narrowest[k]
+            || !matches!(&e.kind, ParseErrorKind::SyntaxError(m) if m == UNNAMED_INVALID_TOKEN)
+        {
+            continue;
+        }
+        let text = source.get(lexical[k].span.clone()).unwrap_or_default();
+        e.kind = ParseErrorKind::SyntaxError(format!(
+            "{UNNAMED_INVALID_TOKEN}: invalid token '{}'",
+            super::super::convert::invalid_token_name(text)
+        ));
+    }
 }
 
 /// `errors` plus the builder errors of the entries bison's recovery builds
@@ -647,6 +708,30 @@ mod tests {
             .filter(|s| s.kind == SlotKind::Semantic)
             .map(|s| (s.line, s.message))
             .collect()
+    }
+
+    #[test]
+    fn test_name_invalid_tokens_names_the_narrowest_error_on_one_token() {
+        let messages = |src: &str| -> Vec<String> {
+            crate::parse(src)
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let head = "2024-01-01 open Assets:A\n2024-01-02 *\n  Assets:A  1 USD\n";
+        assert_eq!(
+            messages(&format!("{head}  * h\n")),
+            ["parse error: unexpected input: invalid token 'h'"]
+        );
+        // A line error holding several invalid tokens is not named by one;
+        // each token's own error is.
+        let tags = messages("#TODO buy 27\" monitor\n");
+        assert_eq!(tags[0], "parse error: unexpected input", "{tags:?}");
+        assert!(
+            tags[1..].iter().all(|m| m.contains("invalid token")),
+            "{tags:?}"
+        );
     }
 
     #[test]

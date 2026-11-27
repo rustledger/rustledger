@@ -62,16 +62,22 @@ fn assert_invariants(src: &str) {
 const UNEXPECTED: &str = "parse error: unexpected input";
 
 /// The errors `spans` stand for: the line error first, then each invalid token
-/// after the first on the line, named, as beancount reports each one.
+/// after the first on the line, named, as beancount reports each one. A line
+/// error that holds one invalid token alone is named by it (its line ending
+/// is no part of it).
 fn expected_errors(src: &str, spans: &[(usize, usize)]) -> Vec<(String, usize, usize)> {
     spans
         .iter()
         .enumerate()
         .map(|(k, &(s, e))| {
-            let message = if k == 0 {
+            let message = if k == 0 && spans.len() > 1 {
                 UNEXPECTED.to_string()
             } else {
-                let name: String = src[s..e].chars().flat_map(char::escape_debug).collect();
+                let name: String = src[s..e]
+                    .trim_end_matches(['\r', '\n'])
+                    .chars()
+                    .flat_map(char::escape_debug)
+                    .collect();
                 format!("{UNEXPECTED}: invalid token '{name}'")
             };
             (message, s, e)
@@ -123,7 +129,10 @@ fn test_parse_unterminated_quote_keeps_the_following_directives() {
 fn test_parse_unterminated_narration_keeps_the_rest_of_the_ledger() {
     let src = "2024-01-01 * \"Lunch\n  Assets:A  1 USD\n  Assets:B\n2024-01-02 open Assets:B\n";
     let result = parse(src);
-    assert_eq!(errors(&result), [(UNEXPECTED.to_string(), 13, 19)]);
+    assert_eq!(
+        errors(&result),
+        [(format!("{UNEXPECTED}: invalid token '\\\"Lunch'"), 13, 19)]
+    );
     assert_eq!(
         summary(&result),
         ["2024-01-01 txn 2 postings", "2024-01-02 open Assets:B"]
@@ -149,13 +158,9 @@ fn test_parse_backslash_before_newline_in_a_string_keeps_its_pairing() {
     assert_eq!(
         errors(&result),
         [
-            (
-                "parse error: unexpected input: invalid token '\\\"ab'".to_string(),
-                0,
-                29
-            ),
-            (UNEXPECTED.to_string(), 29, 33),
-            (UNEXPECTED.to_string(), 33, 37),
+            (format!("{UNEXPECTED}: invalid token '\\\"ab'"), 25, 28),
+            (format!("{UNEXPECTED}: invalid token 'cd\\\\'"), 29, 33),
+            (format!("{UNEXPECTED}: invalid token 'ef\\\"'"), 33, 37),
         ]
     );
     assert_eq!(

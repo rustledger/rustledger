@@ -510,14 +510,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
-    // Last: every pass above keys on where an error starts.
-    report_at_multi_line_string_ends(
-        &mut errors,
-        source_file.syntax(),
-        stripped,
-        bom_offset,
-        &grammar_failures,
-    );
     // Make the errors agree with beancount's, computed from its grammar (the
     // error oracle). The hand-modeled passes above are being retired behind
     // it; `RLEDGER_ERROR_ORACLE=0` turns it off to compare them alone.
@@ -5768,7 +5760,7 @@ const fn swallows_the_next_line(kind: &crate::ParseErrorKind) -> bool {
 /// a transaction-body line no posting takes) starts at the line or its first
 /// token. `multiline_strings` and `error_starts` are as
 /// `previous_line_is_a_gap` takes them. The one rule for
-/// `report_invalid_dates` and `report_at_multi_line_string_ends`.
+/// `report_invalid_dates`.
 fn grammar_fails_at(
     stripped: &str,
     from: usize,
@@ -10327,142 +10319,6 @@ pub(super) fn is_a_builder_error(e: &crate::ParseError) -> bool {
         crate::ParseErrorKind::InvalidBookingMethod(_) => true,
         crate::ParseErrorKind::SyntaxError(m) => m.starts_with(super::txn_header::TOO_MANY_STRINGS),
         _ => false,
-    }
-}
-
-/// Report a syntax error whose offending token is a multi-line string on the
-/// line the string ends, as beancount does (#2994).
-///
-/// bison reports a syntax error at the lexer's current line, which is where
-/// its lookahead token ENDS: for a `STRING` that runs over line ends, its last
-/// line (bean-check 3.2.3: `"a\nb"` at column 0 is an error on line 2).
-/// rledger starts the error at the token, so `LineIndex`, and every surface
-/// that maps a span to a line (`rledger check`, the LSP, WASM, FFI), put it on
-/// the string's first line. This moves the span's start to the first byte of
-/// the string's last line, keeping its end, so every surface reports the
-/// line beancount does from the one span; the message still names the
-/// string.
-///
-/// The offending token is the one [`grammar_fails_at`] finds, the rule
-/// `report_invalid_dates` uses: an error on an indented line after a gap
-/// fails at the indent, on the line the string starts, so it stays. Errors
-/// beancount's builder raises are left alone (`is_a_builder_error`).
-///
-/// Last of the error passes: every pass before it keys on where an error
-/// starts.
-fn report_at_multi_line_string_ends(
-    errors: &mut [crate::ParseError],
-    root: &crate::SyntaxNode,
-    stripped: &str,
-    bom_offset: u32,
-    grammar_failures: &[(usize, usize, usize)],
-) {
-    if errors.is_empty() || !stripped.contains('"') {
-        return;
-    }
-    let off = bom_offset as usize;
-    // Every string that runs over a line end, as (start, offset of its last
-    // `\n` in it), in order: one walk of the green tree, so each error's
-    // lookup below is a binary search, not a descent from the root that
-    // scans the root's children (quadratic in a file with many errors).
-    let mut multi_line: Vec<(usize, usize)> = Vec::new();
-    let mut stack = vec![(root.green(), 0usize)];
-    while let Some((node, start)) = stack.pop() {
-        let mut pos = start;
-        for el in node.children() {
-            match el {
-                rowan::NodeOrToken::Node(n) => stack.push((n, pos)),
-                rowan::NodeOrToken::Token(t) => {
-                    let kind =
-                        <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
-                    if kind == crate::SyntaxKind::STRING
-                        && let Some(nl) = t.text().rfind('\n')
-                    {
-                        multi_line.push((pos, nl));
-                    }
-                }
-            }
-            pos += usize::from(el.text_len());
-        }
-    }
-    multi_line.sort_unstable();
-    // The multi-line string at `at` (stripped frame), if one starts there.
-    let string_at = |at: usize| {
-        multi_line
-            .binary_search_by_key(&at, |&(s, _)| s)
-            .ok()
-            .map(|i| multi_line[i].1)
-    };
-    let is_blank = |b: &u8| matches!(b, b' ' | b'\t');
-    // First, without the gap rule: the errors whose first token is one.
-    let candidates: Vec<(usize, usize, bool)> = errors
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| !is_a_builder_error(e))
-        .filter_map(|(i, e)| {
-            // A dropped directive's whole-node error fails where its header
-            // grammar does (`grammar_failures`), which may be a string after
-            // the header's start (`note "a\nb"`, with no account), or a token
-            // after such a string (`event "a\nb" x`, at the `x`): a header
-            // runs over a line end only inside a string, so the failure is
-            // on the line of that token, where beancount's lexer is then.
-            let j = grammar_failures.partition_point(|&(start, _, _)| start < e.span.start);
-            if let Some(&(start, header_start, failed_at)) = grammar_failures.get(j)
-                && start == e.span.start
-            {
-                let at = failed_at.checked_sub(off)?;
-                if let Some(last_newline) = string_at(at) {
-                    return Some((i, at + last_newline + 1, true));
-                }
-                let header_start = header_start.checked_sub(off)?;
-                let line = stripped.get(..at)?.rfind('\n').map_or(0, |n| n + 1);
-                return (line > header_start).then_some((i, line, true));
-            }
-            let from = e.span.start.checked_sub(off)?.min(stripped.len());
-            let at = from + stripped[from..].bytes().take_while(is_blank).count();
-            string_at(at).map(|last_newline| (i, at + last_newline + 1, false))
-        })
-        .collect();
-    if candidates.is_empty() {
-        return;
-    }
-    let mut multiline_strings: Vec<std::ops::Range<usize>> = root
-        .descendants_with_tokens()
-        .filter_map(rowan::NodeOrToken::into_token)
-        .filter(|t| t.kind() == crate::SyntaxKind::STRING && t.text().contains('\n'))
-        .map(|t| t.text_range().start().into()..t.text_range().end().into())
-        .collect();
-    multiline_strings.sort_unstable_by_key(|r| r.start);
-    let mut error_starts: Vec<usize> = errors
-        .iter()
-        .filter(|e| swallows_the_next_line(&e.kind))
-        .map(|e| e.span.start.saturating_sub(off))
-        .collect();
-    error_starts.sort_unstable();
-    let mut moved = false;
-    for (i, last_line, header_failure) in candidates {
-        let e = &mut errors[i];
-        let from = e.span.start.saturating_sub(off).min(stripped.len());
-        if !header_failure
-            && string_at(grammar_fails_at(
-                stripped,
-                from,
-                &multiline_strings,
-                &error_starts,
-            ))
-            .is_none()
-        {
-            continue;
-        }
-        let start = last_line + off;
-        e.span = Span::new(start, e.span.end.max(start));
-        moved = true;
-    }
-    // A dropped directive's error moves from its header's start past any
-    // error on the header before the string (an invalid date): keep the list
-    // in order. Stable, so errors that start together keep their order.
-    if moved {
-        errors.sort_by_key(|e| e.span.start);
     }
 }
 

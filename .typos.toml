@@ -49,6 +49,8 @@ Nd = "Nd"
 extend-exclude = [
   "crates/rustledger-plugin/tests/fixtures/effective_date/configs.json",
   "tests/baselines/parse-error-parity.manifest",
+  # The semantic parity manifest: the same kind of ids.
+  "tests/baselines/semantic-parity.manifest",
   # Hex hashes of matrix inputs (#2928), which read as misspellings.
   "crates/rustledger-parser/tests/data/bom_combination_matrix_matching.tsv",
   # Vendored byte for byte from pta-standards (British spelling); the table

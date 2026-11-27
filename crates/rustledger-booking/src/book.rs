@@ -2625,6 +2625,60 @@ impl BookingEngine {
     }
 }
 
+/// Why [`account_balances`] could not realize a ledger.
+#[derive(Debug, Clone, Error)]
+pub enum RealizeError {
+    /// Replaying a booked transaction failed.
+    #[error(transparent)]
+    Booking(#[from] BookingError),
+    /// Presenting an AVERAGE account's pool left `Decimal`'s range.
+    #[error(transparent)]
+    Overflow(#[from] rustledger_core::OverflowError),
+}
+
+/// Every account's inventory after the booked `directives`, as reports show it.
+///
+/// The one realization `balances`, `balsheet`, `income` and the semantic
+/// differential's snapshot all read, so none of them re-derives it (#1726,
+/// where copies of this loop drifted between reports).
+///
+/// Realization goes through the booking engine ([`BookingEngine::apply`]), so
+/// held commodities keep their lots at cost and reductions match those lots by
+/// each account's booking method, the machinery the loader's book phase uses.
+/// The engine is built with the ledger's own default method
+/// ([`BookingEngine::for_ledger`]), not STRICT: under a global `option
+/// "booking_method" "NONE"` a STRICT replay reads a booked augmentation as a
+/// reduction and fails (#2386). An AVERAGE account is shown as its pools
+/// ([`BookingEngine::into_presented_inventories`], #2543).
+///
+/// `directives` must be booked (costs resolved, interpolations applied):
+/// that is `apply`'s precondition. Accounts come out sorted, so a caller's
+/// rows are stable across runs.
+///
+/// `rustledger_returns::terminal_value` re-derives this loop with an
+/// `<= end_date` filter (it cannot take a filtered slice without a copy); if
+/// the realization here changes, update that copy in lockstep.
+///
+/// # Errors
+///
+/// [`RealizeError::Booking`] when replaying a transaction fails (a running
+/// balance leaving `Decimal`'s range included), [`RealizeError::Overflow`]
+/// when an AVERAGE pool does (#1863): a report prints these inventories as
+/// exact totals, so an unrepresentable one must abort rather than render a
+/// clamped figure.
+pub fn account_balances(
+    directives: &[Directive],
+    booking_method: BookingMethod,
+) -> Result<std::collections::BTreeMap<rustledger_core::Account, Inventory>, RealizeError> {
+    let mut engine = BookingEngine::for_ledger(booking_method, directives);
+    for directive in directives {
+        if let Directive::Transaction(txn) = directive {
+            engine.apply(txn)?;
+        }
+    }
+    Ok(engine.into_presented_inventories()?.into_iter().collect())
+}
+
 /// Whether interpolation must solve the units number of `posting`: they are
 /// elided, or written as a bare currency. A number written without its
 /// currency is not one: its currency is inferred, its number is not.

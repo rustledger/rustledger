@@ -218,6 +218,51 @@ gh run view <run-id> --log --job <job-id> \
 
 Then run `--update` once more so the rows are sorted into place.
 
+## Semantic parity (`semantic-parity.manifest`)
+
+The parse-error manifest's counterpart for everything after the parser:
+what rledger makes of a well-formed ledger after a full load (booking,
+interpolation, pads, balance assertions, options and includes, plugins)
+against beancount 3.2.3's `loader.load_file`. Each side describes each
+ledger with a snapshot in pta-standards' `ptadiff-snapshot/1` schema
+(`tooling/differential/SNAPSHOT.md`): errors, booked entries, final
+balances and effective options. rledger's side is the `semantic_snapshot`
+example of `rustledger-loader`. The harness,
+`scripts/compat-semantic-parity.py`, documents the inputs, the
+normalization and the `sem` category key; rledger's deliberate differences
+are declared in `scripts/semantic_parity_hooks.py`, each pointing at its
+section of `docs/reference/compatibility.md`, and counted apart from the
+mismatches.
+
+The manifest pins `#@ptadiff-rev`, the generator sample (`#@generators`),
+the count of every category key (`@ categories`) and every deliberate
+deviation (`@ deviations`), the id and key of every generated ledger that
+does not match (`@ mismatches`), and one row per downloaded compat file
+(`@ ledgers`). The `Semantic parity` job in `.github/workflows/compat.yml`
+runs it on every PR with `--check`, with the same rules as the parse-error
+job: a ledger pinned as matching (or as a deviation) that now mismatches is
+a regression; any pin that moved (a ledger that now matches, a changed
+category, a category or deviation count) is a stale pin, fixed by
+`--update`; a run that does not cover the pinned sample fails; an unpinned
+compat file only warns, with its `pin-row`.
+
+To update the pin:
+
+```bash
+rev=$(sed -n 's/^#@ptadiff-rev //p' tests/baselines/semantic-parity.manifest)
+pip install "ptadiff @ git+https://github.com/rustledger/pta-standards@${rev}#subdirectory=tooling/differential"
+# (or pass a clean pta-standards checkout: --ptadiff PATH/tooling/differential)
+cargo build --release -p rustledger-loader --example semantic_snapshot
+python3 -I scripts/compat-semantic-parity.py \
+    --rledger target/release/examples/semantic_snapshot \
+    --compat-dir tests/compatibility/files --update
+git diff --stat tests/baselines/semantic-parity.manifest
+```
+
+Add `--minimize 10 --report report.md` to see the largest categories with
+minimized examples. pta-standards' nightly `semantic-differential` workflow
+runs a far larger sample against `main`.
+
 ## Phase-3-of-#1262 staleness
 
 When `rustledger-cst::parse` becomes the production parser (phase 3.2

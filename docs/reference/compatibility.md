@@ -103,6 +103,13 @@ Rustledger shows:        111.11 USD
 
 This is a display-only difference - actual values are identical. Rustledger preserves the original precision, which is technically more accurate.
 
+The per-currency precision the display context infers also differs in one
+input: an amount in a `custom` directive (Fava's `custom "budget" ... 400.00
+USD`) does not inform it here, where beancount's parser counts it. The scale
+a budget line is written with is a choice about the declaration, not about
+the amounts the ledger holds, and a budget report's figures are pro-rated
+(see `DisplayContext::from_directives`).
+
 ### 6. Balance Tolerance Grammar
 
 Beancount's tolerance grammar is `NUMBER ~ NUMBER CURRENCY`: one currency,
@@ -639,6 +646,28 @@ Pinned by the `booking-average` and
 `grammar-cost-merge` cases in `crates/rustledger/tests/fixtures/upstream-checks/`
 (see [Upstream Check Coverage](upstream-checks.md)).
 
+### 21. Plugins Declared in Included Files
+
+Beancount 3.2.3 runs the plugins the top-level file declares and ignores a
+`plugin` line in an included file: such a file's `auto_accounts` or
+`implicit_prices` does nothing when the file is included. rustledger runs an
+included file's plugins too, so a sub-ledger that declares the plugins it
+needs still works when it is included, and runs each distinct plugin (its
+name and config) once, from the first file that declares it, so a plugin
+declared in the main file and again in an include does not add its entries
+twice.
+
+| Ledger | rustledger | Python beancount |
+|---|---|---|
+| `included.beancount` declares `plugin "beancount.plugins.implicit_prices"` | prices are added | no prices |
+| Both files declare `implicit_prices` | it runs once | it runs once (the main file's) |
+
+This is deliberate: a file that is checked on its own and also included
+should mean the same thing both ways. Pinned by the rustdoc and tests of
+`rustledger_loader::plugins_in_run_order` (issue #3042). The semantic
+differential (`scripts/compat-semantic-parity.py`) counts a ledger with a
+plugin only an included file declares as this deviation.
+
 ## Parse-Error Differences
 
 rledger reports beancount 3.2.3's syntax errors on the same lines and in the
@@ -790,6 +819,20 @@ As upstream does, the new entry at the effective date keeps the transaction's
 payee, tags, links and metadata, adding `original_date` and the link, and the
 moved posting keeps its metadata, `effective_date` included. Pinned by the
 tests in `crates/rustledger-plugin/src/native/plugins/effective_date.rs`.
+
+### The `currency_accounts` Plugin
+
+Both add the same neutralizing postings, with the same amounts, to the same
+`Equity:CurrencyAccounts:<CUR>` accounts, and strip the same prices. Only the
+order of a transaction's postings differs: beancount moves each currency
+group's postings together, each followed by its neutralizing posting
+(`EUR`, `-EUR`, `USD`, `-USD`), while rustledger keeps the postings in the
+order they were written and appends the neutralizing ones after them
+(`EUR`, `USD`, `-EUR`, `-USD`), as `zerosum` does. No balance moves either
+way. Pinned by the tests in
+`crates/rustledger-plugin/src/native/plugins/currency_accounts.rs`; the
+semantic differential counts a posting-order difference in a ledger that
+runs this plugin as this deviation.
 
 ## Running Compatibility Tests
 

@@ -28,8 +28,8 @@ mod pad;
 
 pub use book::{
     BOOKING_FAILURE_CODE, BookedTransaction, BookingEngine, BookingError, CapitalGain,
-    LedgerBookResult, TransactionReplay, book, book_transactions, clear_interpolated_marks,
-    posting_lot_total, present_inventory,
+    LedgerBookResult, RealizeError, TransactionReplay, account_balances, book, book_transactions,
+    clear_interpolated_marks, posting_lot_total, present_inventory,
 };
 pub use interpolate::{
     AmbiguousElision, InterpolationError, InterpolationResult, Rollback, UnknownGroup,

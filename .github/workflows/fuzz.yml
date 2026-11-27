@@ -47,6 +47,7 @@ on:
           - fuzz_parse
           - fuzz_parse_line
           - fuzz_green_eq_red
+          - fuzz_format_roundtrip
           - fuzz_query_parse
           - fuzz_query_execute
           - fuzz_booking
@@ -100,6 +101,9 @@ jobs:
             crate: rustledger-parser
           - target: fuzz_green_eq_red
             crate: rustledger-parser
+          - target: fuzz_format_roundtrip
+            crate: rustledger-parser
+            seed_from: fuzz_parse
           - target: fuzz_query_parse
             crate: rustledger-query
           - target: fuzz_query_execute
@@ -160,13 +164,18 @@ jobs:
           if git fetch --depth=1 origin fuzz-corpus 2>/dev/null; then
             # `git archive` refuses a path that does not exist in the tree, so
             # ask first — a target with no corpus yet is normal, not an error.
-            if git ls-tree --name-only FETCH_HEAD -- "${{ matrix.target }}" | grep -q .; then
-              git archive FETCH_HEAD "${{ matrix.target }}" \
-                | tar -x -C "$CORPUS" --strip-components=1
-              echo "corpus: $(find "$CORPUS" -type f 2>/dev/null | wc -l) inputs from the fuzz-corpus branch"
-            else
-              echo "corpus: the branch exists but holds nothing for ${{ matrix.target }} yet"
-            fi
+            # A target with `seed_from` also takes that target's corpus: the
+            # formatter round-trip oracle checks every input the parser's
+            # fuzzer ever found interesting, not only its own discoveries.
+            for source in ${{ matrix.target }} ${{ matrix.seed_from }}; do
+              if git ls-tree --name-only FETCH_HEAD -- "$source" | grep -q .; then
+                git archive FETCH_HEAD "$source" \
+                  | tar -x -C "$CORPUS" --strip-components=1
+                echo "corpus: $(find "$CORPUS" -type f 2>/dev/null | wc -l) inputs after $source from the fuzz-corpus branch"
+              else
+                echo "corpus: the branch exists but holds nothing for $source yet"
+              fi
+            done
           else
             echo "corpus: no fuzz-corpus branch yet, starting cold"
           fi

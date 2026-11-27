@@ -67,6 +67,8 @@ tempfile.workspace = true
 # only pull serde transitively via `serde_json`, which isn't enough to name the
 # `serde::de::DeserializeOwned` trait directly.
 serde.workspace = true
+# Generated-ledger property tests (tests/format_surface_parity.rs).
+proptest.workspace = true
 
 [[bin]]
 name = "rledger-lsp"

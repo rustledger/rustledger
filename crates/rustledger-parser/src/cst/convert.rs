@@ -527,13 +527,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         &grammar_failures,
         &transactions,
     );
-    super::recovery::quiet_bison_recovery(
-        &mut errors,
-        source_file.syntax(),
-        stripped,
-        bom_offset,
-        &grammar_failures,
-    );
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
     name_mid_line_hash_comments(&mut errors, stripped, bom_offset);
     // Last: every pass above keys on where an error starts.
@@ -10742,37 +10735,6 @@ fn quiet_after_failed_line_starts(
                 && matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody)
                 && bom_left_to_diagnostic[i])
     });
-}
-
-/// Whether `e`, an error on a declaration's header line, is one at which
-/// beancount's grammar or lexer fails the statement (#2993 part B), so its
-/// recovery starts there: a grammar error or a construct check, an invalid
-/// token or date, an unclosed string. Not an error beancount's builder raises
-/// while it still builds the entry (`is_a_builder_error`: a booking method, too
-/// many strings), nor an account-name check, which beancount makes of a
-/// statement it builds, nor rledger's own diagnostics (the deprecated pipe,
-/// a pop of nothing pushed).
-pub(super) fn fails_the_header(e: &crate::ParseError) -> bool {
-    use crate::ParseErrorKind as K;
-    !is_a_builder_error(e)
-        && !matches!(&e.kind, K::SyntaxError(m) if is_a_builder_message(m))
-        && matches!(
-            e.kind,
-            K::SyntaxError(_)
-                | K::Expected(_)
-                | K::UnexpectedChar(_)
-                | K::UnexpectedEof
-                | K::MissingField(_)
-                | K::MissingAccount
-                | K::MissingAmount
-                | K::MissingCurrency
-                | K::MissingDirective
-                | K::MissingNewline
-                | K::InvalidDate(_)
-                | K::InvalidDateValue(_)
-                | K::UnclosedString
-                | K::InvalidEscape(_)
-        )
 }
 
 /// Whether `line` holds a number beancount's lexer rejects: a run of digits

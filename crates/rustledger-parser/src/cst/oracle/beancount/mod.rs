@@ -86,6 +86,11 @@ impl ReferenceOracle for BeancountOracle {
         let mut reference = Reference {
             slots,
             recovery,
+            discarded: outcome
+                .discarded
+                .iter()
+                .map(|&(a, b)| a as usize..b as usize)
+                .collect(),
             rebuilt,
             statements: outcome
                 .statements
@@ -109,9 +114,9 @@ impl ReferenceOracle for BeancountOracle {
 
 /// The dated entries bison's recovery started (their first token shifted
 /// while it was recovering) away from a line start (in the middle of a line
-/// it was discarding, or on an indented line) and then built.
+/// it was discarding, or on an indented line), built or dropped later.
 ///
-/// beancount BUILDS such an entry, and the indented lines after it are its
+/// beancount reads such an entry, and the indented lines after it are its
 /// body, so its errors there are the ones that entry's own parse gives
 /// (rledger does not emit the entry itself, a recovery artifact).
 fn rebuilt_statements(
@@ -122,7 +127,7 @@ fn rebuilt_statements(
     let b = src.as_bytes();
     statements
         .iter()
-        .filter(|s| s.built && !s.directive)
+        .filter(|s| !s.directive)
         .map(|s| s.start as usize..s.end as usize)
         .filter(|s| {
             let in_recovery = recovery
@@ -234,12 +239,14 @@ fn slot_of(src: &str, event: &Event) -> Slot {
     }
 }
 
-/// A token's text, shortened for a message.
+/// A token's text, shortened for a message: its first line, 40 characters
+/// at most.
 fn token_text(src: &str, l: Lexeme) -> String {
     let text = src
         .get(l.start as usize..l.end as usize)
         .unwrap_or_default();
-    let mut out: String = text.chars().take(40).collect();
+    let first = text.split(['\r', '\n']).next().unwrap_or_default();
+    let mut out: String = first.chars().take(40).collect();
     if out.len() < text.len() {
         out.push('…');
     }
@@ -322,7 +329,7 @@ fn rledger_message(src: &str, at: Lexeme, expected: u64) -> String {
         Tok::Eof | Tok::Eol => msg.push_str(describe(at.tok)),
         Tok::Indent => msg.push_str("indent"),
         _ => {
-            let _ = write!(msg, "`{}`", token_text(src, at));
+            let _ = write!(msg, "\"{}\"", token_text(src, at));
         }
     }
     let mut seen: Vec<&str> = Vec::new();
@@ -357,10 +364,11 @@ pub fn syntax_message(tok: Tok, expected: u64) -> String {
 /// model them and they stand.
 fn classify(e: &ParseError) -> ErrorClass {
     match &e.kind {
+        ParseErrorKind::UnclosedPushtag(_) | ParseErrorKind::UnclosedPushmeta(_) => {
+            ErrorClass::FileLevel
+        }
         ParseErrorKind::InvalidPoptag(_)
-        | ParseErrorKind::UnclosedPushtag(_)
         | ParseErrorKind::InvalidPopmeta(_)
-        | ParseErrorKind::UnclosedPushmeta(_)
         | ParseErrorKind::DeprecatedPipeSymbol
         | ParseErrorKind::InvalidBookingMethod(_) => ErrorClass::Other,
         ParseErrorKind::SyntaxError(m)
@@ -375,11 +383,19 @@ fn classify(e: &ParseError) -> ErrorClass {
 }
 
 /// The diagnostic for a slot no rledger diagnostic covers.
-fn synthesize(slot: &Slot) -> ParseError {
-    ParseError::new(
-        ParseErrorKind::SyntaxError(slot.message.clone()),
-        Span::new(slot.span.start, slot.span.end),
-    )
+fn synthesize(src: &str, slot: &Slot) -> ParseError {
+    let span = Span::new(slot.span.start, slot.span.end);
+    let text = src.get(slot.span.clone()).unwrap_or_default();
+    // A number beancount's lexer rejects for its grouping or its length is
+    // the invalid number rledger's own lexer would name.
+    let number = !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b',' || b == b'.');
+    if slot.kind == SlotKind::Lexical && number && text.as_bytes()[0].is_ascii_digit() {
+        return ParseError::new(ParseErrorKind::InvalidNumber(text.to_string()), span);
+    }
+    ParseError::new(ParseErrorKind::SyntaxError(slot.message.clone()), span)
 }
 
 /// beancount's own tokens over `src`, no overlay applied: `(name, line,
@@ -486,9 +502,8 @@ pub fn reconcile_errors(source: &str, errors: Vec<ParseError>) -> Vec<ParseError
     let set = overlays::Overlays::new();
     let all = set.all();
     let reference = BeancountOracle.reference(source, &all, true);
-    if reference.slots.is_empty() && errors.is_empty() {
-        return errors;
-    }
+    let first = errors.first().cloned();
+    let errors = with_rebuilt_builder_errors(source, errors, &reference);
     let mut claims = Claims {
         own: vec![false; errors.len()],
         own_lines: Vec::new(),
@@ -500,9 +515,59 @@ pub fn reconcile_errors(source: &str, errors: Vec<ParseError>) -> Vec<ParseError
     claims.own_lines.sort_unstable();
     claims.own_lines.dedup();
     let lines = LineIndex::new(source);
-    let first = errors.first().cloned();
-    let out = super::reconcile(&lines, errors, &reference, &claims, classify, synthesize);
+    let out = super::reconcile(&lines, errors, &reference, &claims, classify, |slot| {
+        synthesize(source, slot)
+    });
     never_clean(out, first)
+}
+
+/// `errors` plus the builder errors of the entries bison's recovery builds
+/// in the middle of a line (the reference's `rebuilt` statements): beancount
+/// builds such an entry, so it runs its builder's checks on it (an invalid
+/// booking method, a negative price), where rledger, which reads the entry
+/// as part of a failed line, does not. Each such entry's text is parsed on
+/// its own once (the nesting guard keeps that parse from consulting the
+/// oracle in turn), and its errors that are no syntax errors are added at
+/// their place, unless rledger already reports the same one. Sorted by start.
+fn with_rebuilt_builder_errors(
+    source: &str,
+    mut errors: Vec<ParseError>,
+    reference: &Reference,
+) -> Vec<ParseError> {
+    if reference.rebuilt.is_empty() {
+        return errors;
+    }
+    // Only the ones beancount builds: it checks nothing of a dropped one.
+    let built = |r: &std::ops::Range<usize>| {
+        reference
+            .statements
+            .iter()
+            .any(|s| s.built && s.start == r.start && s.end == r.end)
+    };
+    for r in &reference.rebuilt {
+        let Some(text) = source.get(r.clone()) else {
+            continue;
+        };
+        let built = built(r);
+        for mut e in crate::parse(text).errors {
+            // Of one beancount drops, only what its grammar reported while it
+            // read it: a pipe in the header, before the drop.
+            let wanted = if built {
+                classify(&e) == ErrorClass::Other
+            } else {
+                matches!(e.kind, ParseErrorKind::DeprecatedPipeSymbol)
+            };
+            if !wanted {
+                continue;
+            }
+            e.span = Span::new(e.span.start + r.start, e.span.end + r.start);
+            if !errors.iter().any(|x| x.span == e.span && x.kind == e.kind) {
+                errors.push(e);
+            }
+        }
+    }
+    errors.sort_by_key(|e| e.span.start);
+    errors
 }
 
 /// A parse rledger found an error in never comes out clean: the error oracle
@@ -722,6 +787,85 @@ mod tests {
             tl * 1e3,
             large.len()
         );
+    }
+
+    /// A whole parse with the oracle does work linear in its input on every
+    /// shape of beancount's error recovery: failed lines and the quiet ones
+    /// after them, entries its recovery starts mid-line (each parsed once
+    /// more on its own for its builder's errors), stray `\r`s, BOMs. (These
+    /// are the shapes the hand-modeled recovery pass was held linear on.)
+    #[test]
+    fn test_parse_with_the_oracle_is_linear_on_recovery_shapes() {
+        let shapes: [(&str, fn(usize) -> String); 16] = [
+            ("failed headers and blanks", |n| {
+                "pushtag #a $\n\n  2024-02-30 5\n".repeat(n)
+            }),
+            ("bad postings", |n| {
+                "2024-01-02 * \"n\"\n".to_string() + &"  Assets:A 1 USD 5\n".repeat(n)
+            }),
+            ("second-date entries", |n| {
+                "2024-01-02 2024-01-03 * \"n\"\n  Assets:A 1 USD\n".repeat(n)
+            }),
+            ("entries on one line", |n| {
+                "$ 2024-01-02 * \"y\" ".repeat(n) + "\n"
+            }),
+            ("nested entries", |n| {
+                "$\n".to_string() + &"  2024-01-02 * \"n\"\n".repeat(n)
+            }),
+            ("statements after windows", |n| {
+                "$\n2024-01-30 open\n".repeat(n)
+            }),
+            ("BOM-led lines", |n| {
+                "\u{FEFF}g \u{FEFF}Assets:A\n".repeat(n)
+            }),
+            ("entries with an invalid token", |n| {
+                "$ 2024-01-02 * \"y\" $\n  Assets:A 1 USD\n".repeat(n)
+            }),
+            ("orphan indented lines", |n| "  $x\n\n\n".repeat(n)),
+            ("orphan lines after indented comments", |n| {
+                "\n".to_string() + &"  ; c\n  ; d\n\n  $x\n\n\n".repeat(n)
+            }),
+            ("lines after options in a body", |n| {
+                "2024-01-02 * \"n\"\n".to_string()
+                    + &"  option \"title\" \"x\"\n  $x\n  Assets:B 1 USD\n".repeat(n)
+            }),
+            ("undated declarations failing mid-line", |n| {
+                "~ popmeta kk: @ x\n~ pushmeta kk: \"v\" @\n".repeat(n)
+            }),
+            ("stray `\\r` lines", |n| "\r$\n  Assets:A 1 USD\n".repeat(n)),
+            ("entries nested in entries", |n| {
+                "$\n".to_string() + &"  2024-01-02 open Assets:Z \"XYZ\"\n".repeat(n)
+            }),
+            ("windows going on past an entry's body", |n| {
+                "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\"s\"\n".repeat(n)
+            }),
+            ("pipes in entries recovery drops", |n| {
+                "AB-C\nkey:2024/01/03  P | 1\n".repeat(n)
+            }),
+        ];
+        super::super::set_enabled_on_this_thread(Some(true));
+        let time = |src: &str| {
+            (0..2)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    std::hint::black_box(crate::parse(src));
+                    t.elapsed().as_secs_f64()
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        for (label, make) in shapes {
+            let (small, large) = (make(500), make(2000));
+            let (ts, tl) = (time(&small), time(&large));
+            assert!(
+                tl < ts.mul_add(9.0, 0.05),
+                "{label}: {:.1} ms for {} bytes, {:.1} ms for {} bytes",
+                ts * 1e3,
+                small.len(),
+                tl * 1e3,
+                large.len()
+            );
+        }
+        super::super::set_enabled_on_this_thread(None);
     }
 
     /// No input makes the oracle panic: each ASCII byte in each position the

@@ -77,6 +77,8 @@ pub struct Outcome {
     /// or shifted while `yyerrstatus` was above 0. Sorted, adjacent tokens
     /// merged.
     pub recovery: Vec<(u32, u32)>,
+    /// The part of `recovery` bison discarded (not shifted). Sorted, merged.
+    pub discarded: Vec<(u32, u32)>,
     /// Dropped declarations always; built ones too when the caller asked for
     /// the full trace.
     pub statements: Vec<Statement>,
@@ -85,13 +87,17 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn mark_recovery(&mut self, l: Lexeme) {
+    fn mark_recovery(&mut self, l: Lexeme, discarded: bool) {
         if l.end <= l.start {
             return;
         }
-        match self.recovery.last_mut() {
+        let add = |ranges: &mut Vec<(u32, u32)>| match ranges.last_mut() {
             Some(last) if last.1 >= l.start => last.1 = last.1.max(l.end),
-            _ => self.recovery.push((l.start, l.end)),
+            _ => ranges.push((l.start, l.end)),
+        };
+        add(&mut self.recovery);
+        if discarded {
+            add(&mut self.discarded);
         }
     }
 }
@@ -212,17 +218,30 @@ pub fn run(tokens: impl Iterator<Item = Lexeme>, src_len: u32, full_trace: bool)
             } else {
                 {
                     idle_steps = 0;
-                    let next = match tokens.next() {
-                        Some(l) => {
-                            last_line = l.line;
-                            l
+                    let next = if let Some(l) = tokens.next() {
+                        last_line = l.line;
+                        l
+                    } else {
+                        // What follows the last token (blanks, a comment with
+                        // no line end) passes while bison is still recovering:
+                        // as quiet as a token it discards, and as unread.
+                        if errstatus > 0 && last_end < src_len {
+                            out.mark_recovery(
+                                Lexeme {
+                                    tok: Tok::Eof,
+                                    start: last_end,
+                                    end: src_len,
+                                    line: last_line,
+                                },
+                                true,
+                            );
                         }
-                        None => Lexeme {
+                        Lexeme {
                             tok: Tok::Eof,
                             start: src_len,
                             end: src_len,
                             line: last_line,
-                        },
+                        }
                     };
                     if next.tok == Tok::Error {
                         // The scanner's YYerror: reported by the lexer, then
@@ -251,7 +270,7 @@ pub fn run(tokens: impl Iterator<Item = Lexeme>, src_len: u32, full_trace: bool)
                     // Shift.
                     if errstatus > 0 {
                         errstatus -= 1;
-                        out.mark_recovery(la);
+                        out.mark_recovery(la, false);
                     }
                     stack.push((act, la.start));
                     state = act;
@@ -298,7 +317,7 @@ pub fn run(tokens: impl Iterator<Item = Lexeme>, src_len: u32, full_trace: bool)
                 match lookahead {
                     Some(l) if l.tok == Tok::Eof => return out, // YYABORT
                     Some(l) => {
-                        out.mark_recovery(l);
+                        out.mark_recovery(l, true);
                         last_end = l.end;
                         lookahead = None;
                     }

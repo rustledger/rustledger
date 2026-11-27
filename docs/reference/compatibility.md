@@ -671,8 +671,11 @@ on the statement's line on both.
 
 A `\r` that is not part of a CRLF line end is a blank to beancount's lexer.
 rledger reports one before a token, or at the start of a line, as an error of
-its own, and the line it is on keeps rledger's errors. Overlay
-`stray-carriage-return` (issue #2980).
+its own. On a line beancount reports errors on, the `\r` stands for one of
+them, so the line has as many errors as in beancount; on a line beancount
+reports nothing on, it is an error beancount does not have; on a line
+beancount's error recovery swallows, it is as quiet as the rest of the line.
+Overlay `stray-carriage-return` (issue #2980).
 
 ### P4. A Tag Line After the First Posting
 

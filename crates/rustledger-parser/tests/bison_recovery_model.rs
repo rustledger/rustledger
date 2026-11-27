@@ -438,9 +438,9 @@ fn test_parse_indented_comment_after_a_column_0_comment_is_accepted() {
 /// after a blank line or a column-0 comment, after a directive that takes no
 /// metadata) fails at its indent, `syntax error, unexpected INDENT`, and
 /// every lexer error on it is one more error there: `  $x` is two errors, the
-/// indent's and `Invalid token: '$x'`. rledger's line error stands for the
-/// indent, and the line's first invalid token gets an error of its own,
-/// which names it.
+/// indent's and `Invalid token: '$x'`. rledger's line error, which covers the
+/// invalid token, stands for that token, and the indent gets the error oracle's
+/// own, which names it.
 #[test]
 fn test_parse_orphan_indented_line_reports_its_indent_and_its_invalid_tokens() {
     assert_counts(&with_crlf(vec![
@@ -468,7 +468,7 @@ fn test_parse_orphan_indented_line_reports_its_indent_and_its_invalid_tokens() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message().contains("invalid token '$x'")),
+            .any(|e| e.message().contains("unexpected indent")),
         "{errors:?}"
     );
 }
@@ -485,7 +485,11 @@ fn test_parse_orphan_indented_line_after_an_accepted_indented_comment() {
         ("  ; c\n\n  $x\n".to_string(), vec![(3, 1)]),
         ("  ; c\n; d\n  $x\n".to_string(), vec![(3, 1)]),
         ("  ; c\n  Assets:A $\n".to_string(), vec![(2, 1)]),
-        ("  ; c\n  !\n".to_string(), vec![]),
+        // Quiet there too, but the file is no clean one: beancount rejects
+        // it (at the indent rledger reads as a comment), and a parse rledger
+        // finds an error in never comes out clean, so the orphan line keeps
+        // rledger's error.
+        ("  ; c\n  !\n".to_string(), vec![(2, 1)]),
         ("  ; c\n\n\n  $x\n".to_string(), vec![(4, 2)]),
         ("  ; c\n* h\n* h\n  $x\n".to_string(), vec![(4, 2)]),
     ]));
@@ -526,7 +530,8 @@ fn test_parse_invalid_account_starts_the_recovery_window() {
 /// `declarations`, so the indented line after it fails at its indent
 /// (`syntax error, unexpected INDENT`), where rledger reads that line as part
 /// of the transaction. On `  $x` that indent error is one more than the
-/// invalid token's, which rledger names already: the indent's is added.
+/// invalid token's: rledger's line error and its error naming the token
+/// stand for the two.
 #[test]
 fn test_parse_indented_line_after_an_option_in_a_body_reports_its_indent() {
     let src = format!("{T}  Assets:A 1 USD\n  option \"title\" \"x\"\n  $x\n  Assets:B\n");
@@ -545,7 +550,7 @@ fn test_parse_indented_line_after_an_option_in_a_body_reports_its_indent() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message().contains("unexpected indent")),
+            .any(|e| e.message().contains("invalid token '$x'")),
         "{errors:?}"
     );
 }

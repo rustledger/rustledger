@@ -212,6 +212,7 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 &mut errors,
                 &mut ancestors,
                 0, // Initial depth
+                config.main_file.as_deref(),
             ) {
                 errors.push(
                     PluginError::error(format!("Error scanning documents in {dir}: {e}"))
@@ -379,6 +380,7 @@ fn scan_documents(
     errors: &mut Vec<PluginError>,
     ancestors: &mut Vec<std::path::PathBuf>,
     depth: usize,
+    main_file: Option<&str>,
 ) -> std::io::Result<()> {
     use std::fs;
 
@@ -445,6 +447,7 @@ fn scan_documents(
                 errors,
                 ancestors,
                 depth + 1,
+                main_file,
             );
             ancestors.pop();
             result?;
@@ -513,6 +516,24 @@ fn scan_documents(
                                 continue;
                             }
 
+                            // A name shaped like a date that is not one
+                            // (`2020-13-45.pdf`): beancount reports it and
+                            // skips that file ("Invalid date on document
+                            // file"), at the main file's line 0. It used to
+                            // become a document with an invalid date, which
+                            // the loader refused along with every document
+                            // the scan had found.
+                            if let Err(reason) = document_file_date(date_str) {
+                                let mut error = PluginError::error(format!(
+                                    "Invalid date on document file '{file_name}': {reason}"
+                                ));
+                                if let Some(main_file) = main_file {
+                                    error = error.at(main_file, 0);
+                                }
+                                errors.push(error);
+                                continue;
+                            }
+
                             directives.push(DirectiveWrapper {
                                 directive_type: "document".to_string(),
                                 date: date_str.to_string(),
@@ -535,4 +556,27 @@ fn scan_documents(
     }
 
     Ok(())
+}
+
+/// Whether `YYYY-MM-DD` (all digits, as the caller checked) is a calendar
+/// date, with the reason Python's `datetime.date` gives when it is not,
+/// which beancount puts in its message.
+fn document_file_date(date: &str) -> Result<(), &'static str> {
+    let field = |range: std::ops::Range<usize>| date[range].parse::<u32>().unwrap_or(0);
+    let (year, month, day) = (field(0..4), field(5..7), field(8..10));
+    if year == 0 {
+        return Err("year 0 is out of range");
+    }
+    if !(1..=12).contains(&month) {
+        return Err("month must be in 1..12");
+    }
+    let valid = i32::try_from(year)
+        .ok()
+        .and_then(|y| rustledger_core::naive_date(y, month, day))
+        .is_some();
+    if valid {
+        Ok(())
+    } else {
+        Err("day is out of range for month")
+    }
 }

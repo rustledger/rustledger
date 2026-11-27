@@ -44,6 +44,11 @@
 //! own line holds an invalid token (`$ 2024-01-02 * "y" $`), that token's
 //! `YYerror` drops the entry and starts the recovery over: the line gets the
 //! errors it has parsed on its own, and the window goes on from its end.
+//! Where a line of such an entry's body fails and bison is still recovering
+//! at the body's end, the window goes on past it, at the status the entry's
+//! own pass ended at. An entry bison builds inside such an entry's body is
+//! parsed on its own in turn, [`MAX_PHANTOM_DEPTH`] levels deep at most, so
+//! the work stays within a bounded number of parses of the input.
 //!
 //! An invalid account (P0006) is rledger's line error for a line it cannot
 //! read, named for the account on it; beancount's lexer reads that account
@@ -564,10 +569,23 @@ pub(super) fn accepts(prefix: &[Bc], t: Bc) -> bool {
     }
 }
 
+/// How deep entries bison's recovery builds inside one another are parsed
+/// on their own ([`phantom_errors`]): an entry deeper than this keeps
+/// rledger's errors. Each level parses text that its entries split without
+/// overlap, so the work stays within `MAX_PHANTOM_DEPTH + 1` parses of the
+/// input.
+const MAX_PHANTOM_DEPTH: u8 = 3;
+
 thread_local! {
     /// How deep [`quiet_bison_recovery`] has nested the parse of an entry
-    /// bison's recovery builds: one level at most, so the work stays linear.
+    /// bison's recovery builds: [`MAX_PHANTOM_DEPTH`] levels at most, so the
+    /// work stays linear.
     static PHANTOM_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// Left by a nested pass for [`phantom_errors`]: bison's error status at
+    /// the end of the entry's text where it is still recovering there (a
+    /// line of the entry's body failed, and fewer than three tokens were
+    /// shifted after it), so the window goes on past the entry.
+    static PHANTOM_TAIL: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
     /// Set by a nested pass that met a declaration bison shifts mid-line,
     /// whose effect it does not model: the entry around it keeps rledger's
     /// errors.
@@ -861,7 +879,10 @@ pub(super) fn quiet_bison_recovery(
     // A lexer of its own, run forward only, to read the token a BOM
     // diagnostic is at (`bom_is_invalid_token`).
     let mut probe: Option<(BcLexer<'_>, (Bc, Range<usize>))> = None;
-    for (oi, &k) in order.iter().enumerate() {
+    // bison's error status at the end of the input where it is still
+    // recovering there (for the pass this one is nested in, `PHANTOM_TAIL`).
+    let mut tail_state: Option<u8> = None;
+    'errors: for (oi, &k) in order.iter().enumerate() {
         let e = &errors[k];
         if e.span.start < off {
             continue;
@@ -1134,325 +1155,352 @@ pub(super) fn quiet_bison_recovery(
         // Whether the last stretch pushed ends inside an entry bison starts
         // mid-line: dropped again where that entry is not modeled.
         let mut partial = false;
-        loop {
-            let (t, r) = tok.clone();
-            // Whether this line end closed a stretch: the line an entry bison
-            // starts mid-line ends here when its third token is this `EOL`.
-            let mut closed_here = false;
-            if t == Bc::Eol {
-                if let Some((s, n)) = segment.take()
-                    && r.start > s
-                {
-                    segments.push((s, r.start, n));
-                    closed_here = true;
-                }
-                segment = Some((r.end, usize::MAX));
-                on_failure_line = false;
-            }
-            if t == Bc::Eof {
-                let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
-                // The end of the input as the `eol` that completes a pop
-                // bison started mid-line (`| poptag #t` at the end): beancount
-                // reports the pop of a tag never pushed there, which is not
-                // modeled, so its line keeps its errors.
-                let completes_unaligned = status == 1
-                    && !first
-                    && accepts(&kinds, t)
-                    && prefix.first().is_some_and(|&(k, st)| {
-                        matches!(k, Bc::Kw(Kw::Poptag | Kw::Popmeta))
-                            && st != 0
-                            && stripped.as_bytes()[st - 1] != b'\n'
-                    });
-                if let Some((s, n)) = segment.take()
-                    && stripped.len() > s
-                    && !completes_unaligned
-                {
-                    segments.push((s, stripped.len(), n));
-                }
-                break;
-            }
-            let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
-            let shift = if t == Bc::Error {
-                if segment.is_some() {
-                    lexer_errors.push((r.start, r.end));
-                }
-                status = 3;
-                prefix.clear();
-                false
-            } else if !first && accepts(&kinds, t) {
-                true
-            } else if first || (status == 3 && prefix.is_empty()) {
-                prefix.clear();
-                status = 3;
-                accepts(&[], t)
-            } else {
-                status = 3;
-                prefix.clear();
-                accepts(&[], t)
-            };
-            first = false;
-            if shift {
-                if !(t == Bc::Eol && prefix.is_empty()) {
-                    prefix.push((t, r.start));
-                }
-                status -= 1;
-                if status == 0 {
-                    let stmt = prefix.first().map_or(r.start, |&(_, s)| s);
-                    resumed_at = Some((r.end, stmt));
-                    // A statement that starts a line is the one rledger
-                    // parses there, so its errors are where it fails after
-                    // these three tokens: reported. An entry bison starts
-                    // mid-line is quiet up to its third token.
-                    let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
-                    // An undated declaration bison starts mid-line that fails
-                    // past these three tokens (`popmeta pushmeta kk: @`): it
-                    // builds nothing, so changes no state; bison reports that
-                    // failure (an invalid token there is its lexer's error
-                    // only) and starts its recovery over at it, at status
-                    // three. The failure is rledger's next error on the line
-                    // if it has one there, else one is added.
-                    let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
-                    if !aligned
-                        && depth == 0
-                        && let Some((failed, at_token)) =
-                            undated_declaration_failure(stripped, &kinds, r.end)
-                    {
-                        if let Some((s, n)) = segment.take()
-                            && r.end > s
-                        {
-                            segments.push((s, r.end, n));
-                        }
-                        tok = loop {
-                            let t = next(&mut peeked);
-                            if t.1.start >= at_token.start || matches!(t.0, Bc::Eol | Bc::Eof) {
-                                break t;
-                            }
-                        };
-                        let mut trigger = usize::MAX;
-                        if failed != Bc::Error {
-                            // (One of rledger's at that very token, not one
-                            // standing for a later invalid token or date.)
-                            let j = order.partition_point(|&j| effective[j] < at_token.start);
-                            if let Some(&j) = order.get(j).filter(|&&j| {
-                                effective[j] < at_token.end
-                                    && is_droppable(&errors[j])
-                                    && !is_lexer_kind(&errors[j], effective[j], &invalid)
-                            }) {
-                                trigger = j;
-                                lexer_errors.push((at_token.start, at_token.start));
-                            } else {
-                                synthetic.push(undated_failure_error(
-                                    stripped,
-                                    kinds[0],
-                                    at_token.clone(),
-                                    off,
-                                ));
-                            }
-                        }
-                        segment = Some((at_token.start, trigger));
-                        status = 3;
-                        prefix.clear();
-                        resumed_at = None;
-                        first = true;
-                        continue;
-                    }
-                    // An entry bison starts mid-line whose own line holds an
-                    // invalid token after these three (`<BOM>g 2024-01-02 *
-                    // "n" $x`): that token's `YYerror` drops the entry, after
-                    // any grammar failure before it, reported, and starts the
-                    // recovery over. So the line has the errors the entry's
-                    // line parsed on its own has (#2979), and the window goes
-                    // on from the line's end, past the entry's indented lines.
-                    let line_end = stripped[r.end..]
-                        .find('\n')
-                        .map_or(stripped.len(), |i| r.end + i + 1);
-                    let invalid_on_line = !aligned
-                        && depth == 0
-                        && t != Bc::Eol
-                        && prefix.first().is_some_and(|&(k, _)| k == Bc::Date)
-                        && line_holds_an_invalid_token(stripped, r.end)
-                        && !super::convert::holds_a_stray_cr(&stripped[stmt..line_end]);
-                    if let Some(errs) = invalid_on_line
-                        .then(|| phantom_errors(stripped, stmt..line_end, off, depth))
-                        .flatten()
-                    {
-                        if let Some((s, n)) = segment.take()
-                            && r.end > s
-                        {
-                            segments.push((s, r.end, n));
-                        }
-                        let first = if on_failure_line {
-                            oi + 1
-                        } else {
-                            order.partition_point(|&j| effective[j] < r.end)
-                        };
-                        phantoms.push((first, r.end, line_end, errs));
-                        status = 3;
-                        prefix.clear();
-                        resumed_at = None;
-                        tok = loop {
-                            let t = next(&mut peeked);
-                            if matches!(t.0, Bc::Eol | Bc::Eof) {
-                                break t;
-                            }
-                        };
-                        continue;
-                    }
-                    let quiet_to = if aligned { stmt } else { r.end };
-                    partial = !aligned && closed_here;
+        // Re-entered after an entry bison builds mid-line whose body leaves
+        // it recovering: the window goes on past the entry.
+        'window: loop {
+            loop {
+                let (t, r) = tok.clone();
+                // Whether this line end closed a stretch: the line an entry bison
+                // starts mid-line ends here when its third token is this `EOL`.
+                let mut closed_here = false;
+                if t == Bc::Eol {
                     if let Some((s, n)) = segment.take()
-                        && quiet_to > s
+                        && r.start > s
                     {
-                        segments.push((s, quiet_to, n));
-                        partial = !aligned;
+                        segments.push((s, r.start, n));
+                        closed_here = true;
+                    }
+                    segment = Some((r.end, usize::MAX));
+                    on_failure_line = false;
+                }
+                if t == Bc::Eof {
+                    let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
+                    // The end of the input as the `eol` that completes a pop
+                    // bison started mid-line (`| poptag #t` at the end): beancount
+                    // reports the pop of a tag never pushed there, which is not
+                    // modeled, so its line keeps its errors.
+                    let completes_unaligned = status == 1
+                        && !first
+                        && accepts(&kinds, t)
+                        && prefix.first().is_some_and(|&(k, st)| {
+                            matches!(k, Bc::Kw(Kw::Poptag | Kw::Popmeta))
+                                && st != 0
+                                && stripped.as_bytes()[st - 1] != b'\n'
+                        });
+                    if let Some((s, n)) = segment.take()
+                        && stripped.len() > s
+                        && !completes_unaligned
+                    {
+                        segments.push((s, stripped.len(), n));
                     }
                     break;
                 }
+                let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
+                let shift = if t == Bc::Error {
+                    if segment.is_some() {
+                        lexer_errors.push((r.start, r.end));
+                    }
+                    status = 3;
+                    prefix.clear();
+                    false
+                } else if !first && accepts(&kinds, t) {
+                    true
+                } else if first || (status == 3 && prefix.is_empty()) {
+                    prefix.clear();
+                    status = 3;
+                    accepts(&[], t)
+                } else {
+                    status = 3;
+                    prefix.clear();
+                    accepts(&[], t)
+                };
+                first = false;
+                if shift {
+                    if !(t == Bc::Eol && prefix.is_empty()) {
+                        prefix.push((t, r.start));
+                    }
+                    status -= 1;
+                    if status == 0 {
+                        let stmt = prefix.first().map_or(r.start, |&(_, s)| s);
+                        resumed_at = Some((r.end, stmt));
+                        // A statement that starts a line is the one rledger
+                        // parses there, so its errors are where it fails after
+                        // these three tokens: reported. An entry bison starts
+                        // mid-line is quiet up to its third token.
+                        let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
+                        // An undated declaration bison starts mid-line that fails
+                        // past these three tokens (`popmeta pushmeta kk: @`): it
+                        // builds nothing, so changes no state; bison reports that
+                        // failure (an invalid token there is its lexer's error
+                        // only) and starts its recovery over at it, at status
+                        // three. The failure is rledger's next error on the line
+                        // if it has one there, else one is added.
+                        let kinds: Vec<Bc> = prefix.iter().map(|&(k, _)| k).collect();
+                        if !aligned
+                            && depth < MAX_PHANTOM_DEPTH
+                            && let Some((failed, at_token)) =
+                                undated_declaration_failure(stripped, &kinds, r.end)
+                        {
+                            if let Some((s, n)) = segment.take()
+                                && r.end > s
+                            {
+                                segments.push((s, r.end, n));
+                            }
+                            tok = loop {
+                                let t = next(&mut peeked);
+                                if t.1.start >= at_token.start || matches!(t.0, Bc::Eol | Bc::Eof) {
+                                    break t;
+                                }
+                            };
+                            let mut trigger = usize::MAX;
+                            if failed != Bc::Error {
+                                // (One of rledger's at that very token, not one
+                                // standing for a later invalid token or date.)
+                                let j = order.partition_point(|&j| effective[j] < at_token.start);
+                                if let Some(&j) = order.get(j).filter(|&&j| {
+                                    effective[j] < at_token.end
+                                        && is_droppable(&errors[j])
+                                        && !is_lexer_kind(&errors[j], effective[j], &invalid)
+                                }) {
+                                    trigger = j;
+                                    lexer_errors.push((at_token.start, at_token.start));
+                                } else {
+                                    synthetic.push(undated_failure_error(
+                                        stripped,
+                                        kinds[0],
+                                        at_token.clone(),
+                                        off,
+                                    ));
+                                }
+                            }
+                            segment = Some((at_token.start, trigger));
+                            status = 3;
+                            prefix.clear();
+                            resumed_at = None;
+                            first = true;
+                            continue;
+                        }
+                        // An entry bison starts mid-line whose own line holds an
+                        // invalid token after these three (`<BOM>g 2024-01-02 *
+                        // "n" $x`): that token's `YYerror` drops the entry, after
+                        // any grammar failure before it, reported, and starts the
+                        // recovery over. So the line has the errors the entry's
+                        // line parsed on its own has (#2979), and the window goes
+                        // on from the line's end, past the entry's indented lines.
+                        let line_end = stripped[r.end..]
+                            .find('\n')
+                            .map_or(stripped.len(), |i| r.end + i + 1);
+                        let invalid_on_line = !aligned
+                            && depth == 0
+                            && t != Bc::Eol
+                            && prefix.first().is_some_and(|&(k, _)| k == Bc::Date)
+                            && line_holds_an_invalid_token(stripped, r.end)
+                            && !super::convert::holds_a_stray_cr(&stripped[stmt..line_end]);
+                        if let Some(errs) = invalid_on_line
+                            .then(|| phantom_errors(stripped, stmt..line_end, off, depth))
+                            .flatten()
+                            .map(|(errs, _)| errs)
+                        {
+                            if let Some((s, n)) = segment.take()
+                                && r.end > s
+                            {
+                                segments.push((s, r.end, n));
+                            }
+                            let first = if on_failure_line {
+                                oi + 1
+                            } else {
+                                order.partition_point(|&j| effective[j] < r.end)
+                            };
+                            phantoms.push((first, r.end, line_end, errs));
+                            status = 3;
+                            prefix.clear();
+                            resumed_at = None;
+                            tok = loop {
+                                let t = next(&mut peeked);
+                                if matches!(t.0, Bc::Eol | Bc::Eof) {
+                                    break t;
+                                }
+                            };
+                            continue;
+                        }
+                        let quiet_to = if aligned { stmt } else { r.end };
+                        partial = !aligned && closed_here;
+                        if let Some((s, n)) = segment.take()
+                            && quiet_to > s
+                        {
+                            segments.push((s, quiet_to, n));
+                            partial = !aligned;
+                        }
+                        break;
+                    }
+                }
+                tok = next(&mut peeked);
             }
-            tok = next(&mut peeked);
-        }
-        // Still recovering at the end of the input: nothing after is reported.
-        let Some((end, stmt)) = resumed_at else {
-            break;
-        };
-        resume = end;
-        let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
-        if aligned {
-            // The statement is the one rledger parses there: its own errors,
-            // its whole-node one included, are where it fails.
-            resume = stmt;
-            continue;
-        }
-        let dated = prefix.first().map(|&(k, _)| k) == Some(Bc::Date);
-        // An `option`, `include` or `plugin` bison builds on a later line of
-        // the window: it changes no state rledger reports on, so when its line
-        // ends right after it, that line is quiet to its end and bison reads
-        // on from a `declarations`, as rledger does after the line.
-        // Only one bison has read whole: `option` with its two strings,
-        // `include` or `plugin` with their string.
-        let kinds: Vec<Bc> = prefix
-            .iter()
-            .map(|&(k, _)| k)
-            .filter(|&k| k != Bc::Eol)
-            .collect();
-        let stateless = matches!(
-            kinds.as_slice(),
-            [Bc::Kw(Kw::Option | Kw::Plugin), Bc::Str, Bc::Str]
-                | [Bc::Kw(Kw::Include | Kw::Plugin), Bc::Str]
-        );
-        // Not when an indented line follows: bison, back at a `declarations`,
-        // reports its indent, where rledger may read a posting.
-        if stateless && partial {
-            let at_eol = prefix.last().is_some_and(|&(k, _)| k == Bc::Eol);
-            let t = if at_eol {
-                (Bc::Eol, end..end)
-            } else {
-                next(&mut peeked)
+            // Still recovering at the end of the input: nothing after is reported.
+            let Some((end, stmt)) = resumed_at else {
+                tail_state = prefix.is_empty().then_some(status);
+                break 'errors;
             };
-            if matches!(t.0, Bc::Eol | Bc::Eof) {
-                let after = if t.0 == Bc::Eof {
-                    (Bc::Eof, t.1.clone())
+            resume = end;
+            let aligned = stmt == 0 || stripped.as_bytes()[stmt - 1] == b'\n';
+            if aligned {
+                // The statement is the one rledger parses there: its own errors,
+                // its whole-node one included, are where it fails.
+                resume = stmt;
+                continue 'errors;
+            }
+            let dated = prefix.first().map(|&(k, _)| k) == Some(Bc::Date);
+            // An `option`, `include` or `plugin` bison builds on a later line of
+            // the window: it changes no state rledger reports on, so when its line
+            // ends right after it, that line is quiet to its end and bison reads
+            // on from a `declarations`, as rledger does after the line.
+            // Only one bison has read whole: `option` with its two strings,
+            // `include` or `plugin` with their string.
+            let kinds: Vec<Bc> = prefix
+                .iter()
+                .map(|&(k, _)| k)
+                .filter(|&k| k != Bc::Eol)
+                .collect();
+            let stateless = matches!(
+                kinds.as_slice(),
+                [Bc::Kw(Kw::Option | Kw::Plugin), Bc::Str, Bc::Str]
+                    | [Bc::Kw(Kw::Include | Kw::Plugin), Bc::Str]
+            );
+            // Not when an indented line follows: bison, back at a `declarations`,
+            // reports its indent, where rledger may read a posting.
+            if stateless && partial {
+                let at_eol = prefix.last().is_some_and(|&(k, _)| k == Bc::Eol);
+                let t = if at_eol {
+                    (Bc::Eol, end..end)
                 } else {
                     next(&mut peeked)
                 };
-                // ... unless rledger reports that line too, which then stands
-                // for bison's error at its indent. Not inside an entry parsed
-                // on its own here, where that line is a posting of rledger's.
-                let indented_next = after.0 == Bc::Indent
-                    && (depth > 0 || {
-                        let next_end = stripped[after.1.start..]
-                            .find('\n')
-                            .map_or(stripped.len(), |i| after.1.start + i);
-                        let i = order.partition_point(|&j| effective[j] < after.1.start);
-                        order.get(i).is_none_or(|&j| effective[j] > next_end)
-                    });
-                if indented_next && after.0 == Bc::Indent {
-                    unreported_indent = Some(after.1.start);
-                }
-                peeked = Some(after);
-                if !indented_next {
-                    if !at_eol && let Some(last) = segments.last_mut() {
-                        last.1 = t.1.start;
+                if matches!(t.0, Bc::Eol | Bc::Eof) {
+                    let after = if t.0 == Bc::Eof {
+                        (Bc::Eof, t.1.clone())
+                    } else {
+                        next(&mut peeked)
+                    };
+                    // ... unless rledger reports that line too, which then stands
+                    // for bison's error at its indent. Not inside an entry parsed
+                    // on its own here, where that line is a posting of rledger's.
+                    let indented_next = after.0 == Bc::Indent
+                        && (depth > 0 || {
+                            let next_end = stripped[after.1.start..]
+                                .find('\n')
+                                .map_or(stripped.len(), |i| after.1.start + i);
+                            let i = order.partition_point(|&j| effective[j] < after.1.start);
+                            order.get(i).is_none_or(|&j| effective[j] > next_end)
+                        });
+                    if indented_next && after.0 == Bc::Indent {
+                        unreported_indent = Some(after.1.start);
                     }
-                    resume = t.1.end;
-                    declarations_at = Some(resume);
-                    continue;
-                }
-            } else {
-                peeked = Some(t);
-            }
-        }
-        if depth > 0 || !dated {
-            // A declaration bison shifts mid-line inside an entry already
-            // built that way, or an undated one (`$ pushtag #a`, whose state
-            // change is not modeled): rledger's errors stay from its line on.
-            UNMODELED_PHANTOM.with(|u| u.set(true));
-            if partial {
-                segments.pop();
-            }
-        }
-        if !dated {
-            continue;
-        }
-        // An entry bison builds mid-line or on an indented line (#2979): its
-        // body is the indented lines right after its line.
-        let mut body_end = end;
-        let mut line_done = prefix.last().is_some_and(|&(k, _)| k == Bc::Eol);
-        // An invalid token on the entry's own line, where that line was not
-        // parsed on its own above (nested, or holding a stray `\r`, or a
-        // declaration bison shifts in it): the entry is not modeled.
-        let mut header_invalid = false;
-        loop {
-            let t = next(&mut peeked);
-            if t.0 == Bc::Error && !line_done && body_end == end {
-                header_invalid = true;
-            }
-            match t.0 {
-                Bc::Eof => {
-                    body_end = stripped.len();
-                    break;
-                }
-                Bc::Eol => {
-                    body_end = t.1.end;
-                    line_done = true;
-                }
-                Bc::Indent if line_done => line_done = false,
-                _ if line_done => {
+                    peeked = Some(after);
+                    if !indented_next {
+                        if !at_eol && let Some(last) = segments.last_mut() {
+                            last.1 = t.1.start;
+                        }
+                        resume = t.1.end;
+                        declarations_at = Some(resume);
+                        continue 'errors;
+                    }
+                } else {
                     peeked = Some(t);
-                    break;
                 }
-                _ => {}
             }
-        }
-        // Nested, or holding a stray `\r`, which this parser reads
-        // differently from beancount (#2980): rledger's errors stay there.
-        if depth > 0
-            || header_invalid
-            || super::convert::holds_a_stray_cr(&stripped[stmt..body_end])
-        {
-            if partial {
-                segments.pop();
+            if depth >= MAX_PHANTOM_DEPTH || !dated {
+                // A declaration bison shifts mid-line inside entries already
+                // built that way `MAX_PHANTOM_DEPTH` deep, or an undated one
+                // (`$ pushtag #a`, whose state change is not modeled): rledger's
+                // errors stay from its line on.
+                UNMODELED_PHANTOM.with(|u| u.set(true));
+                if partial {
+                    segments.pop();
+                }
             }
+            if !dated {
+                continue 'errors;
+            }
+            // An entry bison builds mid-line or on an indented line (#2979): its
+            // body is the indented lines right after its line.
+            let mut body_end = end;
+            let mut line_done = prefix.last().is_some_and(|&(k, _)| k == Bc::Eol);
+            // An invalid token on the entry's own line, where that line was not
+            // parsed on its own above (nested, or holding a stray `\r`, or a
+            // declaration bison shifts in it): the entry is not modeled.
+            let mut header_invalid = false;
+            loop {
+                let t = next(&mut peeked);
+                if t.0 == Bc::Error && !line_done && body_end == end {
+                    header_invalid = true;
+                }
+                match t.0 {
+                    Bc::Eof => {
+                        body_end = stripped.len();
+                        break;
+                    }
+                    Bc::Eol => {
+                        body_end = t.1.end;
+                        line_done = true;
+                    }
+                    Bc::Indent if line_done => line_done = false,
+                    _ if line_done => {
+                        peeked = Some(t);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            // Nested too deep, or holding a stray `\r`, which this parser reads
+            // differently from beancount (#2980): rledger's errors stay there.
+            if depth >= MAX_PHANTOM_DEPTH
+                || header_invalid
+                || super::convert::holds_a_stray_cr(&stripped[stmt..body_end])
+            {
+                if partial {
+                    segments.pop();
+                }
+                resume = body_end;
+                continue 'errors;
+            }
+            let Some((errs, tail)) = phantom_errors(stripped, stmt..body_end, off, depth) else {
+                if partial {
+                    segments.pop();
+                }
+                resume = body_end;
+                continue 'errors;
+            };
+            // On the line that failed, rledger's errors after the failing one
+            // are about the entry; on a later line, the quiet stretch before the
+            // entry's third token is already counted (`segments`).
+            let first_error = if on_failure_line {
+                oi + 1
+            } else {
+                order.partition_point(|&j| effective[j] < end)
+            };
+            phantoms.push((first_error, end, body_end, errs));
             resume = body_end;
-            continue;
-        }
-        let Some(errs) = phantom_errors(stripped, stmt..body_end, off, depth) else {
-            if partial {
-                segments.pop();
+            // A line of the entry's body failed, and bison is still recovering
+            // at the body's end (its own pass ended so, `PHANTOM_TAIL`): the
+            // window goes on from there, at that status, as from any other line
+            // bison discards (`$ 2024-01-02 * "y"`, `  2024-02-30 5`, then `"s"`:
+            // quiet).
+            if let Some(st) = tail {
+                status = st;
+                prefix.clear();
+                segment = Some((body_end, usize::MAX));
+                first = false;
+                resumed_at = None;
+                on_failure_line = false;
+                partial = false;
+                tok = next(&mut peeked);
+                continue 'window;
             }
-            resume = body_end;
-            continue;
-        };
-        // On the line that failed, rledger's errors after the failing one
-        // are about the entry; on a later line, the quiet stretch before the
-        // entry's third token is already counted (`segments`).
-        let first = if on_failure_line {
-            oi + 1
-        } else {
-            order.partition_point(|&j| effective[j] < end)
-        };
-        phantoms.push((first, end, body_end, errs));
-        resume = body_end;
+            break 'window;
+        }
+    }
+    if depth > 0 {
+        PHANTOM_TAIL.with(|t| t.set(tail_state));
     }
     if segments.is_empty() && phantoms.is_empty() {
         return;
@@ -1982,24 +2030,29 @@ fn line_holds_an_invalid_token(src: &str, pos: usize) -> bool {
 }
 
 /// The errors of the entry bison builds at `stripped[text]` (#2979), parsed
-/// on its own, in the input's frame (`off`, the stripped BOM): `None` where
-/// that parse meets a declaration bison shifts mid-line, whose state change
-/// is not modeled. Never nested more than once (`PHANTOM_DEPTH`).
+/// on its own, in the input's frame (`off`, the stripped BOM), and bison's
+/// error status at the end of that text where it is still recovering there
+/// (`PHANTOM_TAIL`): `None` where that parse meets a declaration bison shifts
+/// mid-line, whose state change is not modeled. Never nested more than
+/// [`MAX_PHANTOM_DEPTH`] deep (`PHANTOM_DEPTH`).
 fn phantom_errors(
     stripped: &str,
     text: Range<usize>,
     off: usize,
     depth: u8,
-) -> Option<Vec<crate::ParseError>> {
+) -> Option<(Vec<crate::ParseError>, Option<u8>)> {
     PHANTOM_DEPTH.with(|d| d.set(depth + 1));
-    UNMODELED_PHANTOM.with(|u| u.set(false));
+    // (The pass this one is nested in keeps its own flag.)
+    let outer_unmodeled = UNMODELED_PHANTOM.with(|u| u.replace(false));
+    PHANTOM_TAIL.with(|t| t.set(None));
     let shift = text.start + off;
     let sub = super::convert::parse_via_cst(&stripped[text]);
     PHANTOM_DEPTH.with(|d| d.set(depth));
-    if UNMODELED_PHANTOM.with(|u| u.replace(false)) {
+    let tail = PHANTOM_TAIL.with(|t| t.replace(None));
+    if UNMODELED_PHANTOM.with(|u| u.replace(outer_unmodeled)) {
         return None;
     }
-    Some(
+    Some((
         sub.errors
             .into_iter()
             .filter(|x| !is_push_pop_state(x))
@@ -2008,7 +2061,8 @@ fn phantom_errors(
                 x
             })
             .collect(),
-    )
+        tail,
+    ))
 }
 
 /// Whether `e` is about the push/pop state of the whole file, which an entry
@@ -2474,8 +2528,9 @@ mod tests {
     }
 
     /// The model lexes each byte a bounded number of times, and parses each
-    /// entry bison builds mid-line once, however many failed lines, quiet
-    /// lines and such entries the input holds.
+    /// entry bison builds mid-line once per level it is nested at
+    /// (`MAX_PHANTOM_DEPTH` at most), however many failed lines, quiet lines
+    /// and such entries the input holds.
     #[test]
     fn test_quiet_bison_recovery_scans_linear_bytes() {
         use crate::logos_lexer::test_counters::RECOVERY_SHIFT_SCANNED_BYTES;
@@ -2556,6 +2611,20 @@ mod tests {
             (
                 "moved lines and entries after them",
                 " \r$x\n\r  2024-01-02 * \"n\"\n  Assets:A 1 USD\n".repeat(N),
+            ),
+            // Each level of entries built inside one another parses its own
+            // text, `MAX_PHANTOM_DEPTH` levels at most.
+            (
+                "entries nested in entries",
+                "$\n".to_string() + &"  2024-01-02 open Assets:Z\n".repeat(N),
+            ),
+            (
+                "nested entries with failing bodies",
+                "$\n".to_string() + &"  2024-01-02 open Assets:Z\n  x\n".repeat(N),
+            ),
+            (
+                "windows going on past an entry's body",
+                "$ 2024-01-02 * \"y\"\n  2024-02-30 5\n\"s\"\n".repeat(N),
             ),
         ] {
             RECOVERY_SHIFT_SCANNED_BYTES.with(|c| c.set(0));

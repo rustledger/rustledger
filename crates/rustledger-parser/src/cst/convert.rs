@@ -4575,7 +4575,7 @@ fn posting_builder_error(
         } else {
             K::R_BRACE
         };
-        let (mut costs, mut dates, mut labels) = (0usize, 0usize, 0usize);
+        let (mut costs, mut dates, mut labels, mut merges) = (0usize, 0usize, 0usize, 0usize);
         // `{#` begins the first component with its `#`.
         let mut component_has_hash = *open == K::L_BRACE_HASH;
         i += 1;
@@ -4610,8 +4610,10 @@ fn posting_builder_error(
                     // rledger implements it (average-cost merge booking, see
                     // `rustledger_core::inventory::booking`), a correct
                     // feature beancount lacks, which we keep. The matrix pins
-                    // its rows (`known_cost_merge`).
-                    (1, K::STAR) => None,
+                    // its rows (`known_cost_merge`). A second `*` is reported,
+                    // as beancount's "Duplicate merge-cost spec": it was
+                    // accepted without a word.
+                    (1, K::STAR) => duplicate(&mut merges, "merge marker `*`"),
                     _ => duplicate(&mut costs, "cost"),
                 };
                 if found.is_some() {

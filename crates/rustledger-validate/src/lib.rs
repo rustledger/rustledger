@@ -33,6 +33,7 @@
 //! | E4002 | Insufficient units in lot |
 //! | E4003 | Ambiguous lot match |
 //! | E4005 | Negative cost amount |
+//! | E4006 | Zero units held at a cost |
 //! | E5001 | Currency not declared |
 //! | E5002 | Currency not allowed in account |
 //! | E5003 | Invalid `precision` metadata on commodity directive (warning) |

@@ -11,12 +11,12 @@ beancount_version = "3.2.3"
 
 [[check]]
 id = "option-deprecated:allow_deprecated_none_for_tags_and_links"
-status = "missing"
+status = "covered"
+rledger = "E7004: rustledger_loader::options::deprecation_message"
 case = "grammar-option-deprecated-none-tags"
-code = "E7001"
+code = "E7004"
 lines = [1]
 python_message = "Allowing None for tags and link"
-note = "rledger does not know the option and reports it as unknown (E7001) instead of deprecated."
 
 [[check]]
 id = "option-deprecated:allow_pipe_separator"
@@ -40,12 +40,10 @@ python_message = "Renamed to 'tolerance_multiplier'."
 
 [[check]]
 id = "plugin:beancount.plugins.auto"
-status = "missing"
+status = "covered"
+rledger = "auto_accounts then implicit_prices (`rustledger_plugin::plugin_parts`)"
 case = "plugin-auto"
-code = "E8004|E8005"
-python_lines = []
-rledger_lines = [1]
-note = "rledger has no native `auto` (auto_accounts + implicit_prices) and refuses the module name."
+lines = []
 
 [[check]]
 id = "plugin:beancount.plugins.auto_accounts"
@@ -414,12 +412,10 @@ note = "beancount reports it at <load>:0; rledger on the `option \"documents\"` 
 [[check]]
 id = "site:beancount.ops.documents.find_documents:Invalid date on document file '{}': {}"
 status = "covered"
-rledger = "PLUGIN: document_discovery plugin"
+rledger = "PLUGIN: document_discovery plugin (`scan_documents`)"
 case = "documents-invalid-date"
 code = "PLUGIN"
-python_lines = [0]
-rledger_lines = [1]
-note = "beancount reports it at 0 and skips that one file; rledger reports that the plugin returned an invalid entry (line 1, the documents option) and discards every document the scan found."
+lines = [0]
 
 [[check]]
 id = "site:beancount.ops.documents.verify_document_files_exist:File does not exist: \"{}\""
@@ -594,11 +590,11 @@ lines = [7]
 
 [[check]]
 id = "site:beancount.parser.booking_full.interpolate_group:Amount is zero: \"{}\""
-status = "missing"
+status = "covered"
+rledger = "E4006: validators::transaction::validate_transaction_structure"
 case = "booking-amount-zero"
-python_lines = [4]
-rledger_lines = []
-note = "rledger accepts a zero-unit posting held at cost."
+code = "E4006"
+lines = [4]
 
 [[check]]
 id = "site:beancount.parser.booking_full.interpolate_group:Cannot infer per-unit cost only from total"
@@ -624,9 +620,7 @@ status = "covered"
 rledger = "E4005: validators::transaction::validate_transaction_structure"
 case = "booking-cost-negative"
 code = "E4005"
-python_lines = [4]
-rledger_lines = [3]
-note = "beancount reports it on the posting; rledger on the transaction's first line."
+lines = [4]
 
 [[check]]
 id = "site:beancount.parser.booking_full.interpolate_group:Too many missing numbers for currency group '{}'"
@@ -740,11 +734,12 @@ lines = [4]
 
 [[check]]
 id = "site:beancount.parser.grammar.Builder.cost_spec:Duplicate merge-cost spec"
-status = "missing"
+status = "covered"
+rledger = "P0012: parser (cost spec, `posting_builder_error`)"
 case = "grammar-duplicate-merge"
-python_lines = [7]
-rledger_lines = []
-note = "rledger accepts `{*, *}` silently."
+code = "P0012"
+lines = [7]
+note = "beancount also reports \"Cost merging is not supported yet\" on that line; rledger implements merging (compatibility section 20)."
 
 [[check]]
 id = "site:beancount.parser.grammar.Builder.cost_spec:Per-unit cost may not be specified using total cost syntax: '{}'; ignoring per-unit cost"

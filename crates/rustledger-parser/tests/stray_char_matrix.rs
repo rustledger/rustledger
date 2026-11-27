@@ -1096,6 +1096,19 @@ fn test_parse_reports_what_beancount_rejects_in_a_cost_or_price() {
             "duplicate date",
         ),
         ("two labels", "1 HOOL {\"a\", \"b\"}", "duplicate label"),
+        // beancount: "Duplicate merge-cost spec" (beside its "Cost merging
+        // is not supported yet", which rledger does not report: see
+        // `test_parse_accepts_cost_merging_unlike_beancount`).
+        (
+            "two merge markers",
+            "-1 HOOL {*, *}",
+            "duplicate merge marker",
+        ),
+        (
+            "two merge markers and a cost",
+            "-1 HOOL {*, 2 USD, *}",
+            "duplicate merge marker",
+        ),
         ("per-unit in a total", "1 HOOL {{2 # 3 USD}}", "total-cost"),
         ("negative price", "1 HOOL @ -3 USD", "negative prices"),
         (

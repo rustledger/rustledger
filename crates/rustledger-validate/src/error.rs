@@ -68,6 +68,9 @@ pub enum ErrorCode {
     ArithmeticOverflow,
     /// E4005: Cost amount is negative (cost must be non-negative).
     NegativeCost,
+    /// E4006: A posting held at a cost has zero units (beancount's "Amount
+    /// is zero").
+    ZeroUnitsAtCost,
 
     // === Currency Errors (E5xxx) ===
     /// E5001: Currency not declared (when strict mode enabled).
@@ -222,6 +225,7 @@ impl ErrorCode {
         Self::AmbiguousLotMatch,
         Self::ArithmeticOverflow,
         Self::NegativeCost,
+        Self::ZeroUnitsAtCost,
         Self::UndeclaredCurrency,
         Self::CurrencyNotAllowed,
         Self::InvalidPrecisionMetadata,
@@ -261,6 +265,7 @@ impl ErrorCode {
             Self::AmbiguousLotMatch => "E4003",
             Self::ArithmeticOverflow => "E4004",
             Self::NegativeCost => "E4005",
+            Self::ZeroUnitsAtCost => "E4006",
             // Currency errors
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",
@@ -340,6 +345,7 @@ impl ErrorCode {
             Self::AmbiguousLotMatch => "Ambiguous lot match under STRICT booking",
             Self::ArithmeticOverflow => "Amount exceeds the representable range",
             Self::NegativeCost => "Negative cost",
+            Self::ZeroUnitsAtCost => "Zero units held at a cost",
             Self::UndeclaredCurrency => "Currency used without a commodity declaration",
             Self::CurrencyNotAllowed => "Currency not allowed in this account",
             Self::InvalidPrecisionMetadata => "Invalid precision metadata on commodity",
@@ -495,6 +501,14 @@ impl ErrorCode {
                 "A posting's cost amount is negative — a cost basis must be \
                  non-negative.\n\nFix: check the sign of the cost (the units carry \
                  the sign of a sale, not the cost)."
+            }
+            Self::ZeroUnitsAtCost => {
+                "A posting written with zero units also states a cost (`0 HOOL \
+                 {10 USD}`). Zero units buy or sell nothing, so a cost on them \
+                 records no lot; beancount refuses it the same way (\"Amount is \
+                 zero\"). A zero price (`@ 0 USD`) is allowed, and so is a \
+                 cost with no number (`{}`), whose posting drops out.\n\nFix: \
+                 write the number of units, or remove the posting."
             }
             Self::UndeclaredCurrency => {
                 "A currency is used but never declared with a `commodity` directive, \

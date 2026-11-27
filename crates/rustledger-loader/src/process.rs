@@ -1766,24 +1766,29 @@ fn dispatch_plugins(
     // `crate::plugins_in_run_order`, the one place this is decided.
     if options.run_plugins {
         for plugin in crate::plugins_in_run_order(file_plugins, source_map) {
-            if registry.find_synth(&plugin.name).is_some() == want_synth {
-                entries.push(PluginInvocation {
-                    name: plugin.name.clone(),
-                    config: plugin.config.clone(),
-                    force_python: plugin.force_python,
-                });
+            // `auto` runs its parts, each in its own pass.
+            for name in rustledger_plugin::plugin_parts(&plugin.name, plugin.force_python) {
+                if registry.find_synth(name).is_some() == want_synth {
+                    entries.push(PluginInvocation {
+                        name: name.to_string(),
+                        config: plugin.config.clone(),
+                        force_python: plugin.force_python,
+                    });
+                }
             }
         }
     }
 
     // CLI extra plugins.
     for extra in &options.extra_plugins {
-        if registry.find_synth(&extra.name).is_some() == want_synth {
-            entries.push(PluginInvocation {
-                name: extra.name.clone(),
-                config: extra.config.clone(),
-                force_python: false,
-            });
+        for name in rustledger_plugin::plugin_parts(&extra.name, false) {
+            if registry.find_synth(name).is_some() == want_synth {
+                entries.push(PluginInvocation {
+                    name: name.to_string(),
+                    config: extra.config.clone(),
+                    force_python: false,
+                });
+            }
         }
     }
 

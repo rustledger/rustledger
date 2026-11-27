@@ -35,6 +35,9 @@ fn option_description(key: &str) -> Option<&'static str> {
         "render_commas" => "Render commas in numbers",
         "display_precision" => "Display precision per currency (e.g. USD:0.01)",
         "allow_pipe_separator" => "Allow the pipe separator (deprecated)",
+        "allow_deprecated_none_for_tags_and_links" => {
+            "Accepted for compatibility (deprecated); no effect in rledger"
+        }
         "long_string_maxlines" => "Maximum lines for long strings (inert, as in beancount 3)",
         "documents" => "Directories to search for documents",
         "insert_pythonpath" => "Accepted for compatibility; no effect in rledger",

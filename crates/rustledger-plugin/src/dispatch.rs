@@ -150,6 +150,28 @@ pub fn find_native_plugin<'a>(
     }
 }
 
+/// The plugins a `plugin` reference runs, in order: the parts of one of
+/// beancount's plugins of plugins whose parts run in different passes, or
+/// else the name itself.
+///
+/// beancount's `auto` (`beancount.plugins.auto`) is `auto_accounts` then
+/// `implicit_prices` (`loader.combine_plugins`). The first opens accounts
+/// before booking (a synth plugin here) and the second reads booked costs
+/// (a regular one), so no single native plugin can be both; the reference
+/// runs each part in its own pass. It used to be refused as an unsupported
+/// Python module. `pedantic`, whose parts all run after booking, is one
+/// native plugin instead. A `python:`-forced name is never expanded, and a
+/// name resolves by its last segment, as [`find_native_plugin`] resolves it.
+pub fn plugin_parts(name: &str, force_python: bool) -> impl Iterator<Item = &str> {
+    const AUTO: &[&str] = &[crate::native::AUTO_ACCOUNTS_NAME, "implicit_prices"];
+    let parts = match name.rsplit('.').next() {
+        Some("auto") if !force_python => Some(AUTO),
+        _ => None,
+    };
+    let single = parts.is_none().then_some(name);
+    parts.into_iter().flatten().copied().chain(single)
+}
+
 /// What a plugin reference that is NOT native names.
 ///
 /// Judged from its text alone: no filesystem access, no registry, no

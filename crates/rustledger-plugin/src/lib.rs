@@ -60,7 +60,7 @@ pub use convert::{
 };
 pub use dispatch::{
     ExternalPluginKind, PluginLimits, PluginPass, PluginResolveError, PluginRunError,
-    ResolvedPlugin, classify_external_plugin, find_native_plugin, resolve_plugin,
+    ResolvedPlugin, classify_external_plugin, find_native_plugin, plugin_parts, resolve_plugin,
 };
 pub use native::{
     AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,

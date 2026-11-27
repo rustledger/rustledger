@@ -108,11 +108,9 @@ const ALLOWED: &[Allowed] = &[
             (GRAMMAR_PLUGIN, "E8004", 0),
             (PYTHON_PLUGINS, "PLUGIN", 21),
             (UC_PLUGIN_IMPORT, "E8004", 0),
-            (UC_PLUGIN_AUTO, "E8004", 0),
         ],
         surface: &[
             (UC_PLUGIN_IMPORT, "E8006", 1),
-            (UC_PLUGIN_AUTO, "E8006", 1),
             (UNKNOWN_PLUGIN, "E8006", 3),
             (WASM_PLUGIN, "E8006", 2),
             (GRAMMAR_PLUGIN, "E8006", 2),
@@ -261,8 +259,6 @@ const INCLUDE_CYCLE_INCLUDED: &str =
 // The upstream-check case ledgers (`crates/rustledger/tests/upstream_checks_test.rs`).
 const UC_PLUGIN_IMPORT: &str =
     "crates/rustledger/tests/fixtures/upstream-checks/cases/loader-plugin-import-error.beancount";
-const UC_PLUGIN_AUTO: &str =
-    "crates/rustledger/tests/fixtures/upstream-checks/cases/plugin-auto.beancount";
 const UC_DOC_INVALID_DATE: &str =
     "crates/rustledger/tests/fixtures/upstream-checks/cases/documents-invalid-date.beancount";
 const UC_DOC_MISSING_ROOT: &str =

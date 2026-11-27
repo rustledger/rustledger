@@ -686,7 +686,7 @@ tracked	97a1f35d597a	match	crates/rustledger/tests/fixtures/upstream-checks/case
 tracked	51f0174045c7	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-date.beancount
 tracked	05c7dd43077a	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-entry-meta.beancount
 tracked	924abb801c34	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-label.beancount
-tracked	83775cef5466	bc-only	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-merge.beancount
+tracked	83775cef5466	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-merge.beancount
 tracked	de6e6dfb9300	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-duplicate-posting-meta.beancount
 tracked	aef83f99b63e	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-invalid-account.beancount
 tracked	9c4cc3a079c8	match	crates/rustledger/tests/fixtures/upstream-checks/cases/grammar-invalid-booking-method.beancount
@@ -904,7 +904,7 @@ tracked	3f5d6241413e	match	tests/fixtures/lima-tests/ParseLots.CostNone.beancoun
 tracked	a5d40b2eb587	match	tests/fixtures/lima-tests/ParseLots.CostRepeated.beancount
 tracked	23925d9d557f	match	tests/fixtures/lima-tests/ParseLots.CostRepeatedDate.beancount
 tracked	86edf009063c	match	tests/fixtures/lima-tests/ParseLots.CostRepeatedLabel.beancount
-tracked	1e3cf19065fd	bc-only	tests/fixtures/lima-tests/ParseLots.CostRepeatedMerge.beancount
+tracked	1e3cf19065fd	match	tests/fixtures/lima-tests/ParseLots.CostRepeatedMerge.beancount
 tracked	c95227d02122	match	tests/fixtures/lima-tests/ParseLots.CostThreeComponents.beancount
 tracked	378782f25c16	match	tests/fixtures/lima-tests/ParseLots.CostTotalCostOnly.beancount
 tracked	a6c8cb065b4b	match	tests/fixtures/lima-tests/ParseLots.CostTotalEmptyTotal.beancount

@@ -623,7 +623,9 @@ booked any other way (ADR 0007,
 
 This is deliberate: both are documented beancount syntax with well-defined
 semantics, and a ledger that uses them cannot load in beancount at all, so
-nothing that loads there changes here. Pinned by the `booking-average` and
+nothing that loads there changes here. A second `*` (`{*, *}`) is refused
+in both (`Duplicate merge-cost spec` there, `duplicate merge marker` here).
+Pinned by the `booking-average` and
 `grammar-cost-merge` cases in `crates/rustledger/tests/fixtures/upstream-checks/`
 (see [Upstream Check Coverage](upstream-checks.md)).
 

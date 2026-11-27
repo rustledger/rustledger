@@ -907,13 +907,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     depth-first order. A v78 blob would be read at the wrong offsets.
 ///     `rustledger-wasm` archives no `CachedPlugin`, so only its pin moves
 ///     (its own version moves for the plugins' output).
+/// v80: CACHED VALUES changed. `option
+///     "allow_deprecated_none_for_tags_and_links"` raises `E7004`
+///     (deprecated, as in beancount) where it raised `E7001` (unknown
+///     option), and a hit replays the option warnings it cached (v76), so a
+///     v79 entry would keep serving the `E7001`. The layout is unchanged.
+///     `rustledger-wasm` archives no `CachedOptions`, so only its pin moves
+///     (its own version moves for the new validation findings).
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 79;
+pub const CACHE_VERSION: u32 = 80;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1812,7 +1819,9 @@ mod tests {
         // archived encoding moves, so the arrays still hold.
         // v79 adds `CachedPlugin::file_id`; no `CostNumber` encoding moves,
         // so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 79;
+        // v80 replays an option's new E7004 warning; no archived encoding
+        // moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 80;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1981,7 +1990,9 @@ mod tests {
         // archived layout moves, so the hash below is unchanged.
         // v79 adds `CachedPlugin::file_id`; the `MetaValue` layout does not
         // move, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 79;
+        // v80 replays an option's new E7004 warning; no archived layout
+        // moves, so the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 80;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

@@ -1155,12 +1155,12 @@ impl TokenIter<'_> {
     /// lone capital glued to a stray `\r` after the run (`\rB\r$`).
     ///
     /// Stricter than beancount, deliberately: a `\r` with more of the line
-    /// after it that is not an error (`open\rAssets:Cash`, `; a\rb`, or
-    /// before the first token of a line) is still an error, where beancount
-    /// takes it as a token separator. The formatter folds such a bare `\r`
-    /// into a line break (`crlf_to_lf_outside_strings`, which is what keeps
-    /// classic-Mac files formattable), so accepting it would make `rledger
-    /// format` split a line that `rledger check` called valid. Pinned by
+    /// after it that is not an error (`open\rAssets:Cash`, or before the
+    /// first token of a line) is still an error, where beancount takes it as
+    /// a token separator. (In a comment it is comment text, as in beancount.)
+    /// The reason was that the formatter folded such a `\r` into a line
+    /// break; it now keeps it (`crlf_to_lf_outside_strings`), so this
+    /// deviation (#2804) could be revisited. Pinned by
     /// `test_parse_cr_with_more_of_the_line_after_it_stays_an_error` in
     /// `tests/stray_cr.rs`. The #2966 case cannot reach the formatter that
     /// way: its line keeps the error after the run.
@@ -1626,6 +1626,40 @@ impl<'src> Iterator for TokenIter<'src> {
                 result = Ok(Token::Hash);
             }
 
+            // A comment runs to the end of its line, a `\r` with more of the
+            // line after it included, as in beancount (`;.*`: flex's `.` takes
+            // a `\r`), and as the column-0 `#` arm below already reads it. The
+            // regexes stop at any `\r`, which left the rest of the line as
+            // tokens of its own: the parser read the line as one comment, but
+            // the formatter, writing only the comment token, deleted the rest
+            // of it or moved it to a line of its own, where it was an error.
+            // A CRLF's `\r`, and a stray run before the line ending, stay out
+            // (`line_end_before_newline`). A `;` glued to a lone capital
+            // (`T;c`) is not a comment there but part of an invalid token,
+            // which a `\r` ends like any blank, so that run is left alone.
+            if let Ok(
+                Token::Comment(_)
+                | Token::PercentComment(_)
+                | Token::Shebang(_)
+                | Token::EmacsDirective(_),
+            ) = result
+                && source.as_bytes().get(span.end) == Some(&b'\r')
+                && !glued_to_lone_capital(source.as_bytes(), span.start)
+            {
+                let line_end = line_end_before_newline(source, span.start);
+                if line_end > span.end {
+                    self.lexer.bump(line_end - span.end);
+                    span.end = line_end;
+                    let text = &source[span.clone()];
+                    result = Ok(match result {
+                        Ok(Token::Comment(_)) => Token::Comment(text),
+                        Ok(Token::PercentComment(_)) => Token::PercentComment(text),
+                        Ok(Token::Shebang(_)) => Token::Shebang(text),
+                        _ => Token::EmacsDirective(text),
+                    });
+                }
+            }
+
             if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
                 // AST-path drops mid-line whitespace; the CST path keeps
                 // it. Layout-relevant whitespace (start-of-line indentation,
@@ -1999,6 +2033,20 @@ fn line_end_before_newline(source: &str, from: usize) -> usize {
     from + line[run_start..]
         .find('\r')
         .map_or(line.len(), |i| run_start + i)
+}
+
+/// Whether the byte before `at` is a lone capital: an uppercase letter with
+/// no account, currency or word character before it. beancount's `CAPITAL`
+/// needs a space, a tab or a `\n` after it, so a comment marker glued to one
+/// (`T;c`) is the inside of an invalid token, not the start of a comment.
+fn glued_to_lone_capital(bytes: &[u8], at: usize) -> bool {
+    // A digit or a `-` before it ends a date or a number (`2024-01-02T;`),
+    // so only letters and account or currency punctuation run a word on.
+    let continues = |b: u8| b.is_ascii_alphabetic() || b":_.'/".contains(&b);
+    match at.checked_sub(1).map(|i| bytes[i]) {
+        Some(c) if c.is_ascii_uppercase() => at < 2 || !continues(bytes[at - 2]),
+        _ => false,
+    }
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {

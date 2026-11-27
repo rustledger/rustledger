@@ -776,7 +776,13 @@ use crate::types::{Error, LedgerOptions};
 /// reported and skipped instead of discarding every discovered document.
 /// `{*, *}` is a parse error, which no cache is saved for. The loader moves
 /// to v80 for the option warning it replays.
-pub const CACHE_VERSION: u32 = 145;
+/// v146: loader v81 (after #3057's v145);
+/// PARSER OUTPUT moved. A `;`, `%`, `#!` or `#+` comment runs through a
+/// `\r` with more of the line after it to the end of its line, as in
+/// beancount, so a directive's or a posting's comment text now holds the
+/// rest of the line (`; c\rmore`, which was `; c`), and parse errors move
+/// on inputs whose line went on past such a `\r`.
+pub const CACHE_VERSION: u32 = 146;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -808,7 +814,7 @@ pub const CACHE_VERSION: u32 = 145;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 80;
+const LOADER_CACHE_VERSION_PIN: u32 = 81;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

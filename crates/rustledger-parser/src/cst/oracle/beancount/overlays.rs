@@ -88,21 +88,25 @@ impl DeviationOverlay<Lexeme> for StrayCarriageReturn {
     ) {
         let b = src.as_bytes();
         let is_stray = |i: usize| b.get(i) == Some(&b'\r') && b.get(i + 1) != Some(&b'\n');
-        let mut index: Option<(LineIndex, Vec<u32>)> = None;
+        // The line index, the quiet lines and the lines with slots (sorted),
+        // built once on the first stray `\r`.
+        let mut index: Option<(LineIndex, Vec<u32>, Vec<u32>)> = None;
         for (e, own) in errors.iter().zip(own.iter_mut()) {
             if !is_stray(e.span.start) {
                 continue;
             }
             // On a line beancount's recovery swallows whole (no error of its
             // own there), the `\r` is as quiet as the rest of the line.
-            let (lines, quiet) = index.get_or_insert_with(|| {
+            let (lines, quiet, with_slots) = index.get_or_insert_with(|| {
                 let lines = LineIndex::new(src);
                 let quiet = reference.quiet_lines(&lines);
-                (lines, quiet)
+                let mut with_slots: Vec<u32> = reference.slots.iter().map(|s| s.line).collect();
+                with_slots.sort_unstable();
+                (lines, quiet, with_slots)
             });
             let line = lines.line_of(e.span.start);
-            let swallowed = quiet.binary_search(&line).is_ok()
-                && !reference.slots.iter().any(|s| s.line == line);
+            let swallowed =
+                quiet.binary_search(&line).is_ok() && with_slots.binary_search(&line).is_err();
             *own = !swallowed;
         }
     }
@@ -360,24 +364,29 @@ impl DeviationOverlay<Lexeme> for DivideByZero {
         reference: &Reference,
         own: &mut [bool],
     ) {
-        let mut index: Option<(LineIndex, Vec<u32>)> = None;
+        // The line index, the quiet lines and the lines with syntax slots
+        // (sorted), built once on the first such error.
+        let mut index: Option<(LineIndex, Vec<u32>, Vec<u32>)> = None;
         for (e, own) in errors.iter().zip(own.iter_mut()) {
             if let ParseErrorKind::SyntaxError(m) = &e.kind
                 && m.starts_with("invalid arithmetic expression")
             {
-                let (lines, quiet) = index.get_or_insert_with(|| {
+                let (lines, quiet, syntax) = index.get_or_insert_with(|| {
                     let lines = LineIndex::new(src);
                     let quiet = reference.quiet_lines(&lines);
-                    (lines, quiet)
+                    let mut syntax: Vec<u32> = reference
+                        .slots
+                        .iter()
+                        .filter(|s| s.kind == SlotKind::Syntax)
+                        .map(|s| s.line)
+                        .collect();
+                    syntax.sort_unstable();
+                    (lines, quiet, syntax)
                 });
                 let line = lines.line_of(e.span.start);
                 // Not in beancount's recovery either: it evaluates nothing
                 // there.
-                *own = quiet.binary_search(&line).is_err()
-                    && !reference
-                        .slots
-                        .iter()
-                        .any(|s| s.kind == SlotKind::Syntax && s.line == line);
+                *own = quiet.binary_search(&line).is_err() && syntax.binary_search(&line).is_err();
             }
         }
     }

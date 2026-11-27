@@ -560,12 +560,17 @@ fn with_rebuilt_builder_errors(
         return errors;
     }
     // Only the ones beancount builds: it checks nothing of a dropped one.
-    let built = |r: &std::ops::Range<usize>| {
-        reference
-            .statements
-            .iter()
-            .any(|s| s.built && s.start == r.start && s.end == r.end)
-    };
+    // Looked up in a set, and `errors` (sorted by start) searched by start,
+    // so many rebuilt entries stay linear.
+    let built_spans: std::collections::HashSet<(usize, usize)> = reference
+        .statements
+        .iter()
+        .filter(|s| s.built)
+        .map(|s| (s.start, s.end))
+        .collect();
+    let built = |r: &std::ops::Range<usize>| built_spans.contains(&(r.start, r.end));
+    let given = errors.len();
+    let mut added: HashMap<(usize, usize), Vec<ParseErrorKind>> = HashMap::new();
     for r in &reference.rebuilt {
         let Some(text) = source.get(r.clone()) else {
             continue;
@@ -583,7 +588,14 @@ fn with_rebuilt_builder_errors(
                 continue;
             }
             e.span = Span::new(e.span.start + r.start, e.span.end + r.start);
-            if !errors.iter().any(|x| x.span == e.span && x.kind == e.kind) {
+            let at = errors[..given].partition_point(|x| x.span.start < e.span.start);
+            let reported = errors[at..given]
+                .iter()
+                .take_while(|x| x.span.start == e.span.start)
+                .any(|x| x.span == e.span && x.kind == e.kind);
+            let kinds = added.entry((e.span.start, e.span.end)).or_default();
+            if !reported && !kinds.contains(&e.kind) {
+                kinds.push(e.kind.clone());
                 errors.push(e);
             }
         }
@@ -818,7 +830,7 @@ mod tests {
     /// are the shapes the hand-modeled recovery passes were held linear on.)
     #[test]
     fn test_parse_with_the_oracle_is_linear_on_recovery_shapes() {
-        let shapes: [(&str, fn(usize) -> String); 22] = [
+        let shapes: [(&str, fn(usize) -> String); 24] = [
             ("`$` lines", |n| "$\n".repeat(n)),
             ("`!` lines", |n| "!\n".repeat(n)),
             ("`$` and a posting", |n| "$\n  Assets:A 1 USD\n".repeat(n)),
@@ -863,6 +875,17 @@ mod tests {
                 "~ popmeta kk: @ x\n~ pushmeta kk: \"v\" @\n".repeat(n)
             }),
             ("stray `\\r` lines", |n| "\r$\n  Assets:A 1 USD\n".repeat(n)),
+            // Many expressions that cannot be evaluated, each claimed as
+            // rledger's own: once quadratic in their number.
+            ("expressions dividing by zero", |n| {
+                "2024-01-01 custom \"x\" 1/0 $\n".repeat(n)
+            }),
+            // Many entries recovery rebuilds, each with a builder error to
+            // merge: once quadratic in their number.
+            ("rebuilt entries with stray `\\r`s", |n| {
+                "$\n".to_string()
+                    + &"  2024-01-02 open\rAssets:Z\n  2024-01-02 open Assets:Z\n".repeat(n)
+            }),
             ("entries nested in entries", |n| {
                 "$\n".to_string() + &"  2024-01-02 open Assets:Z \"XYZ\"\n".repeat(n)
             }),

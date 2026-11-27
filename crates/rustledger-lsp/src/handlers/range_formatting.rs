@@ -66,7 +66,7 @@ use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
 use rustledger_parser::format::{GroupingStyle, format_parsed_range, lf_to_crlf_outside_strings};
 
-use super::formatting::format_document;
+use super::formatting::{apply_edits, canonical_text, format_document};
 use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a `textDocument/rangeFormatting` request.
@@ -93,7 +93,17 @@ pub fn handle_range_formatting(
     // needed) must still surface as None so the client sees a no-op,
     // not a coarse CST-snap reformat over an already-canonical file.
     if let Some(all_edits) = format_document(source, parse_result, encoding, style) {
-        return clip_edits_to_range(params, source, encoding, all_edits);
+        let kept = clip_edits_to_range(params, source, encoding, all_edits)?;
+        // The clip keeps edits by position alone, so it can split a move:
+        // the line diff may express a reformatted run as an insertion inside
+        // the selection plus a deletion outside it, and keeping only the
+        // insertion duplicated a posting (a new posting, a different
+        // transaction). Kept edits must still lead to the same canonical
+        // form; when they do not, format the selected directives whole.
+        if converges(source, parse_result, &kept, encoding, style) {
+            return Some(kept);
+        }
+        return fallback_cst_snap_edit(params, source, parse_result, encoding, style);
     }
     // Fallback: file has parse errors. Try the CST-snap path on the
     // selection so users editing through a typo still get formatting
@@ -105,6 +115,24 @@ pub fn handle_range_formatting(
         return fallback_cst_snap_edit(params, source, parse_result, encoding, style);
     }
     None
+}
+
+/// Whether `source` with `kept` applied formats to what `source` formats to:
+/// the clipped edits are a step toward the canonical form, not a different
+/// file.
+fn converges(
+    source: &str,
+    parse_result: &ParseResult,
+    kept: &[TextEdit],
+    encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
+) -> bool {
+    let Some(stepped) = apply_edits(source, kept, encoding) else {
+        return false;
+    };
+    let reparsed = rustledger_parser::parse(&stepped);
+    let target = canonical_text(source, parse_result, style);
+    target.is_some() && canonical_text(&stepped, &reparsed, style) == target
 }
 
 /// Clip the canonical document edits to the user's selection.

@@ -86,6 +86,21 @@ pub fn format_document(
     encoding: PositionEncoding,
     style: GroupingStyle<'_>,
 ) -> Option<Vec<TextEdit>> {
+    let formatted = canonical_text(source, parse_result, style)?;
+    if formatted == source {
+        return None;
+    }
+    Some(minimal_diff_edits(source, &formatted, encoding))
+}
+
+/// The canonical form of a clean `source`, with CRLF re-injected on a CRLF
+/// document; `None` when the parse has errors. What [`format_document`]
+/// diffs against.
+pub(crate) fn canonical_text(
+    source: &str,
+    parse_result: &ParseResult,
+    style: GroupingStyle<'_>,
+) -> Option<String> {
     if !parse_result.errors.is_empty() {
         return None;
     }
@@ -111,10 +126,36 @@ pub fn format_document(
     if source.contains("\r\n") {
         formatted = lf_to_crlf_outside_strings(&formatted);
     }
-    if formatted == source {
+    Some(formatted)
+}
+
+/// `source` with `edits` applied, as a client applies them (every range
+/// refers to the original text); `None` if an edit is out of bounds or two
+/// overlap.
+pub(crate) fn apply_edits(
+    source: &str,
+    edits: &[TextEdit],
+    encoding: PositionEncoding,
+) -> Option<String> {
+    let index = LineIndex::new(source, encoding);
+    let mut spans = Vec::with_capacity(edits.len());
+    for e in edits {
+        let start = index.position_to_offset(e.range.start.line, e.range.start.character)?;
+        let end = index.position_to_offset(e.range.end.line, e.range.end.character)?;
+        if end < start {
+            return None;
+        }
+        spans.push((start, end, e.new_text.as_str()));
+    }
+    spans.sort_by_key(|&(s, e, _)| (s, e));
+    if spans.windows(2).any(|w| w[0].1 > w[1].0) {
         return None;
     }
-    Some(minimal_diff_edits(source, &formatted, encoding))
+    let mut out = source.to_string();
+    for (start, end, text) in spans.into_iter().rev() {
+        out.replace_range(start..end, text);
+    }
+    Some(out)
 }
 
 /// Per-line cleanup pass: strip trailing space/tab from every line, and
@@ -129,9 +170,30 @@ pub fn format_document(
 /// Returns `None` when no line needs changing.
 #[must_use]
 pub fn surface_cleanup_edits(source: &str, encoding: PositionEncoding) -> Option<Vec<TextEdit>> {
+    // The string literals, as the lexer reads them, in `source`'s frame. A
+    // line that starts or ends inside one is part of a multi-line string's
+    // value: its leading tabs and trailing blanks are data, not layout, and
+    // rewriting them changed a narration, note or metadata string.
+    let bom = if source.starts_with('\u{FEFF}') { 3 } else { 0 };
+    let strings: Vec<(usize, usize)> =
+        rustledger_parser::logos_lexer::tokenize_lossless(&source[bom..])
+            .into_iter()
+            .filter(|(t, _)| matches!(t, rustledger_parser::logos_lexer::Token::String(_)))
+            .map(|(_, s)| (s.start + bom, s.end + bom))
+            .collect();
+    let inside = |at: usize| {
+        let i = strings.partition_point(|&(_, end)| end <= at);
+        strings.get(i).is_some_and(|&(start, _)| start < at)
+    };
     let mut edits = Vec::new();
+    let mut line_start = 0;
     for (line_num, line) in source.split('\n').enumerate() {
         let line_num = line_num as u32;
+        let (start, end) = (line_start, line_start + line.len());
+        line_start = end + 1;
+        if inside(start) || inside(end) {
+            continue;
+        }
         let cleaned = clean_line(line);
         if cleaned == line {
             continue;

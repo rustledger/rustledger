@@ -3160,12 +3160,13 @@ fec52b6c2162
 ff0c685f267a
 ff97c824b68d
 @ fuzz off-by-one
+07f73a8de1d6
 aa8fdddf79d5
+c5f3d62e0428
 @ fuzz rl-indented-line
 0131bfa4ad20
 03f3b9233c00
 0770d0c17da7
-07f73a8de1d6
 0ed4802818f6
 151e8c3b1f69
 1e37ebd78871
@@ -3188,17 +3189,14 @@ aa8fdddf79d5
 906f905760ef
 981cdb2bc0ef
 9dd5be11d441
-9fc959ea0836
 a4fd723ec864
 a58da429b5b7
-a8d9967ceb6d
 aefb9517b68c
 af769deafcc1
 b15af876ba61
 b32c9bf313ea
 b3c8a2ebf078
 b4bf0c74d87f
-c5f3d62e0428
 ce6718d8f714
 d8195499ab9a
 dcc376282153
@@ -3366,7 +3364,6 @@ d76ae244087a
 2e5bf7aace84
 2ed6c8f4a904
 2f8367ac55fb
-31a289ee7242
 334c9aea7361
 335a8b82c2d9
 337d2fa1d9c7
@@ -4347,8 +4344,6 @@ a8ac432c05a6
 9e647a1b396b
 9fdf74faf96f
 a2740fc27e31
-a2d5a0fdd9af
-a47d43a0d649
 a98935362f5d
 aad890eec9e8
 aca1f10c1aa7
@@ -4427,11 +4422,9 @@ ff3bc5f8a245
 @ gen rl-top-level-line
 009513e36427
 03549e9a5f50
-041154b50cb1
 044acba6ea44
 0496fdcf982f
 0732d92b496d
-086bbf250ab9
 0905826b8635
 0a4393d2148a
 0bd45f257745
@@ -4466,7 +4459,6 @@ ff3bc5f8a245
 291475e4da02
 2a4a680be631
 2a5443e2665a
-2f6d545016fa
 2fbd23bb554b
 2fc89339e6cd
 3078c894660e
@@ -4552,7 +4544,6 @@ ff3bc5f8a245
 79aa3f76d01f
 79c933e20e28
 7ad0a4efa95f
-7e16e1ffc5de
 7fd2ae90a40e
 80069cdce82e
 80e6ceb40a09
@@ -4581,12 +4572,10 @@ ff3bc5f8a245
 9fa51f7bf73c
 9fd4ddd1577b
 a0adef7b3586
-a1f78c297790
 a296522420fe
 a314fadb0917
 a61522064c8a
 a70b9c7fd831
-a8261e2e456b
 a843b2e27864
 a9db69f5ff41
 a9ebcc404556
@@ -4596,7 +4585,6 @@ aba5dda49151
 abc5f859b2da
 acd81b1ef2b9
 acf322a8d540
-ad3305db26ae
 ad990d7552f0
 ae110cafb946
 af821bb2eaf5
@@ -4611,7 +4599,6 @@ b4d8aebfd9d8
 bad45b3fe52b
 bae1bf28224e
 bb03ef6be208
-bb1b02e18c51
 bbfe28195c2c
 bfbf757699f6
 c35e8cf2bc77
@@ -4619,7 +4606,6 @@ c3aa3b8f03a9
 c400c49380a0
 c4c12b2297bf
 c4f8b3d5d295
-c6a1701804b9
 c6df31307b4b
 c71ac730fe01
 c897e05e99ac
@@ -4648,7 +4634,6 @@ d9638ba8fd70
 d981528e439d
 d990dd2a97f9
 d9fecc5d1f9c
-da18079f44f3
 dada9e7ec15d
 dc006849c6c9
 dc046ecc2be4
@@ -4664,7 +4649,6 @@ e3cbc96669fe
 e3fa2cb64049
 e545ac3424c2
 e657f998b90c
-e6bd9da0b938
 e71c9fcc50e5
 e8337a25b6ba
 e8790e601ce3
@@ -5248,8 +5232,8 @@ e31d407f8ada
 164	impl-more|impl:P0012|indented|CAPITAL error
 116	impl-fewer|oracle:lex:token+syn:NUMBER|top|NUMBER error
 77	impl-more|impl:P0012|top|CUSTOM error
-70	impl-more|impl:P0012|indented|INDENT ACCOUNT
 69	impl-fewer|oracle:lex:token|top|^ error
+69	impl-more|impl:P0012|indented|INDENT ACCOUNT
 68	impl-more|impl:P0006+P0012|top|^ error
 65	impl-more|impl:P0012|top|-
 59	impl-more|impl:P0012|top|BALANCE error
@@ -5266,7 +5250,7 @@ e31d407f8ada
 43	impl-more|impl:P0012+P0015|top|^ error
 43	impl-more|impl:P0012|top|HASH error
 41	impl-fewer|oracle:lex:number+lex:token|top|^ error
-41	impl-more|impl:P0012|indented|INDENT KEY
+39	impl-more|impl:P0012|indented|INDENT KEY
 36	impl-more|impl:P0012+P0026|top|^ error
 35	impl-more|impl:P0012+P0026|top|BALANCE error
 34	impl-more|impl:P0012|top|NUMBER NUMBER
@@ -5301,7 +5285,6 @@ e31d407f8ada
 12	impl-fewer|oracle:lex:date+lex:token+syn:INDENT|indented|INDENT error
 12	impl-fewer|oracle:lex:token+syn:SLASH|top|SLASH error
 12	impl-more|impl:P0006+P0012|top|NUMBER error
-12	impl-more|impl:P0012|top|DATE DATE
 11	eof|impl:P0021|eof|-
 11	eof|impl:P0023|eof|-
 11	impl-more|impl:P0012+P0015+P0026|top|^ error
@@ -5317,6 +5300,7 @@ e31d407f8ada
 9	impl-fewer|oracle:lex:token+syn:NUMBER|top|COLON error
 9	impl-more|impl:P0012+P0015|top|DATE error
 9	impl-more|impl:P0012|indented|CURRENCY error
+9	impl-more|impl:P0012|top|DATE DATE
 9	impl-more|impl:P0012|top|DATE HASH
 8	impl-fewer|oracle:lex:token+syn:INDENT|indented|ACCOUNT error
 8	impl-more|impl:P0006+P0012+P0026|top|NUMBER error
@@ -5342,7 +5326,6 @@ e31d407f8ada
 6	impl-more|impl:P0006+P0012+P0026|top|ACCOUNT error
 6	impl-more|impl:P0012+P0015|indented|COLON error
 6	impl-more|impl:P0012+P0026|top|ASTERISK error
-6	impl-more|impl:P0012|indented|INDENT DATE
 6	impl-more|impl:P0012|indented|INDENT OPTION
 6	impl-more|impl:P0012|indented|INDENT STRING
 6	impl-more|impl:P0012|top|FLAG
@@ -5355,8 +5338,8 @@ e31d407f8ada
 5	impl-fewer|oracle:lex:token+syn:NUMBER|top|HASH error
 5	impl-more|impl:P0006|top|ACCOUNT
 5	impl-more|impl:P0012+P0026|top|CURRENCY error
+5	impl-more|impl:P0012|indented|INDENT DATE
 5	impl-more|impl:P0012|indented|PLUS error
-5	impl-more|impl:P0012|top|CURRENCY
 5	impl-more|impl:P0012|top|LCURL error
 5	impl-more|impl:P0012|top|OPTION STRING
 4	impl-fewer|oracle:ParserError+syn:NUMBER|indented|INDENT ACCOUNT
@@ -5412,9 +5395,9 @@ e31d407f8ada
 3	impl-more|impl:P0012|indented|INDENT CUSTOM
 3	impl-more|impl:P0012|indented|INDENT LCURLCURL
 3	impl-more|impl:P0012|indented|PUSHMETA KEY
-3	impl-more|impl:P0012|top|ACCOUNT
 3	impl-more|impl:P0012|top|ACCOUNT CAPITAL
 3	impl-more|impl:P0012|top|COMMA error
+3	impl-more|impl:P0012|top|CURRENCY
 3	impl-more|impl:P0012|top|POPTAG error
 3	impl-more|impl:P0012|top|PUSHMETA KEY
 3	impl-more|impl:P0012|top|RCURL error
@@ -5468,6 +5451,7 @@ e31d407f8ada
 2	impl-more|impl:P0012|indented|INDENT TILDE
 2	impl-more|impl:P0012|indented|OPEN error
 2	impl-more|impl:P0012|indented|RPAREN error
+2	impl-more|impl:P0012|top|ACCOUNT
 2	impl-more|impl:P0012|top|ASTERISK
 2	impl-more|impl:P0012|top|AT error
 2	impl-more|impl:P0012|top|ATAT CAPITAL
@@ -5478,9 +5462,7 @@ e31d407f8ada
 2	impl-more|impl:P0012|top|DATE NOTE
 2	impl-more|impl:P0012|top|DATE PRICE
 2	impl-more|impl:P0012|top|EVENT error
-2	impl-more|impl:P0012|top|INCLUDE
 2	impl-more|impl:P0012|top|INCLUDE STRING
-2	impl-more|impl:P0012|top|LINK FLAG
 2	impl-more|impl:P0012|top|NONE error
 2	impl-more|impl:P0012|top|NOTE error
 2	impl-more|impl:P0012|top|POPMETA error
@@ -5629,7 +5611,6 @@ e31d407f8ada
 1	impl-more|impl:P0012+P0026|top|CLOSE error
 1	impl-more|impl:P0012+P0026|top|COLON error
 1	impl-more|impl:P0012+P0026|top|INCLUDE error
-1	impl-more|impl:P0012+P0026|top|LCURLCURL error
 1	impl-more|impl:P0012+P0026|top|PIPE error
 1	impl-more|impl:P0012+P0026|top|PLUGIN error
 1	impl-more|impl:P0012+P0026|top|PLUS error
@@ -5672,7 +5653,6 @@ e31d407f8ada
 1	impl-more|impl:P0012|indented|TAG
 1	impl-more|impl:P0012|indented|TILDE error
 1	impl-more|impl:P0012|indented|^ error
-1	impl-more|impl:P0012|top|ACCOUNT ACCOUNT
 1	impl-more|impl:P0012|top|ASTERISK HASH
 1	impl-more|impl:P0012|top|ASTERISK PIPE
 1	impl-more|impl:P0012|top|ASTERISK TILDE
@@ -5719,14 +5699,15 @@ e31d407f8ada
 1	impl-more|impl:P0012|top|FLAG PUSHTAG
 1	impl-more|impl:P0012|top|FLAG RCURL
 1	impl-more|impl:P0012|top|FLAG STRING
-1	impl-more|impl:P0012|top|HASH
 1	impl-more|impl:P0012|top|HASH BALANCE
+1	impl-more|impl:P0012|top|INCLUDE
 1	impl-more|impl:P0012|top|INCLUDE CLOSE
 1	impl-more|impl:P0012|top|INCLUDE POPMETA
 1	impl-more|impl:P0012|top|INCLUDE TAG
 1	impl-more|impl:P0012|top|LCURL NUMBER
 1	impl-more|impl:P0012|top|LCURLCURL HASH
 1	impl-more|impl:P0012|top|LINK ATAT
+1	impl-more|impl:P0012|top|LINK FLAG
 1	impl-more|impl:P0012|top|LINK INCLUDE
 1	impl-more|impl:P0012|top|LINK TAG
 1	impl-more|impl:P0012|top|LPAREN FLAG
@@ -5748,7 +5729,6 @@ e31d407f8ada
 1	impl-more|impl:P0012|top|OPTION HASH
 1	impl-more|impl:P0012|top|OPTION NUMBER
 1	impl-more|impl:P0012|top|OPTION PIPE
-1	impl-more|impl:P0012|top|OPTION PLUGIN
 1	impl-more|impl:P0012|top|OPTION error
 1	impl-more|impl:P0012|top|PAD
 1	impl-more|impl:P0012|top|PAD COMMODITY

@@ -10,10 +10,12 @@
 //! is now one `Whitespace` token, so its bytes stay in the CST.
 //!
 //! A `\r` with more of the line after it is still an error. Beancount takes
-//! it as a token separator; we deliberately do not, because the formatter
-//! folds such a bare `\r` into a line break (that is what keeps classic-Mac
-//! files formattable), so accepting it would let `rledger format` split a
-//! line `rledger check` accepted. See `TokenIter::stray_cr_trivia_end`.
+//! it as a token separator; we deliberately do not (#2804). The reason was
+//! that the formatter folded such a bare `\r` into a line break, so accepting
+//! it would have let `rledger format` split a line `rledger check` accepted;
+//! the formatter now keeps the `\r`, so the deviation could be revisited. In
+//! a comment the `\r` is comment text, as in beancount. See
+//! `TokenIter::stray_cr_trivia_end`.
 //!
 //! Except before an invalid token (#2966): there the line has that token's
 //! error in any case, so nothing is accepted, and the `\r` is a blank, as in

@@ -914,13 +914,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     v79 entry would keep serving the `E7001`. The layout is unchanged.
 ///     `rustledger-wasm` archives no `CachedOptions`, so only its pin moves
 ///     (its own version moves for the new validation findings).
+/// v81: PARSER OUTPUT moved (after #3057's v80).
+///     A `;`, `%`, `#!` or `#+` comment runs through a `\r` with more of the
+///     line after it to the end of its line, as beancount's `;.*` reads it,
+///     so a directive's or posting's comment text holds the rest of the line
+///     (`; c\rmore`, which an older entry holds as `; c`). The layout is
+///     unchanged. `rustledger-wasm` archives the same directives, so it bumps
+///     its own version too.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 80;
+pub const CACHE_VERSION: u32 = 81;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1821,7 +1828,9 @@ mod tests {
         // so the arrays still hold.
         // v80 replays an option's new E7004 warning; no archived encoding
         // moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 80;
+        // v81 runs a comment through a mid-line `\r` (parser output only);
+        // no archived encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 81;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1992,7 +2001,9 @@ mod tests {
         // move, so the hash below is unchanged.
         // v80 replays an option's new E7004 warning; no archived layout
         // moves, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 80;
+        // v81 runs a comment through a mid-line `\r` (parser output only);
+        // the `MetaValue` layout does not move, so the hash is unchanged.
+        const FIXTURE_VERSION: u32 = 81;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

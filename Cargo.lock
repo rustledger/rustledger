@@ -3267,6 +3267,7 @@ dependencies = [
  "lsp-types",
  "parking_lot 0.13.0",
  "percent-encoding",
+ "proptest",
  "ropey",
  "rust_decimal",
  "rustledger-booking",

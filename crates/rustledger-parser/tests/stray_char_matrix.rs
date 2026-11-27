@@ -133,9 +133,8 @@ fn stage(row: &Row, case: &Case) -> u8 {
 
 /// A character inserted right after a `\r` that the line goes on past: a
 /// mid-line `\r`, which we report and beancount accepts. A deliberate
-/// deviation (#2804): the formatter turns a bare `\r` into a line break, so
-/// accepting it would let `rledger check` pass a file `rledger format` then
-/// breaks. Pinned by count.
+/// deviation (#2804), made when the formatter turned a bare `\r` into a line
+/// break (it now keeps it, so this could be revisited). Pinned by count.
 const fn known_mid_line_cr(row: &Row, case: &Case) -> bool {
     case.offset > 0 && row.base.as_bytes()[case.offset - 1] == b'\r'
 }

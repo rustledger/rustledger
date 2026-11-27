@@ -80,6 +80,21 @@ pub use convert::{
 // formatter symbol from outside the crate.
 pub use lossless_tokens::lossless_kind_tokens;
 #[doc(hidden)]
+pub(crate) use oracle::beancount::drops_statement;
+
+/// Whether beancount discards the directive `source` starts with.
+///
+/// Its grammar builds no statement there, by the reduction trace of its own
+/// parse (the error oracle). `source` is the directive's own text from its
+/// first token, with what follows it (its next line, at least), so an
+/// invalid token there that fails the statement counts too. beancount checks
+/// nothing of a directive it does not build, so the validator asks this
+/// before it reports such a directive's findings (a `balance` whose
+/// tolerance stands after its currency, `1 USD ~ 0.1`, is one).
+#[must_use]
+pub fn beancount_drops_directive(source: &str) -> bool {
+    drops_statement(source)
+}
 pub use oracle::beancount::{
     deviation_overlays as __beancount_deviation_overlays,
     gate_skips_grammar as __beancount_gate_skips_grammar,

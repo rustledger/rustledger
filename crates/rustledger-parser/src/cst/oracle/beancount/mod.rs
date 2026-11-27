@@ -425,6 +425,28 @@ pub fn reference_errors(src: &str) -> Vec<(u32, String)> {
         .collect()
 }
 
+/// Whether beancount's grammar drops the statement `text` starts with: it
+/// builds no statement starting at `text`'s first token (its recovery pops
+/// the one it had started, or its lexer rejects that first token). `text`
+/// is a directive's own text from its first token, with what follows it, so
+/// an invalid token on the next line that fails the statement counts too.
+/// From the reduction trace of beancount's own parse, with none of rledger's
+/// deliberate differences applied: the question is what beancount builds.
+pub fn drops_statement(text: &str) -> bool {
+    let Ok(len) = u32::try_from(text.len()) else {
+        return false;
+    };
+    let mut tokens = Lexer::new(text.as_bytes()).peekable();
+    let Some(first) = tokens.peek().map(|l| l.start) else {
+        return false;
+    };
+    let outcome = lr::run(tokens, len, true);
+    !outcome
+        .statements
+        .iter()
+        .any(|s| s.built && s.start == first)
+}
+
 /// rledger's deliberate parse-error differences from beancount, as `(name,
 /// section)`: each overlay's name and the `docs/reference/compatibility.md`
 /// section (heading anchor) documenting it.

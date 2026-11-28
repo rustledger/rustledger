@@ -16,7 +16,6 @@
 #@inputs gen 10000
 @ categories
 5	options|display_precision|display_precision|-|-
-3	balances|extra-in-impl|account|-|-
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
 @ deviations
@@ -386,9 +385,9 @@ compat	d8fdb06cb306	match	tests/compatibility/files/double-entry-generator/examp
 compat	3d8605de1957	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v1_example-icbc-debit-v1-output.beancount
 compat	ec9e704870be	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v2_example-icbc-debit-v2-output.beancount
 compat	14d4aca7aa35	match	tests/compatibility/files/double-entry-generator/example_jd_example-jd-output.beancount
-compat	0f70e7780250	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
-compat	d5bfd0dd43e8	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
-compat	848812ae9735	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_oklink_example-oklink-output.beancount
+compat	0f70e7780250	match	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
+compat	d5bfd0dd43e8	match	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
+compat	848812ae9735	match	tests/compatibility/files/double-entry-generator/example_oklink_example-oklink-output.beancount
 compat	e16a6ce3e57a	match	tests/compatibility/files/double-entry-generator/example_spdb_debit_example-spdb_debit-output.beancount
 compat	975aaf485c5f	match	tests/compatibility/files/double-entry-generator/example_td_example-td-output.beancount
 compat	10d996866733	match	tests/compatibility/files/double-entry-generator/example_wechat_example-wechat-output.beancount
@@ -709,7 +708,7 @@ compat	7eef4f1a9d0b	match	tests/compatibility/files/parser-lima/test-cases_PushP
 compat	c87b568f1150	match	tests/compatibility/files/parser-lima/test-cases_Simple.CRLF.beancount
 compat	664f96bcaa26	match	tests/compatibility/files/parser-lima/test-cases_Simple.beancount
 compat	8673c3bc5e36	match	tests/compatibility/files/parser-lima/test-cases_Sort.OpenBeforeTransactionSameDate.beancount
-compat	8c9b9914c14b	balances|extra-in-impl|account|-|-	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInPosting.beancount
+compat	8c9b9914c14b	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInPosting.beancount
 compat	0caba17429d5	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.ErrorInTransactionLine.beancount
 compat	a6c37b6770f5	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.NoFinalNewline.beancount
 compat	20922ecbd2ad	match	tests/compatibility/files/parser-lima/test-cases_SyntaxErrors.SingleErrorTokenAtTopLevel.beancount

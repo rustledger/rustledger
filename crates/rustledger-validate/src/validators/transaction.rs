@@ -149,7 +149,11 @@ pub fn validate_transaction_late(
     // invalid token in a posting) is built nowhere there: it checks no
     // balance for it, and its postings move no inventory, so a later
     // `balance` sees the account without them. Asked only where a parse
-    // error is known to be in the transaction (casc3).
+    // error is known to be in the transaction (casc3). The loader leaves
+    // such a transaction out of the ledger it loads
+    // (`rustledger_parser::transactions_beancount_drops`, the same rule), so
+    // this catches it on the surfaces that validate a parse directly (the
+    // LSP's edited buffer).
     if holds_a_parse_error(&state.options, location)
         && dropped_by_beancount(&state.options, location)
     {

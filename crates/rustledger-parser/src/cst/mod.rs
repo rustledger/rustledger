@@ -95,6 +95,71 @@ pub(crate) use oracle::beancount::drops_statement;
 pub fn beancount_drops_directive(source: &str) -> bool {
     drops_statement(source)
 }
+
+/// The transactions of `result` (a parse of `source`) that beancount
+/// discards, as indices into `result.directives`, ascending.
+///
+/// beancount's grammar builds no statement for a transaction a syntax error
+/// fails (`Assets:A  1 $ USD`), so nothing of it reaches its entries: no
+/// posting moves a balance, and no check runs on it. rledger's parser keeps
+/// such a transaction under error recovery, for the editor; the loader
+/// leaves these out of the ledger it loads, so every report agrees with
+/// beancount's. Only a transaction a parse error starts in is asked
+/// ([`beancount_drops_directive`] over its text and the line after it), so
+/// a clean source costs one pass over its errors; one whose next line alone
+/// fails it is kept, a documented difference (P7). The validator asks the same of a
+/// directive it reads from source text (`dropped_by_beancount` in
+/// `rustledger-validate`, for the surfaces that validate a parse directly).
+#[must_use]
+pub fn transactions_beancount_drops(source: &str, result: &crate::ParseResult) -> Vec<usize> {
+    if result.errors.is_empty() {
+        return Vec::new();
+    }
+    let mut starts: Vec<usize> = result.errors.iter().map(|e| e.span.start).collect();
+    starts.sort_unstable();
+    // The end of the line starting at `at`, its `\n` included.
+    let line_end = |at: usize| {
+        source.get(at..).map_or(at, |rest| {
+            rest.find('\n').map_or(source.len(), |n| at + n + 1)
+        })
+    };
+    let error_in = |from: usize, to: usize| {
+        let k = starts.partition_point(|&s| s < from);
+        starts.get(k).is_some_and(|&s| s < to)
+    };
+    result
+        .directives
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| matches!(d.value, rustledger_core::Directive::Transaction(_)))
+        .filter_map(|(i, d)| {
+            let (start, end) = (d.span.start, d.span.end.min(source.len()));
+            // Its own lines: the header, and the indented lines after it.
+            // An error on a later column-0 line alone (one that starts with
+            // an invalid token) is P7 in `docs/reference/compatibility.md`:
+            // rledger keeps such an entry on purpose (overlay
+            // `kept-entries`). The span runs on over such lines to the next
+            // directive, so they are cut off here.
+            let own_end = {
+                let mut at = line_end(start);
+                while at < end
+                    && source
+                        .as_bytes()
+                        .get(at)
+                        .is_some_and(|b| matches!(b, b' ' | b'\t'))
+                {
+                    at = line_end(at);
+                }
+                at.min(end)
+            };
+            if !error_in(start, own_end.max(start + 1)) {
+                return None;
+            }
+            let text = source.get(start..line_end(end))?;
+            beancount_drops_directive(text).then_some(i)
+        })
+        .collect()
+}
 pub use oracle::beancount::{
     deviation_overlays as __beancount_deviation_overlays,
     gate_skips_grammar as __beancount_gate_skips_grammar,

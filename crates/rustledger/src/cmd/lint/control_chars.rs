@@ -294,21 +294,24 @@ mod tests {
         out
     }
 
-    /// A control character on a line that also has a parse error is still
-    /// found, and the load error is a warning, not a refusal.
+    /// A control character in a file that also has a parse error is still
+    /// found, and the load error is a warning, not a refusal. (The parse
+    /// error is in another transaction: one it fails, beancount discards,
+    /// and the loaded ledger leaves out.)
     #[test]
     fn test_run_with_writer_answers_over_load_errors_with_a_warning() {
         let (out, warnings) = lint_with_warnings(
             concat!(
                 "2024-01-01 open Assets:Cash\n",
-                "2024-01-02 * \"bell\u{7}\" junk\n",
+                "2024-01-02 * \"bell\u{7}\" \"n\"\n",
+                "  Assets:Cash  -1 USD\n",
+                "  Expenses:Food\n",
+                "2024-01-03 * \"x\" junk\n",
                 "  Assets:Cash  -1 USD\n",
                 "  Expenses:Food\n",
             ),
             OutputFormat::Text,
         );
-        // The invalid token after the lone string keeps that string in the
-        // payee's place (#2932), so the character is reported in the payee.
         assert!(
             out.contains(":2: control character in payee: \"bell\\u{7}\""),
             "the control character is still found:\n{out}"

@@ -7,11 +7,13 @@ on:
       # fixes a broken docs build cannot run the docs build, and the fix
       # merges unverified.
       - '.github/workflows/docs-validate.yml'
+      - 'scripts/check-docs-vue.py'
   push:
     branches: [main]
     paths:
       - 'docs/**'
       - '.github/workflows/docs-validate.yml'
+      - 'scripts/check-docs-vue.py'
 permissions:
   contents: read
 concurrency:
@@ -28,6 +30,13 @@ jobs:
           path: rustledger
           sparse-checkout: |
             docs
+            scripts/check-docs-vue.py
+      # Seconds, and names the source line. The VitePress build below reports
+      # the same mistake as a JavaScript parse error at a line of the compiled
+      # page, which is hard to trace back.
+      - name: Check for Vue interpolation in docs
+        working-directory: rustledger
+        run: python3 scripts/check-docs-vue.py docs
       - name: Checkout website repo (for VitePress config)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

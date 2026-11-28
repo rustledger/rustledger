@@ -549,7 +549,7 @@ Pinned by `test_parse_reports_a_cost_and_price_currency_mismatch`
 (`an_unresolved_empty_cost_sells_by_the_accounts_method`,
 `the_commoditys_own_postings_do_not_name_its_cost_currency`).
 
-### 18. Total Prices That Do Not Divide Evenly
+### 18. Total Prices and Total Costs That Do Not Divide Evenly
 
 rustledger weighs a total price (`@@`) at the total as written. Beancount
 divides it into a per-unit price, rounded to 28 significant digits, and
@@ -573,6 +573,28 @@ refusing a transaction balanced to the cent would be wrong. A total that is
 really off (`-999.99 USD` here) is still refused. The BQL `weight` column
 uses the same written total (#2031). Pinned by
 `crates/rustledger-loader/tests/total_price_face_value_test.rs` (issue #2831).
+
+The same holds for a lot bought at a total or compound cost
+(<span v-pre>`{{1525.49 USD}}`</span>, `{286.04 # 2.75 USD}`) and later sold whole: rustledger
+weighs the sale at the lot's exact total, beancount at its per-unit cost
+(rounded to 28 significant digits) times the units, and the balance is
+checked exactly.
+Two consequences:
+
+- A sale balanced to the edge of its tolerance balances in both. Its exact
+  residual is compared, never one inflated by the rounded per-unit cost (a
+  whole sale of `19.25 VTI {94.94 # 3.83 USD}` beside another lot, residual
+  exactly `-0.005` against a tolerance of `0.005`, was reported unbalanced
+  here).
+- An elided gain that falls exactly on a half-cent can differ by one cent.
+  `17.125 ACME {286.04 # 2.75 USD}` sold whole at `80.23` against `1373.94`
+  cash leaves exactly `3527.245`, which rounds half-even to `3527.24 USD`
+  here; beancount's rounded per-unit cost makes it
+  `3527.245000000000000000000001`, which it books as `3527.25 USD`. Only a
+  gain the rounding residue pushes across a half-cent differs, and the
+  semantic differential counts such a ledger as this deviation.
+
+Pinned by `crates/rustledger-loader/tests/exact_lot_total_test.rs`.
 
 ### 19. Amount Alignment With Wide Characters
 

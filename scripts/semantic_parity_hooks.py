@@ -163,6 +163,30 @@ def _tiny_total_price_residual(m) -> bool:
     return any("@@" in ln for ln in lines)
 
 
+_TOTAL_COST = re.compile(r"\{\{|\{[^}]*#")
+
+
+def _half_cent_tie(m) -> bool:
+    """Known Difference 18, its cost half: a lot bought at a total or
+    compound cost and sold whole is weighed at its exact total here, at
+    beancount's rounded per-unit cost there, so an elided gain falling
+    exactly on a half-cent rounds the other way (`3527.24` here, `3527.25`
+    there). Explains a ledger holding a total or compound cost whose first
+    difference is a booked posting's units, the two numbers one unit of
+    their last decimal place apart."""
+    d = m.diff
+    if d.field != "entries" or d.path != "postings.units.number":
+        return False
+    try:
+        a, b = Decimal(str(d.oracle)), Decimal(str(d.impl))
+    except (InvalidOperation, TypeError):
+        return False
+    places = max(-a.as_tuple().exponent, -b.as_tuple().exponent, 0)
+    if abs(a - b) != Decimal(1).scaleb(-places):
+        return False
+    return any(_TOTAL_COST.search(t) for t in (m.ledger.text, *m.ledger.files.values()))
+
+
 def _cost_currency_categorize(m) -> bool:
     """Known Difference 17: a cost spec with no currency (`{}`) whose
     currency beancount's categorization cannot resolve fails there (`Failed
@@ -283,9 +307,15 @@ DEVIATIONS = [
     ),
     Deviation(
         "total-price-residual",
-        f"{COMPAT} #18 (Total Prices That Do Not Divide Evenly)",
+        f"{COMPAT} #18 (Total Prices and Total Costs That Do Not Divide Evenly)",
         _tiny_total_price_residual,
         "an @@ total weighed as written, not as a rounded per-unit price",
+    ),
+    Deviation(
+        "total-cost-half-cent",
+        f"{COMPAT} #18 (Total Prices and Total Costs That Do Not Divide Evenly)",
+        _half_cent_tie,
+        "an elided gain on a half-cent tie, from a lot's exact total",
     ),
     Deviation(
         "cost-currency-categorize",

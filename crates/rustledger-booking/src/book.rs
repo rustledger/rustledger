@@ -2807,13 +2807,25 @@ fn split_posting_price(
 /// way a `{{T}}` augmentation already does (#1026) is what lets the balance
 /// weigh it exactly. `PerUnit` otherwise, so every other booked cost, and its
 /// `meta.hash`, is unchanged.
+///
+/// The product is compared EXACTLY. `Decimal`'s `checked_mul` rounds a
+/// product past its 28 digits and returns it anyway, so a whole sale of
+/// `19.25 VTI {94.94 # 3.83 USD}` (per-unit `95.13896103896103896103896104`,
+/// rounded up) compared `1831.425` against the basis `1831.425`, found them
+/// equal, and booked `PerUnit`; the precise residual then weighed the exact
+/// product `1831.42500000000000000000000002`, and a sale balanced to the
+/// tolerance's edge (residual exactly `-0.005`, tolerance `0.005`) was
+/// reported unbalanced, where beancount accepts it.
 fn booked_cost_number(
     per_unit: Decimal,
     basis: Option<Decimal>,
     units: Decimal,
 ) -> rustledger_core::CostNumber {
     let exact = basis
-        .filter(|b| units.abs().checked_mul(per_unit) != Some(*b))
+        .filter(|b| {
+            rustledger_core::to_bigdecimal(units.abs()) * rustledger_core::to_bigdecimal(per_unit)
+                != rustledger_core::to_bigdecimal(*b)
+        })
         .and_then(|b| rustledger_core::BookedCost::try_new(per_unit, b, units).ok());
     match exact {
         Some(booked) => rustledger_core::CostNumber::PerUnitFromTotal(booked),

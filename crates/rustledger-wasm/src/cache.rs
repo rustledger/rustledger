@@ -825,7 +825,11 @@ use crate::types::{Error, LedgerOptions};
 /// v158: loader v82, unchanged; a `Ledger`'s booked directives move: a STRICT or
 /// `STRICT_WITH_SIZE` sale of every matching lot lists its postings in the
 /// order the lots were added, where it listed them by lot date.
-pub const CACHE_VERSION: u32 = 158;
+/// v159: loader v82, unchanged; a `Ledger`'s booked directives move: a whole sale
+/// of a lot whose basis is not exactly `units x per-unit` carries the lot's
+/// exact total (`PerUnitFromTotal`) where `Decimal`'s rounded product hid the
+/// difference.
+pub const CACHE_VERSION: u32 = 159;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -47,7 +47,7 @@ Additionally, `document_discovery` is available for auto-discovering document fi
 use rustledger_plugin::{NativePluginRegistry, PluginInput, PluginOptions};
 
 let registry = NativePluginRegistry::global();
-let plugin = registry.find_synth("auto_accounts").unwrap();
+let plugin = registry.find_regular("auto_accounts").unwrap();
 
 let input = PluginInput {
     directives: vec![],

@@ -3134,7 +3134,7 @@ fn test_auto_accounts_generates_opens() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::global();
-    let plugin: &dyn NativePlugin = registry.find_synth("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find_regular("auto_accounts").unwrap();
 
     // Create test input with transaction using unopened accounts
     let input = PluginInput {
@@ -3234,7 +3234,7 @@ fn test_auto_accounts_same_date_ordering() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::global();
-    let plugin: &dyn NativePlugin = registry.find_synth("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find_regular("auto_accounts").unwrap();
 
     // Input: existing open + transaction that uses new account on same date as first use
     let input = PluginInput {

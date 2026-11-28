@@ -104,7 +104,7 @@ pub use process::{
     load_raw, load_with_fs, option_warnings_to_errors, parse_errors_to_ledger_errors, process,
 };
 #[cfg(feature = "plugins")]
-pub use process::{PluginPass, plugin_error_to_ledger_error, run_plugins};
+pub use process::{PluginPass, early_validation_view, plugin_error_to_ledger_error, run_plugins};
 
 use rustledger_core::{Directive, DisplayContext};
 use rustledger_parser::{ParseError, Span, Spanned};

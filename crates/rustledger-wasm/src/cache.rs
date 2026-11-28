@@ -819,7 +819,10 @@ use crate::types::{Error, LedgerOptions};
 /// v156: loader v82, unchanged; a `Ledger`'s processed directives move:
 /// `close_tree` drops the `close` of an account no `open` opens and closes
 /// opened descendants only.
-pub const CACHE_VERSION: u32 = 156;
+/// v157: loader v82, unchanged; a `Ledger`'s processed directives move:
+/// `auto_accounts` runs after booking, so it opens no account only a refused
+/// transaction or a dropped zero posting names.
+pub const CACHE_VERSION: u32 = 157;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

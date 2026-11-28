@@ -499,7 +499,7 @@ When you choose to be stricter or more correct than Python on a specific case:
 - `rustledger-booking/src/interpolate.rs` — early/late validation split that catches Python #877's silent miss (see also `rustledger-validate::validate_early`).
 - `rustledger-query/src/executor/aggregation.rs` — eager balance evaluation that avoids beanquery#279.
 - `scripts/compat-bql-test.py` — `_is_beanquery_empty_aggregate_quirk` runtime predicate for beanquery#1055.
-- `rustledger-loader/src/process.rs` — split plugin pass (synth pre-booking, regular post-booking) so the Early validator sees plugin-synthesized Opens while cost-spec-reading plugins still see booked values. See `PluginPass` rustdoc. The pipeline is `sort → synth-plugins → Early → book → regular-plugins → Late → finalize`.
+- `rustledger-loader/src/process.rs` — split plugin pass (synth pre-booking: document discovery only; regular post-booking: every declared plugin, `auto_accounts` included, in declared order, as beancount runs them) so cost-spec-reading plugins see booked values. The Early validator judges posting accounts against `early_validation_view` (the stream plus the opens `auto_accounts` will insert), so it sees those accounts without the plugin running out of order. See `PluginPass` rustdoc. The pipeline is `sort → synth-plugins → Early → book → regular-plugins → Late → finalize`.
 
 ## Canonical-Function Discipline (Phase-3 of the 2026-07 duplication review)
 

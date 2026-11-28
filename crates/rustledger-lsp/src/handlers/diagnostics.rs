@@ -461,8 +461,9 @@ pub(crate) fn run_ledger_validation(
     // interpolates to zero and prunes.
     let load_options = lsp_load_options();
     let mut plugin_errors = Vec::new();
-    // Synth pass first, so `auto_accounts` can synthesize the Opens Early
-    // validation needs (no spurious E1001s).
+    // Synth pass first (document discovery). `auto_accounts` runs in the
+    // regular pass, where it is declared; Early reads its opens from the
+    // loader's provisional view below, as `rledger check` does.
     let mut plugins_ok = match plugin_ctx {
         Some(ctx) => run_plugin_pass(
             &mut booked_directives,
@@ -481,7 +482,17 @@ pub(crate) fn run_ledger_validation(
     // rationale.
     let today = jiff::ZonedDateTime::now().date();
     let session = ValidationSession::new(validation_options.clone());
-    let (mut session, mut errors) = session.run_early_spanned(&booked_directives, today);
+    let early_view = plugin_ctx.and_then(|ctx| {
+        rustledger_loader::early_validation_view(
+            &booked_directives,
+            ctx.plugins,
+            ctx.file_options,
+            &load_options,
+            ctx.source_map,
+        )
+    });
+    let (mut session, mut errors) =
+        session.run_early_spanned(early_view.as_deref().unwrap_or(&booked_directives), today);
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.

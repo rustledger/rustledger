@@ -60,8 +60,10 @@ pub use error::{ErrorCode, Severity, ValidationError, is_advisory_only_code};
 /// The loader pipeline splits validation around booking and the regular
 /// plugin pass.
 ///
-/// [`Phase::Early`] runs AFTER synthesizer plugins (`auto_accounts`,
-/// `document_discovery`) but BEFORE booking, and holds only what must see
+/// [`Phase::Early`] runs AFTER the synthesizer plugin (`document_discovery`)
+/// but BEFORE booking, on a stream that also holds the `open`s
+/// `auto_accounts` will insert after booking (the loader's
+/// `early_validation_view`), and holds only what must see
 /// the pre-booking stream: transaction structure (posting count, multiple
 /// elided amounts, negative costs), future-date warnings, and a provisional
 /// judgment of each transaction's posting accounts. Those posting errors

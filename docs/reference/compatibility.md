@@ -575,7 +575,7 @@ uses the same written total (#2031). Pinned by
 `crates/rustledger-loader/tests/total_price_face_value_test.rs` (issue #2831).
 
 The same holds for a lot bought at a total or compound cost
-(`{{1525.49 USD}}`, `{286.04 # 2.75 USD}`) and later sold whole: rustledger
+(<span v-pre>`{{1525.49 USD}}`</span>, `{286.04 # 2.75 USD}`) and later sold whole: rustledger
 weighs the sale at the lot's exact total, beancount at its per-unit cost
 (rounded to 28 significant digits) times the units, and the balance is
 checked exactly.

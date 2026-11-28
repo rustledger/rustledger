@@ -837,7 +837,11 @@ use crate::types::{Error, LedgerOptions};
 /// v162: loader v82, unchanged; a `Ledger`'s findings and directives move: a
 /// plugin path no native plugin answers to exactly (`beancount.plugin.unrealized`)
 /// no longer runs one.
-pub const CACHE_VERSION: u32 = 162;
+/// v164: loader v82, unchanged; a transaction beancount's grammar discards
+/// is left out of the loaded ledger, so its postings move no balance. Every
+/// such source has a parse error, which the loader's cache is never saved
+/// for.
+pub const CACHE_VERSION: u32 = 164;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

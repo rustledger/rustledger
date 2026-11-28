@@ -579,6 +579,10 @@ pub struct Loader {
     enforce_path_security: bool,
     /// Filesystem abstraction for reading files.
     fs: Box<dyn FileSystem>,
+    /// The transactions beancount's grammar discards, as (file id, span
+    /// start), left out of the loaded directives once the display context
+    /// has sampled their numbers (see `load`).
+    dropped: HashSet<(u16, usize)>,
 }
 
 impl Default for Loader {
@@ -590,6 +594,7 @@ impl Default for Loader {
             root_dir: None,
             enforce_path_security: false,
             fs: Box::new(DiskFileSystem),
+            dropped: HashSet::new(),
         }
     }
 }
@@ -747,6 +752,17 @@ impl Loader {
         // Build display context from directives and options
         let display_context = build_display_context(&directives, &options);
 
+        // A transaction beancount's grammar discards is none of its entries:
+        // it moves no balance, and nothing checks it. The parser keeps it
+        // under error recovery (for the editor); the loaded ledger leaves it
+        // out, so every report and check agrees with beancount's. Its parse
+        // error stays. After the display context: beancount's samples the
+        // numbers its lexer reads, a discarded statement's included.
+        if !self.dropped.is_empty() {
+            let dropped = std::mem::take(&mut self.dropped);
+            directives.retain(|d| !dropped.contains(&(d.file_id, d.span.start)));
+        }
+
         let base_dir = source_map.files().first().map(SourceFile::dir);
         let post_load = post_load_option_warnings(&options, base_dir, self.fs.as_ref());
         options.warnings.extend(post_load);
@@ -831,6 +847,13 @@ impl Loader {
         // file count; reject it here (collected into `LoadResult::errors` by the
         // caller) so an over-large include/glob set fails loudly without a panic.
         let fid_u16 = file_id_to_u16(source_map.files().len())?;
+        // The transactions beancount discards, left out after the display
+        // context is built (`load`); read while the text is at hand.
+        for i in rustledger_parser::transactions_beancount_drops(&source, &result) {
+            if let Some(d) = result.directives.get(i) {
+                self.dropped.insert((fid_u16, d.span.start));
+            }
+        }
         // Add to source map (the map takes ownership of the shared text:
         // `SourceText` clones are refcount bumps, and this one is the last use).
         let file_id = source_map.add_opened_file(path_buf.clone(), opened.to_path_buf(), source);
@@ -2165,7 +2188,6 @@ include "more.beancount"
   counterparty_account: Assets:Bank
   preferred_currency: USD
   category_tag: #coffee
-  receipt_link: ^receipt-2024
   fee_amount: 0.50 USD
   Assets:Bank   -5.00 USD
     settled_with: Assets:Bank
@@ -2181,7 +2203,6 @@ include "more.beancount"
   counterparty_account: Assets:Bank
   preferred_currency: USD
   category_tag: #coffee
-  receipt_link: ^receipt-2024
   fee_amount: 0.50 USD
   Assets:Bank   -3.00 USD
     settled_with: Assets:Bank
@@ -2204,7 +2225,7 @@ include "more.beancount"
             .collect();
         assert_eq!(txns.len(), 2);
 
-        // --- Transaction-level meta: all four typed variants + Amount.currency ---
+        // --- Transaction-level meta: three typed variants + Amount.currency ---
 
         let MetaValue::Account(a1) = &txns[0].meta["counterparty_account"] else {
             panic!("expected MetaValue::Account");
@@ -2239,16 +2260,9 @@ include "more.beancount"
             "MetaValue::Tag in cross-file meta must share Arc<str>"
         );
 
-        let MetaValue::Link(l1) = &txns[0].meta["receipt_link"] else {
-            panic!("expected MetaValue::Link");
-        };
-        let MetaValue::Link(l2) = &txns[1].meta["receipt_link"] else {
-            panic!("expected MetaValue::Link");
-        };
-        assert!(
-            l1.ptr_eq(l2),
-            "MetaValue::Link in cross-file meta must share Arc<str>"
-        );
+        // No `MetaValue::Link` here: a link is no metadata value to
+        // beancount (a parse error, which fails the transaction), and the
+        // loader leaves a transaction beancount discards out of the ledger.
 
         let MetaValue::Amount(am1) = &txns[0].meta["fee_amount"] else {
             panic!("expected MetaValue::Amount");

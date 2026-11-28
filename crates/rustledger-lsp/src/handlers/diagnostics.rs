@@ -1124,13 +1124,32 @@ pub fn all_diagnostics(
         // itself (#2654).
         let full_directives_raw = ledger_state.and_then(LedgerState::raw_directives);
 
+        // The buffer's directives as the loader loads them: a transaction
+        // beancount's grammar discards is none of the ledger's
+        // (`rustledger_parser::transactions_beancount_drops`, the loader's
+        // rule), so it books nothing and nothing checks it, as in `check`.
+        let dropped = rustledger_parser::transactions_beancount_drops(source, result);
+        let buffer_directives: std::borrow::Cow<'_, [Spanned<Directive>]> = if dropped.is_empty() {
+            std::borrow::Cow::Borrowed(&result.directives)
+        } else {
+            std::borrow::Cow::Owned(
+                result
+                    .directives
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| dropped.binary_search(i).is_err())
+                    .map(|(_, d)| d.clone())
+                    .collect(),
+            )
+        };
+
         // Build the list of overlays to apply to the ledger snapshot.
         // Always include the current file's fresh parse first, then
         // append any other open buffers the caller handed in (#760).
         let mut overlay_entries: Vec<(u16, &[Spanned<Directive>])> =
             Vec::with_capacity(1 + other_buffer_overlays.len());
         if let Some(fid) = current_file_id {
-            overlay_entries.push((fid, result.directives.as_slice()));
+            overlay_entries.push((fid, &buffer_directives));
         }
         overlay_entries.extend_from_slice(other_buffer_overlays);
         let overlay = build_live_directive_overlay(&overlay_entries, full_directives_raw);
@@ -1150,7 +1169,7 @@ pub fn all_diagnostics(
         {
             full.to_vec()
         } else {
-            result.directives.clone()
+            buffer_directives.to_vec()
         };
 
         // Build validation options with custom account type names.

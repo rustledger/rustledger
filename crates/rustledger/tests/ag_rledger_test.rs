@@ -2942,7 +2942,8 @@ fn test_lint_control_chars_warns_on_load_errors() {
         tmp.path(),
         "main.beancount",
         "2024-01-01 open Assets:Cash\n\
-         2024-01-02 * \"bell\u{7}\" junk\n  Assets:Cash -1 USD\n  Expenses:Food\n",
+         2024-01-02 * \"bell\u{7}\" \"n\"\n  Assets:Cash -1 USD\n  Expenses:Food\n\
+         2024-01-03 * \"x\" junk\n  Assets:Cash -1 USD\n  Expenses:Food\n",
     );
     let (code, envelope, _) = run_in(
         tmp.path(),
@@ -2955,8 +2956,8 @@ fn test_lint_control_chars_warns_on_load_errors() {
         .unwrap_or_else(|| panic!("no warnings: {envelope}"));
     assert_eq!(warnings.len(), 1, "{envelope}");
     assert_eq!(warnings[0]["code"], "LOAD_ERRORS", "{envelope}");
-    // The invalid token after the lone string keeps that string in the
-    // payee's place (#2932), so the character is reported in the payee.
+    // The parse error is in another transaction (one it fails, beancount
+    // discards, and the loaded ledger leaves out); the bell is still found.
     assert!(
         envelope["result"]["stdout"]
             .as_str()

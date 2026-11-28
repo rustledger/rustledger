@@ -21,7 +21,6 @@
 2	entries|postings.order|transaction|-|elided+multi-currency
 2	entries|postings.order|transaction|-|expr+multi-currency
 2	errors|impl-fewer|oracle:LoadError|-|-|-
-1	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
 @ deviations
@@ -30,8 +29,8 @@
 120	currency-accounts-posting-order
 6	custom-display-precision
 5	cross-file-booking-order
+1	total-cost-half-cent
 @ mismatches
-486a8d296a0c	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount

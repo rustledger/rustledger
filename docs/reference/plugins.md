@@ -442,6 +442,11 @@ plugin "beancount.plugins.close_tree"
 ; 2024-12-31 close Assets:Bank:Savings
 ```
 
+The parent need not be opened itself: closing `Assets:Bank` when only its
+sub-accounts were opened closes them, and the parent's own `close` is
+dropped, as beancount's plugin does (a `close` of an account no `open`
+opens is removed). Only opened accounts are closed.
+
 Options: None
 
 ### check_closing

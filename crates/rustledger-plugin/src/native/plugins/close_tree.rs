@@ -10,6 +10,18 @@ use super::super::{NativePlugin, RegularPlugin};
 ///
 /// When an account like `Assets:Bank` is closed, this plugin also generates
 /// close directives for all sub-accounts like `Assets:Bank:Checking`.
+///
+/// As beancount 3.2.3's `close_tree` does:
+///
+/// - the descendants it closes are the accounts an `open` directive opens,
+///   not every account a posting names (a posting to an account never opened
+///   is the validator's error, and closing it would add a second one);
+/// - a `close` of an account that no `open` opens is dropped, after its
+///   descendants are closed. Closing a parent that was never opened is how
+///   the plugin is used to close a whole tree (`close Assets:Bank` with only
+///   `Assets:Bank:Checking` opened), and kept, it was reported as closing an
+///   account that was never opened (`E1001`), where `bean-check` reports
+///   nothing.
 pub struct CloseTreePlugin;
 
 /// The location of each close the plugin inserts, line 0, as beancount's
@@ -28,19 +40,16 @@ impl NativePlugin for CloseTreePlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::{BTreeSet, HashSet};
 
-        // Collect all accounts that are used. Sorted, so the closes it inserts
-        // come out in the same order every run: a `HashSet` here emitted them
-        // in hash order (#2625). Beancount's own plugin walks a `set`, whose
-        // order varies from run to run, so there is no order of its to match.
-        let mut all_accounts: BTreeSet<String> = BTreeSet::new();
+        // Collect the accounts an `open` opens: the only ones closed, and the
+        // only ones whose own `close` is kept (see the type's docs). Sorted,
+        // so the closes it inserts come out in the same order every run: a
+        // `HashSet` here emitted them in hash order (#2625). Beancount's own
+        // plugin walks a `set`, whose order varies from run to run, so there
+        // is no order of its to match.
+        let mut opened: BTreeSet<String> = BTreeSet::new();
         for wrapper in &input.directives {
             if let DirectiveData::Open(data) = &wrapper.data {
-                all_accounts.insert(data.account.clone());
-            }
-            if let DirectiveData::Transaction(txn) = &wrapper.data {
-                for posting in &txn.postings {
-                    all_accounts.insert(posting.account.clone());
-                }
+                opened.insert(data.account.clone());
             }
         }
 
@@ -60,8 +69,19 @@ impl NativePlugin for CloseTreePlugin {
             }
         }
 
-        // Start with Keep ops for every input directive.
-        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        // Keep every input directive but the `close` of an account no `open`
+        // opens.
+        let mut ops: Vec<PluginOp> = input
+            .directives
+            .iter()
+            .enumerate()
+            .map(|(i, wrapper)| match &wrapper.data {
+                DirectiveData::Close(data) if !opened.contains(&data.account) => {
+                    PluginOp::Delete(i)
+                }
+                _ => PluginOp::Keep(i),
+            })
+            .collect();
 
         // Track close directives we will insert so the same descendant
         // doesn't get inserted twice when multiple parent prefixes apply.
@@ -69,7 +89,7 @@ impl NativePlugin for CloseTreePlugin {
 
         for (parent, close_date) in &closed_parents {
             let prefix = format!("{parent}:");
-            for account in &all_accounts {
+            for account in &opened {
                 if account.starts_with(&prefix)
                     && !already_closed.contains(account)
                     && !inserted_closes.contains(account)

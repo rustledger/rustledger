@@ -6,8 +6,9 @@
 //! token is the line's first and only grammar-level error there. A posting's
 //! sign check (`-$x`: a `-` that must be followed by a number) covers the
 //! sign and the blanks after it, so it ends exactly where the token starts.
-//! `quiet_after_invalid_tokens` dropped such a check only when it ran past the
-//! token's start, so this one was kept, one error more than beancount.
+//! The pass that once quieted a line after its first invalid token dropped
+//! such a check only when it ran past the token's start, so this one was
+//! kept, one error more than beancount. (The error oracle now decides it.)
 //!
 //! Every expected count below was checked against `bean-check` 3.2.3.
 

@@ -347,3 +347,109 @@ fn test_format_source_keeps_a_leading_indented_comment_indented() {
     assert_eq!(format_source(src), "\t;\n\t+\n");
     assert_roundtrip(src);
 }
+
+// ---- Exhaustive short inputs ---------------------------------------------
+
+/// The symbols the exhaustive sweep strings together: the bytes every
+/// line-ending, BOM and string-literal frame bug so far was made of, plus a
+/// date to make the rest a directive.
+const SYMBOLS: [&str; 10] = [
+    "\u{FEFF}",
+    "\"",
+    "\n",
+    "\r",
+    "\r\n",
+    "A",
+    ";",
+    "*",
+    " ",
+    "2024-01-01 ",
+];
+
+/// Every string of at most `depth` symbols.
+fn short_inputs(depth: u32) -> Vec<String> {
+    let mut all = vec![String::new()];
+    let mut layer = vec![String::new()];
+    for _ in 0..depth {
+        layer = layer
+            .iter()
+            .flat_map(|s| SYMBOLS.iter().map(move |sym| format!("{s}{sym}")))
+            .collect();
+        all.extend(layer.iter().cloned());
+    }
+    all
+}
+
+/// The inputs of the default sweep the certifier has to demote, one `Debug`
+/// literal per line: emitter bugs the certifier keeps from users, pinned so
+/// the list can only shrink (each fix removes its lines; a new demotion is a
+/// new emitter bug and fails here).
+const DEMOTIONS_MANIFEST: &str = "tests/format_roundtrip_common/exhaustive_demotions.manifest";
+
+/// Exhaustive sweep depth: `FORMAT_EXHAUSTIVE_DEPTH`, else 4 (11,111 inputs).
+/// The manifest is for the default depth; at another depth the sweep checks
+/// the promises and only reports demotions.
+const DEFAULT_DEPTH: u32 = 4;
+
+/// Every string of up to four symbols keeps every promise (the certifier makes
+/// sure of that), and the ones it has to demote to do so are exactly those in
+/// the manifest: a demotion ratchet. Regenerate with
+/// `FORMAT_DEMOTIONS_UPDATE=1`.
+#[test]
+fn test_format_exhaustive_short_inputs() {
+    let depth = std::env::var("FORMAT_EXHAUSTIVE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_DEPTH);
+    let mut failures = Vec::new();
+    let mut demoted = Vec::new();
+    for src in short_inputs(depth) {
+        if let Err(e) = format_roundtrip::check_promises(&src) {
+            failures.push(e);
+        }
+        let (_, report) = rustledger_parser::format::__format_source_report(
+            &src,
+            rustledger_parser::format::GroupingStyle::default(),
+        );
+        if !report.is_clean() {
+            demoted.push(format!("{src:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} inputs broke a promise; first:\n{}",
+        failures.len(),
+        failures[0]
+    );
+    if depth != DEFAULT_DEPTH {
+        eprintln!("{} inputs demoted:\n{}", demoted.len(), demoted.join("\n"));
+        return;
+    }
+    let path = manifest_dir().join(DEMOTIONS_MANIFEST);
+    let header = "# Inputs of `test_format_exhaustive_short_inputs` the formatter's certifier\n\
+                  # demotes (ADR 0009): emitter bugs it keeps from users. May only shrink.\n\
+                  # Regenerate: FORMAT_DEMOTIONS_UPDATE=1 cargo test -p rustledger-parser \\\n\
+                  #   --test format_roundtrip_properties test_format_exhaustive_short_inputs\n";
+    let body: String = demoted.iter().flat_map(|d| [d.as_str(), "\n"]).collect();
+    if std::env::var_os("FORMAT_DEMOTIONS_UPDATE").is_some() {
+        fs::write(&path, format!("{header}{body}")).expect("write the manifest");
+        return;
+    }
+    let pinned: Vec<&str> = include_str!("format_roundtrip_common/exhaustive_demotions.manifest")
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+        .collect();
+    let new: Vec<&String> = demoted
+        .iter()
+        .filter(|d| !pinned.contains(&d.as_str()))
+        .collect();
+    let fixed: Vec<&&str> = pinned
+        .iter()
+        .filter(|p| !demoted.iter().any(|d| d == **p))
+        .collect();
+    assert!(
+        new.is_empty() && fixed.is_empty(),
+        "the certifier's demotions changed (regenerate {DEMOTIONS_MANIFEST} with \
+         FORMAT_DEMOTIONS_UPDATE=1 once intended)\nnewly demoted: {new:#?}\nno longer demoted: {fixed:#?}"
+    );
+}

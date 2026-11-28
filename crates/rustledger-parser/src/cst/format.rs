@@ -64,6 +64,7 @@
 //!
 //! No `FormatConfig` parameter. One canonical form, no knobs.
 
+use super::certify;
 use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 
 /// Pre-computed alignment data for a whole source file.
@@ -230,37 +231,253 @@ pub fn format_source(source: &str) -> String {
 /// and every ledger that has not opted in is byte-for-byte unaffected.
 #[must_use]
 pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
-    // The parser strips the one leading BOM itself; stripping it here as
-    // well made a second BOM, which the parser keeps as text,
-    // the file's leading one, so each pass dropped one more.
-    let repaired = RepairedLines::new(source);
-    let normalized = fold_line_endings(source, &|line| repaired.holds(line));
-    // The full parse, not just the tree: its errors locate the directives
-    // that must be copied verbatim (#2794). The spans are in the frame of
-    // `normalized`, BOM included; the tree is not.
-    let parsed = crate::parse_without_occurrences(&normalized);
-    let mut broken = ErrorRanges::new(&parsed);
-    // A `\r` left in `normalized` is one the fold kept on purpose.
-    broken.keep_cr = true;
-    let mut out =
-        keep_bom_before_a_second(&parsed, format_tree(&parsed.syntax_node(), style, &broken));
-    // The newline added after a last line can repair it too. A lone capital
-    // is beancount's `CAPITAL` only before a space, a tab or a `\n`, so
-    // `2024-01-01T` at the end of the file is an invalid token and
-    // `2024-01-01T\n` a transaction flagged `T`, which the next pass rebuilt
-    // as `2024-01-01 T`. Such a line keeps going without a newline.
-    // A kept last line (`+4K\r`) gets no newline either: it would turn the
-    // line's stray `\r` into a CRLF, which the next pass folds.
-    if !source.is_empty()
-        && !source.ends_with('\n')
-        && out.ends_with('\n')
-        && ((repaired.holds_last() && out[..out.len() - 1].ends_with('\r'))
-            || (last_line_has_error(&normalized, &parsed)
-                && !last_line_has_error(&out, &crate::parse_without_occurrences(&out))))
-    {
-        out.pop();
+    format_certified(source, None, style).0
+}
+
+/// How formatting one source went: what the certifier had to keep as
+/// written. **Internal**: observed by the round-trip tests and the fuzz
+/// target, which require zero demotions (so an emitter bug still fails
+/// them, though users never see it).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FormatReport {
+    /// Directives the certifier demoted to a verbatim copy because their
+    /// canonical form did not read back as they did.
+    pub demoted: usize,
+    /// Whether the certifier gave up on the file and returned it unchanged
+    /// (a failure it could not pin on one directive).
+    pub kept_whole_file: bool,
+    /// The first check an output failed, if any did.
+    pub reason: Option<&'static str>,
+}
+
+impl FormatReport {
+    /// Whether the certifier changed anything about the canonical output.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.demoted == 0 && !self.kept_whole_file
     }
-    out
+}
+
+/// [`format_source_grouped`], with the certifier's [`FormatReport`].
+/// **Internal**: for tests and fuzzing.
+#[doc(hidden)]
+#[must_use]
+pub fn __format_source_report(source: &str, style: GroupingStyle<'_>) -> (String, FormatReport) {
+    format_certified(source, None, style)
+}
+
+/// A parse the formatter reads, borrowed from the caller or its own.
+pub(super) enum Parsed<'p> {
+    Borrowed(&'p crate::ParseResult),
+    Owned(Box<crate::ParseResult>),
+}
+
+impl std::ops::Deref for Parsed<'_> {
+    type Target = crate::ParseResult;
+
+    fn deref(&self) -> &crate::ParseResult {
+        match self {
+            Self::Borrowed(p) => p,
+            Self::Owned(p) => p,
+        }
+    }
+}
+
+/// One source, read for formatting: its line endings folded, the folded
+/// text parsed, and the ranges of that parse holding an error.
+pub(super) struct Prepared<'s, 'p> {
+    pub(super) source: &'s str,
+    repaired: RepairedLines,
+    pub(super) normalized: std::borrow::Cow<'s, str>,
+    pub(super) parsed: Parsed<'p>,
+    pub(super) broken: ErrorRanges,
+}
+
+impl<'s, 'p> Prepared<'s, 'p> {
+    /// Read `source`, reusing `cached` (a parse of `source`) when the fold
+    /// leaves the text as it is.
+    pub(super) fn new(source: &'s str, cached: Option<&'p crate::ParseResult>) -> Self {
+        // The parser strips the one leading BOM itself; stripping it here as
+        // well made a second BOM, which the parser keeps as text,
+        // the file's leading one, so each pass dropped one more.
+        let repaired = RepairedLines::new(source);
+        let normalized = fold_line_endings(source, &|line| repaired.holds(line));
+        // The full parse, not just the tree: its errors locate the directives
+        // that must be copied verbatim (#2794). The spans are in the frame of
+        // `normalized`, BOM included; the tree is not.
+        let parsed = match (cached, &normalized) {
+            (Some(p), std::borrow::Cow::Borrowed(_)) => Parsed::Borrowed(p),
+            _ => Parsed::Owned(Box::new(crate::parse_without_occurrences(&normalized))),
+        };
+        let mut broken = ErrorRanges::new(&parsed);
+        // A `\r` left in `normalized` is one the fold kept on purpose.
+        broken.keep_cr = true;
+        Self {
+            source,
+            repaired,
+            normalized,
+            parsed,
+            broken,
+        }
+    }
+
+    /// The byte range of each top-level item (child node of the root), in
+    /// the frame of `normalized` (BOM included), in order.
+    ///
+    /// A top-level WHITESPACE token directly before a node is the indentation
+    /// of its first line, which the walk writes with the node (#2786), so it
+    /// belongs to the item.
+    pub(super) fn item_ranges(&self) -> Vec<(usize, usize)> {
+        let bom = if self.parsed.has_leading_bom { 3 } else { 0 };
+        let mut ranges = Vec::new();
+        let mut indent: Option<rowan::TextSize> = None;
+        for el in self.parsed.syntax_node().children_with_tokens() {
+            match el {
+                rowan::NodeOrToken::Node(n) => {
+                    let r = n.text_range();
+                    let start = indent.take().unwrap_or_else(|| r.start());
+                    ranges.push((usize::from(start) + bom, usize::from(r.end()) + bom));
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    indent =
+                        (t.kind() == crate::SyntaxKind::WHITESPACE).then(|| t.text_range().start());
+                }
+            }
+        }
+        ranges
+    }
+
+    /// Write the canonical form, copying `plan`'s forced items verbatim and
+    /// recording where each item went (in the frame of the returned text).
+    pub(super) fn emit(&self, style: GroupingStyle<'_>, plan: &mut Plan) -> String {
+        let node = self.parsed.syntax_node();
+        let alignment = if style.groups_anything() {
+            SourceFile::cast(node.clone())
+                .map(|sf| compute_alignment(&sf, style))
+                .unwrap_or_default()
+        } else {
+            self.parsed.alignment()
+        };
+        plan.written.clear();
+        let body = format_node_with_style(&node, alignment, style, &self.broken, plan);
+        let mut out = keep_bom_before_a_second(&self.parsed, body);
+        if out.starts_with(crate::bom::BOM) && self.parsed.has_leading_bom {
+            let shift = crate::bom::BOM.len();
+            for (start, end) in plan.written.iter_mut().flatten() {
+                *start += shift;
+                *end += shift;
+            }
+        }
+        // The newline added after a last line can repair it too. A lone capital
+        // is beancount's `CAPITAL` only before a space, a tab or a `\n`, so
+        // `2024-01-01T` at the end of the file is an invalid token and
+        // `2024-01-01T\n` a transaction flagged `T`, which the next pass rebuilt
+        // as `2024-01-01 T`. Such a line keeps going without a newline.
+        // A kept last line (`+4K\r`) gets no newline either: it would turn the
+        // line's stray `\r` into a CRLF, which the next pass folds.
+        let source = self.source;
+        if !source.is_empty()
+            && !source.ends_with('\n')
+            && out.ends_with('\n')
+            && ((self.repaired.holds_last() && out[..out.len() - 1].ends_with('\r'))
+                || (last_line_has_error(&self.normalized, &self.parsed)
+                    && !last_line_has_error(&out, &crate::parse_without_occurrences(&out))))
+        {
+            out.pop();
+            let len = out.len();
+            for (start, end) in plan.written.iter_mut().flatten() {
+                *start = (*start).min(len);
+                *end = (*end).min(len);
+            }
+        }
+        out
+    }
+}
+
+/// Which top-level items the whole-file walk copies verbatim, and where it
+/// wrote each. An item is a child node of the `SOURCE_FILE` root (a
+/// directive or an unparsable region), numbered in order.
+#[derive(Default)]
+pub(super) struct Plan {
+    /// Items the certifier demoted to a verbatim copy.
+    pub(super) forced: Vec<bool>,
+    /// The output byte range each item was written to.
+    pub(super) written: Vec<Option<(usize, usize)>>,
+}
+
+impl Plan {
+    pub(super) fn forced(&self, item: usize) -> bool {
+        self.forced.get(item).copied().unwrap_or(false)
+    }
+
+    pub(super) fn force(&mut self, item: usize) {
+        if self.forced.len() <= item {
+            self.forced.resize(item + 1, false);
+        }
+        self.forced[item] = true;
+    }
+
+    fn record(&mut self, item: usize, written: Option<(usize, usize)>) {
+        if self.written.len() <= item {
+            self.written.resize(item + 1, None);
+        }
+        self.written[item] = written;
+    }
+}
+
+/// Format `source` and certify the result (ADR 0009): emit the canonical
+/// form, reparse it, check item by item that it reads as the source did, and
+/// demote every item that does not to a verbatim copy, until it does.
+///
+/// Demotion only grows the set of verbatim items, so the loop ends; when a
+/// failure cannot be pinned on an item the formatter can demote, the source
+/// is returned unchanged, which keeps every promise trivially.
+fn format_certified(
+    source: &str,
+    cached: Option<&crate::ParseResult>,
+    style: GroupingStyle<'_>,
+) -> (String, FormatReport) {
+    let prep = Prepared::new(source, cached);
+    let mut report = FormatReport::default();
+    let mut plan = Plan::default();
+    let out = prep.emit(style, &mut plan);
+    // Already canonical: the output reads as the input by being it, and
+    // formatting it again gives it again.
+    if out == source {
+        return (out, report);
+    }
+    // The source as beancount reads it, which is not the folded text the
+    // emitter read when the fold changed anything.
+    let raw_owned;
+    let raw: &crate::ParseResult = if matches!(prep.normalized, std::borrow::Cow::Borrowed(_)) {
+        &prep.parsed
+    } else {
+        raw_owned = crate::parse_without_occurrences(source);
+        &raw_owned
+    };
+    let input = certify::Facts::of_input(&prep, raw);
+    let mut out = out;
+    loop {
+        let failure = match certify::check(&input, &plan, &out, style) {
+            Ok(()) => return (out, report),
+            Err(failure) => failure,
+        };
+        report.reason.get_or_insert(failure.why);
+        let mut grew = false;
+        for item in failure.items {
+            if !input.is_opaque(item) && !plan.forced(item) {
+                plan.force(item);
+                report.demoted += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            report.kept_whole_file = true;
+            return (source.to_string(), report);
+        }
+        out = prep.emit(style, &mut plan);
+    }
 }
 
 /// Whether a reported error of `parsed` (the parse of `src`) sits on `src`'s
@@ -447,13 +664,24 @@ fn keep_bom_before_a_second(parsed: &crate::ParseResult, out: String) -> String 
 /// `parse_result` it came from is the caller's responsibility).
 #[must_use]
 pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str) -> String {
-    // Parse-error fallback. See the function rustdoc for the
-    // rationale: `format_source` locates the directives to copy
-    // verbatim from the errors of its own, normalized parse.
-    // Delegating preserves byte-identity unconditionally.
-    if !parse_result.errors.is_empty() {
-        return format_source(source);
-    }
+    format_source_with_parsed_grouped(parse_result, source, GroupingStyle::default())
+}
+
+/// [`format_source_with_parsed`] under a caller-supplied grouping style.
+///
+/// See [`format_source_grouped`]. The cached parse is reused, and the
+/// alignment is measured under `style` unless it is the default (the cached
+/// alignment is measured ungrouped).
+///
+/// # Panics
+///
+/// As [`format_source_with_parsed`].
+#[must_use]
+pub fn format_source_with_parsed_grouped(
+    parse_result: &crate::ParseResult,
+    source: &str,
+    style: GroupingStyle<'_>,
+) -> String {
     let node = parse_result.syntax_node();
     // Defensive length check (debug-only). Catches the most
     // common form of `(parse_result, source)` mismatched pair —
@@ -475,10 +703,9 @@ pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str
          different documents — the cache path will emit text for the wrong \
          buffer.",
     );
-    keep_bom_before_a_second(
-        parse_result,
-        format_node_with_alignment(&node, parse_result.alignment()),
-    )
+    // The parse is reused only where the line-ending fold leaves the text
+    // as it is, so the output is `format_source`'s byte for byte.
+    format_certified(source, Some(parse_result), style).0
 }
 
 /// Like [`format_source`], but returns the parse errors instead
@@ -522,16 +749,8 @@ pub fn try_format_source_grouped(
         return Err(result.errors);
     }
     // Reuse the parse we already produced for the error gate rather than
-    // letting `format_source_grouped` re-parse. The alignment cached on
-    // `ParseResult` is computed WITHOUT grouping, so it can only be reused for
-    // the default style — see `format_node_with_style`'s invariant.
-    if style.groups_anything() {
-        return Ok(keep_bom_before_a_second(
-            &result,
-            format_node_grouped(&result.syntax_node(), style),
-        ));
-    }
-    Ok(format_source_with_parsed(&result, source))
+    // letting `format_source_grouped` re-parse.
+    Ok(format_source_with_parsed_grouped(&result, source, style))
 }
 /// Convert every `\n` line terminator OUTSIDE string literals back
 /// to `\r\n`, leaving `\n` characters inside strings untouched.
@@ -983,6 +1202,15 @@ fn first_line_end_outside_strings(emitted: &str) -> Option<usize> {
 
 #[cfg(test)]
 thread_local! {
+    /// A fault the certifier's tests inject into the emitter, standing in
+    /// for an emitter bug: given the canonical text of a directive, the text
+    /// to write instead (`None` keeps it).
+    pub(super) static EMIT_FAULT: std::cell::Cell<Option<fn(&str) -> Option<String>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
     /// its current output line starts, for the linear-cost test (#2779).
     static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1027,7 +1255,7 @@ fn format_tree(node: &crate::SyntaxNode, style: GroupingStyle<'_>, broken: &Erro
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node_grouped called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file, style);
-    format_node_with_style(node, alignment, style, broken)
+    format_node_with_style(node, alignment, style, broken, &mut Plan::default())
 }
 
 /// How one top-level node is written, shared by the whole-file walk
@@ -1043,20 +1271,37 @@ struct NodeEmitter<'a, 'g> {
 impl NodeEmitter<'_, '_> {
     /// Write the top-level node `n`. `line_indent` is a top-level
     /// WHITESPACE token directly before it (see the whole-file walk).
+    /// `forced` copies a directive verbatim although it holds no error (the
+    /// certifier demoted it; see [`Plan`]).
+    ///
+    /// Returns the byte range of `out` the node was written to (the blank
+    /// lines before it, which are the gap it follows, left out), or `None`
+    /// when it writes nothing.
     fn emit(
         &self,
         n: &crate::SyntaxNode,
         line_indent: Option<&crate::SyntaxToken>,
+        forced: bool,
         spacing: &mut TopLevelSpacing,
         out: &mut String,
-    ) {
+    ) -> Option<(usize, usize)> {
         if let Some(directive) = ast::Directive::cast(n.clone())
+            && !forced
             && !self.broken.overlaps(n.text_range())
         {
             spacing.blank_lines(leading_blank_lines(directive.syntax()));
             spacing.flush(out);
+            let start = out.len();
             emit_directive(&directive, self.alignment, self.group, out);
+            #[cfg(test)]
+            if let Some(fault) = EMIT_FAULT.with(std::cell::Cell::get)
+                && let Some(bad) = fault(&out[start..])
+            {
+                out.truncate(start);
+                out.push_str(&bad);
+            }
             spacing.after_node();
+            Some((start, out.len()))
         } else if n.kind() == crate::SyntaxKind::ERROR_NODE || ast::Directive::can_cast(n.kind()) {
             // A directive lands here only when a parse error falls inside it
             // (#2794): rebuilt from its typed values it would lose the text
@@ -1073,6 +1318,7 @@ impl NodeEmitter<'_, '_> {
             // before the next directive) are preserved, not flushed.
             spacing.blank_lines(leading_blank_lines(n));
             spacing.flush(out);
+            let start = out.len();
             if let Some(ws) = line_indent {
                 out.push_str(ws.text());
             }
@@ -1081,8 +1327,11 @@ impl NodeEmitter<'_, '_> {
             // The node's own trailing blank lines were trimmed off its text;
             // they still separate it from what follows.
             spacing.blank_lines(trailing);
+            Some((start, out.len()))
+        } else {
+            // Any other non-directive node: nothing to emit.
+            None
         }
-        // Any other non-directive node: nothing to emit.
     }
 }
 
@@ -1100,7 +1349,7 @@ impl NodeEmitter<'_, '_> {
 /// tokens, header defects, catch-all body lines, shape checks), and a second
 /// classifier here would drift from them (Canonical-Function Discipline).
 #[derive(Default)]
-struct ErrorRanges {
+pub(super) struct ErrorRanges {
     ranges: Vec<(usize, usize)>,
     /// Whether a verbatim copy keeps a `\r` before a line ending. Set by
     /// `format_source_grouped`, whose line-ending fold leaves a `\r` only
@@ -1142,7 +1391,7 @@ impl ErrorRanges {
     }
 
     /// Whether `range` shares a byte with any error range.
-    fn overlaps(&self, range: rowan::TextRange) -> bool {
+    pub(super) fn overlaps(&self, range: rowan::TextRange) -> bool {
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         // The merged ranges are disjoint and sorted, so their ends ascend:
         // the first one ending after `start` is the only candidate.
@@ -1177,6 +1426,7 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
         alignment,
         GroupingStyle::default(),
         &ErrorRanges::default(),
+        &mut Plan::default(),
     )
 }
 
@@ -1202,6 +1452,7 @@ fn format_node_with_style(
     alignment: PostingAlignment,
     group: GroupingStyle<'_>,
     broken: &ErrorRanges,
+    plan: &mut Plan,
 ) -> String {
     // Precondition check (debug-only). The bare `format_node`
     // delegate already validated the kind via the
@@ -1255,6 +1506,9 @@ fn format_node_with_style(
     // to column 0, where it is a silenced org-mode heading instead of a
     // reported error (#2786).
     let mut indent: Option<crate::SyntaxToken> = None;
+    // The position of the next top-level node among the root's child nodes:
+    // the item index of `plan`.
+    let mut item = 0usize;
     for el in node.children_with_tokens() {
         let line_indent = indent.take();
         match el {
@@ -1264,7 +1518,15 @@ fn format_node_with_style(
                     group,
                     broken,
                 };
-                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
+                let written = emitter.emit(
+                    &n,
+                    line_indent.as_ref(),
+                    plan.forced(item),
+                    &mut spacing,
+                    &mut out,
+                );
+                plan.record(item, written);
+                item += 1;
             }
             rowan::NodeOrToken::Token(t) => {
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
@@ -1704,7 +1966,7 @@ fn format_node_range_with_style(
                     group: style,
                     broken,
                 };
-                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
+                let _ = emitter.emit(&n, line_indent.as_ref(), false, &mut spacing, &mut out);
             }
             rowan::NodeOrToken::Token(t) => {
                 if t.kind() == crate::SyntaxKind::WHITESPACE {

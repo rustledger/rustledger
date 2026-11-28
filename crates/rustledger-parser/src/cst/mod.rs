@@ -51,6 +51,7 @@
 pub mod ast;
 #[cfg(test)]
 mod bc_lexer_drift;
+pub(crate) mod certify;
 mod convert;
 mod cost_spec_shape;
 mod directive_header;

@@ -67,7 +67,7 @@
 //!
 //! No `FormatConfig` parameter. One canonical form, no knobs.
 
-use super::certify;
+use super::certify::{self, FormatReport, Item, Plan};
 use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 
 /// Pre-computed alignment data for a whole source file.
@@ -283,31 +283,6 @@ pub fn format_source_with_options(source: &str, options: FormatOptions<'_>) -> S
     format_certified(source, None, options).0
 }
 
-/// How formatting one source went: what the certifier had to keep as
-/// written. **Internal**: observed by the round-trip tests and the fuzz
-/// target, which require zero demotions (so an emitter bug still fails
-/// them, though users never see it).
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FormatReport {
-    /// Directives the certifier demoted to a verbatim copy because their
-    /// canonical form did not read back as they did.
-    pub demoted: usize,
-    /// Whether the certifier gave up on the file and returned it unchanged
-    /// (a failure it could not pin on one directive).
-    pub kept_whole_file: bool,
-    /// The first check an output failed, if any did.
-    pub reason: Option<&'static str>,
-}
-
-impl FormatReport {
-    /// Whether the certifier changed anything about the canonical output.
-    #[must_use]
-    pub const fn is_clean(&self) -> bool {
-        self.demoted == 0 && !self.kept_whole_file
-    }
-}
-
 /// [`format_source_grouped`], with the certifier's [`FormatReport`].
 /// **Internal**: for tests and fuzzing.
 #[doc(hidden)]
@@ -321,6 +296,33 @@ pub fn __format_source_report(source: &str, style: GroupingStyle<'_>) -> (String
             ..FormatOptions::default()
         },
     )
+}
+
+/// Format `source` (parsed as `cached`, if given) through the certified
+/// driver (ADR 0009, `certify.rs`) with the beancount frontend.
+fn format_certified(
+    source: &str,
+    cached: Option<&crate::ParseResult>,
+    options: FormatOptions<'_>,
+) -> (String, FormatReport) {
+    let frontend = Beancount {
+        options,
+        keep: None,
+    };
+    let input = Reading::new(source, cached, None);
+    certify::format_certified(&frontend, &input)
+}
+
+/// The beancount frontend of the certified formatter: how a beancount text
+/// is segmented into items, emitted, and read for meaning (see
+/// [`certify::Frontend`]).
+pub(super) struct Beancount<'o> {
+    options: FormatOptions<'o>,
+    /// Range formatting: how many bytes at the start and at the end of every
+    /// text read are outside the range, copied as written (their items
+    /// forced opaque). The same counts hold for the input and its output,
+    /// since the text outside the range is the same.
+    keep: Option<(usize, usize)>,
 }
 
 /// A parse the formatter reads, borrowed from the caller or its own.
@@ -340,18 +342,26 @@ impl std::ops::Deref for Parsed<'_> {
     }
 }
 
-/// One source, read for formatting: its parse (of the bytes as written, the
-/// one frame every decision is made in) and the ranges of it holding an
-/// error.
-pub(super) struct Prepared<'s, 'p> {
-    pub(super) source: &'s str,
-    pub(super) parsed: Parsed<'p>,
-    pub(super) broken: ErrorRanges,
+/// One beancount text, read for formatting: its parse (of the bytes as
+/// written, the one frame every decision is made in), the ranges of it
+/// holding an error, and the range being formatted.
+pub(super) struct Reading<'s> {
+    source: &'s str,
+    parsed: Parsed<'s>,
+    broken: ErrorRanges,
+    /// Range formatting: the part of the tree formatted, in the CST frame;
+    /// everything outside it is copied as written.
+    range: Option<(usize, usize)>,
 }
 
-impl<'s, 'p> Prepared<'s, 'p> {
-    /// Read `source`, reusing `cached` (a parse of `source`) if given.
-    pub(super) fn new(source: &'s str, cached: Option<&'p crate::ParseResult>) -> Self {
+impl<'s> Reading<'s> {
+    /// Read `source`, reusing `cached` (a parse of `source`) if given. `keep`
+    /// is the range formatting's byte counts kept at either end.
+    fn new(
+        source: &'s str,
+        cached: Option<&'s crate::ParseResult>,
+        keep: Option<(usize, usize)>,
+    ) -> Self {
         // The full parse, not just the tree: its errors locate the directives
         // that must be copied verbatim (#2794).
         let parsed = cached.map_or_else(
@@ -359,29 +369,64 @@ impl<'s, 'p> Prepared<'s, 'p> {
             Parsed::Borrowed,
         );
         let broken = ErrorRanges::new(&parsed);
+        let bom = if parsed.has_leading_bom { 3 } else { 0 };
+        let range = keep.map(|(prefix, suffix)| {
+            (
+                prefix.saturating_sub(bom),
+                source.len().saturating_sub(suffix).saturating_sub(bom),
+            )
+        });
         Self {
             source,
             parsed,
             broken,
+            range,
         }
     }
 
-    /// The byte range of each top-level item (child node of the root), in
-    /// the frame of `source` (BOM included), in order.
-    ///
-    /// A top-level WHITESPACE token directly before a node is the indentation
-    /// of its first line, which the walk writes with the node (#2786), so it
-    /// belongs to the item.
-    pub(super) fn item_ranges(&self) -> Vec<(usize, usize)> {
-        let bom = if self.parsed.has_leading_bom { 3 } else { 0 };
-        let mut ranges = Vec::new();
+    /// The bytes of the leading BOM the parser stripped, if any.
+    fn bom(&self) -> usize {
+        if self.parsed.has_leading_bom { 3 } else { 0 }
+    }
+}
+
+impl certify::Frontend for Beancount<'_> {
+    type Reading<'s>
+        = Reading<'s>
+    where
+        Self: 's;
+    type Meaning<'r> = super::meaning::Meaning<'r>;
+
+    fn read<'s>(&'s self, text: &'s str) -> Reading<'s> {
+        Reading::new(text, None, self.keep)
+    }
+
+    fn text<'r>(&self, reading: &'r Reading<'_>) -> &'r str {
+        reading.source
+    }
+
+    /// Each top-level node is an item; a top-level WHITESPACE token directly
+    /// before a node is the indentation of its first line, which the walk
+    /// writes with the node (#2786), so it belongs to the item. An item is
+    /// opaque if it is not a directive, holds an error, or lies outside the
+    /// range being formatted.
+    fn items(&self, reading: &Reading<'_>) -> Vec<Item> {
+        let bom = reading.bom();
+        let mut items = Vec::new();
         let mut indent: Option<rowan::TextSize> = None;
-        for el in self.parsed.syntax_node().children_with_tokens() {
+        for el in reading.parsed.syntax_node().children_with_tokens() {
             match el {
                 rowan::NodeOrToken::Node(n) => {
                     let r = n.text_range();
                     let start = indent.take().unwrap_or_else(|| r.start());
-                    ranges.push((usize::from(start) + bom, usize::from(r.end()) + bom));
+                    let outside = reading.range.is_some_and(|range| !inside_range(r, range));
+                    items.push(Item {
+                        range: (usize::from(start) + bom, usize::from(r.end()) + bom),
+                        opaque: outside
+                            || !super::meaning::is_directive_kind(n.kind())
+                            || reading.broken.overlaps(r),
+                        content: super::meaning::content_span(&n).is_some(),
+                    });
                 }
                 rowan::NodeOrToken::Token(t) => {
                     indent =
@@ -389,181 +434,93 @@ impl<'s, 'p> Prepared<'s, 'p> {
                 }
             }
         }
-        ranges
+        items
     }
 
-    /// Write the canonical form, copying `plan`'s forced items verbatim and
-    /// recording where each item went (in the frame of the returned text).
-    pub(super) fn emit(&self, options: FormatOptions<'_>, plan: &mut Plan) -> String {
-        let node = self.parsed.syntax_node();
-        let style = options.grouping;
+    fn emit(&self, reading: &Reading<'_>, plan: &mut Plan) -> String {
+        let node = reading.parsed.syntax_node();
+        let style = self.options.grouping;
         let alignment = if style.groups_anything() {
             SourceFile::cast(node.clone())
                 .map(|sf| compute_alignment(&sf, style))
                 .unwrap_or_default()
         } else {
-            self.parsed.alignment()
+            reading.parsed.alignment()
         };
         plan.written.clear();
-        let mut out = Out::new(options.line_ending);
-        // The leading BOM is dropped, unless another BOM follows it: the
-        // parser reads that one as text, and with the first gone it would be
-        // the leading BOM the next pass drops.
-        if self.parsed.has_leading_bom
-            && node
-                .first_token()
-                .is_some_and(|t| t.kind() == crate::SyntaxKind::BOM)
+        let mut out = Out::new(self.options.line_ending);
+        if reading.parsed.has_leading_bom
+            && (reading.range.is_some()
+                || node
+                    .first_token()
+                    .is_some_and(|t| t.kind() == crate::SyntaxKind::BOM))
         {
+            // The leading BOM is dropped, unless another BOM follows it (the
+            // parser reads that one as text, and with the first gone it would
+            // be the leading BOM the next pass drops), or it is outside the
+            // range being formatted.
             out.push_str(crate::bom::BOM);
         }
-        walk_source_file(&node, alignment, style, &self.broken, plan, &mut out);
+        walk_source_file(
+            &node,
+            alignment,
+            style,
+            &reading.broken,
+            plan,
+            reading.range,
+            &mut out,
+        );
         out.into_string()
     }
-}
 
-/// Which top-level items the whole-file walk copies verbatim, and where it
-/// wrote each. An item is a child node of the `SOURCE_FILE` root (a
-/// directive or an unparsable region), numbered in order.
-#[derive(Default)]
-pub(super) struct Plan {
-    /// Items the certifier demoted to a verbatim copy.
-    pub(super) forced: Vec<bool>,
-    /// The output byte range each item was written to.
-    pub(super) written: Vec<Option<(usize, usize)>>,
-}
-
-impl Plan {
-    pub(super) fn forced(&self, item: usize) -> bool {
-        self.forced.get(item).copied().unwrap_or(false)
+    fn node_contents(&self, reading: &Reading<'_>) -> Vec<(usize, usize)> {
+        let bom = reading.bom();
+        reading
+            .parsed
+            .syntax_node()
+            .children()
+            .filter_map(|n| super::meaning::content_span(&n))
+            .map(|(first, last)| {
+                (
+                    usize::from(first.text_range().start()) + bom,
+                    usize::from(last.text_range().end()) + bom,
+                )
+            })
+            .collect()
     }
 
-    pub(super) fn force(&mut self, item: usize) {
-        if self.forced.len() <= item {
-            self.forced.resize(item + 1, false);
-        }
-        self.forced[item] = true;
+    fn meanings<'r>(
+        &self,
+        reading: &'r Reading<'_>,
+    ) -> Vec<(std::ops::Range<usize>, super::meaning::Meaning<'r>)> {
+        super::meaning::meanings(&reading.parsed)
     }
 
-    fn record(&mut self, item: usize, written: Option<(usize, usize)>) {
-        if self.written.len() <= item {
-            self.written.resize(item + 1, None);
-        }
-        self.written[item] = written;
+    fn same(a: &super::meaning::Meaning<'_>, b: &super::meaning::Meaning<'_>) -> bool {
+        a.same(b)
     }
-}
 
-/// Format `source` and certify the result (ADR 0009).
-///
-/// `certify_items` emits the canonical form and checks it item by item,
-/// demoting what fails. Its result `y` is then returned only if it is a fixed
-/// point: `certify_items(y) == y`. That makes idempotence a property of the
-/// product, not of the emitter: formatting `y` again runs `certify_items(y)`
-/// first, gets `y`, which is its input, and returns it unchanged. When `y`
-/// is not a fixed point, the item at the first difference is demoted and the
-/// input certified again; when no demotable item is left, the source is
-/// returned unchanged, which keeps every promise trivially.
-fn format_certified(
-    source: &str,
-    cached: Option<&crate::ParseResult>,
-    options: FormatOptions<'_>,
-) -> (String, FormatReport) {
-    let prep = Prepared::new(source, cached);
-    let mut report = FormatReport::default();
-    let mut plan = Plan::default();
-    let mut input = None;
-    loop {
-        let Some((out, parsed)) = certify_items(&prep, &mut input, &mut plan, options, &mut report)
-        else {
-            report.kept_whole_file = true;
-            return (source.to_string(), report);
-        };
-        // Already canonical: formatting it again certifies it again to itself
-        // (this very computation, on the same input).
-        let Some(parsed) = parsed else {
-            return (out, report);
-        };
-        let again = Prepared::new(&out, Some(&parsed));
-        let twice = certify_items(
-            &again,
-            &mut None,
-            &mut Plan::default(),
-            options,
-            &mut FormatReport::default(),
-        )
-        .map_or_else(|| out.clone(), |(t, _)| t);
-        if twice == out {
-            return (out, report);
-        }
-        report
-            .reason
-            .get_or_insert("formatting the output again changed it");
-        // Blame the item written over the first difference, or the one after
-        // it (a gap is written ahead of the item after it).
-        let diff = out
-            .bytes()
-            .zip(twice.bytes())
-            .position(|(a, b)| a != b)
-            .unwrap_or(out.len().min(twice.len()));
-        let opaque = |item: usize| {
-            input
-                .as_ref()
-                .is_none_or(|f: &certify::Facts<'_>| f.is_opaque(item))
-        };
-        // An item already kept as written that its own output rebuilds
-        // differently cannot be demoted further: keep the file.
-        let blamed = plan
-            .written
+    fn comments(&self, reading: &Reading<'_>) -> Vec<(usize, certify::CommentEvent)> {
+        super::meaning::comment_events(reading.source, &reading.parsed)
+    }
+
+    fn errors(&self, reading: &Reading<'_>) -> Vec<usize> {
+        reading.parsed.errors.iter().map(|e| e.span.start).collect()
+    }
+
+    fn defects(&self, reading: &Reading<'_>) -> Vec<usize> {
+        reading
+            .parsed
+            .defect_spans
             .iter()
-            .enumerate()
-            .filter_map(|(i, w)| w.map(|(_, end)| (i, end)))
-            .find(|&(_, end)| end >= diff)
-            .map(|(i, _)| i)
-            .filter(|&i| !plan.forced(i) && !opaque(i));
-        let Some(item) = blamed else {
-            report.kept_whole_file = true;
-            return (source.to_string(), report);
-        };
-        plan.force(item);
-        report.demoted += 1;
+            .map(|s| s.start)
+            .collect()
     }
 }
 
-/// Emit `prep` under `plan` and certify the output item by item, demoting
-/// what fails, until an output passes. Returns it with its parse (`None`
-/// when it is the source itself, which reads as itself), or `None` when a
-/// failure cannot be pinned on an item that can still be demoted.
-///
-/// `input` caches the facts of the source across calls.
-fn certify_items<'s>(
-    prep: &'s Prepared<'s, '_>,
-    input: &mut Option<certify::Facts<'s>>,
-    plan: &mut Plan,
-    options: FormatOptions<'_>,
-    report: &mut FormatReport,
-) -> Option<(String, Option<crate::ParseResult>)> {
-    loop {
-        let out = prep.emit(options, plan);
-        if out == prep.source {
-            return Some((out, None));
-        }
-        let facts = input.get_or_insert_with(|| certify::Facts::of_input(prep));
-        let failure = match certify::check(facts, plan, &out) {
-            Ok(parsed) => return Some((out, Some(parsed))),
-            Err(failure) => failure,
-        };
-        report.reason.get_or_insert(failure.why);
-        let mut grew = false;
-        for item in failure.items {
-            if !facts.is_opaque(item) && !plan.forced(item) {
-                plan.force(item);
-                report.demoted += 1;
-                grew = true;
-            }
-        }
-        if !grew {
-            return None;
-        }
-    }
+/// Whether `child` (a CST range) lies inside the formatted `range`.
+fn inside_range(child: rowan::TextRange, (start, end): (usize, usize)) -> bool {
+    usize::from(child.start()) >= start && usize::from(child.end()) <= end
 }
 
 /// Like [`format_source`] but reuses the caller's
@@ -929,10 +886,9 @@ fn format_tree(node: &crate::SyntaxNode, style: GroupingStyle<'_>, broken: &Erro
     format_node_with_style(node, alignment, style, broken, &mut Plan::default())
 }
 
-/// How one top-level node is written, shared by the whole-file walk
-/// (`format_node_with_style`) and the range walk
-/// (`format_node_range_with_style`), so the two cannot disagree on which
-/// directives are rebuilt and which are copied verbatim (#2803).
+/// How one top-level node is written by the whole-file walk, which range
+/// formatting runs too (ADR 0009 phase C), so the two cannot disagree on
+/// which directives are rebuilt and which are copied verbatim (#2803).
 struct NodeEmitter<'a, 'g> {
     alignment: PostingAlignment,
     group: GroupingStyle<'g>,
@@ -1265,7 +1221,7 @@ fn format_node_with_style(
     plan: &mut Plan,
 ) -> String {
     let mut out = Out::new(LineEnding::Lf);
-    walk_source_file(node, alignment, group, broken, plan, &mut out);
+    walk_source_file(node, alignment, group, broken, plan, None, &mut out);
     out.into_string()
 }
 
@@ -1277,6 +1233,7 @@ fn walk_source_file(
     group: GroupingStyle<'_>,
     broken: &ErrorRanges,
     plan: &mut Plan,
+    range: Option<(usize, usize)>,
     out: &mut Out,
 ) {
     // Precondition check (debug-only). The bare `format_node`
@@ -1333,7 +1290,27 @@ fn walk_source_file(
     // The position of the next top-level node among the root's child nodes:
     // the item index of `plan`.
     let mut item = 0usize;
+    // Range formatting (`range`, in the tree's frame): what lies outside the
+    // range is copied as written, spacing included, and the walk inside
+    // starts and ends as the whole-file walk does at the file's edges.
+    let mut outside_last = false;
     for el in node.children_with_tokens() {
+        if let Some(range) = range
+            && !inside_range(el.text_range(), range)
+        {
+            spacing.flush(out);
+            spacing = TopLevelSpacing::default();
+            indent = None;
+            let start = out.len();
+            out.push_str(&el.to_string());
+            if el.as_node().is_some() {
+                plan.record(item, Some((start, out.len())));
+                item += 1;
+            }
+            outside_last = true;
+            continue;
+        }
+        outside_last = false;
         let line_indent = indent.take();
         match el {
             rowan::NodeOrToken::Node(n) => {
@@ -1381,7 +1358,7 @@ fn walk_source_file(
     // written keeps going without one: the newline would be a change to text
     // the formatter does not own, and can change how it reads (`A; ` gains a
     // comment, a lone capital at the end of the file becomes a flag).
-    if !out.is_empty() && !out.ends_with('\n') && !spacing.open_line {
+    if !out.is_empty() && !out.ends_with('\n') && !spacing.open_line && !outside_last {
         out.push('\n');
     }
 }
@@ -1488,6 +1465,11 @@ impl TopLevelSpacing {
 /// structural boundary. Snapping up to top-level boundaries is the
 /// only choice that lets the same canonical-form rules apply.
 ///
+/// **Same driver as the whole file (ADR 0009).** The whole file goes
+/// through the certified driver, every item outside the snap copied as
+/// written: the replacement is whole-file formatting restricted to the
+/// snap, certified the same way (pinned by `range_format_equals_whole`).
+///
 /// **Frame.** `range` is in the *CST* byte frame — the same frame
 /// the syntax node's `TextRange`s use. The LSP handler is
 /// responsible for shifting `bom_offset` at the input/output
@@ -1509,8 +1491,9 @@ impl TopLevelSpacing {
 ///   "Format Selection" expects either a clean reformat or a
 ///   no-op. A *directive* that holds a parse error is different:
 ///   [`format_parsed_range`] copies it verbatim, as the whole-file
-///   path does (#2803). The other range entry points have no error
-///   list and treat every directive as well formed.
+///   path does (#2803). A bare tree carries no error list, so this
+///   entry reads the tree's text again to find them, with the same
+///   result.
 /// - Otherwise returns `Some((snap, text))` where `snap` is the
 ///   union of the included children's text ranges (so it begins at
 ///   the first included child's start and ends at the last
@@ -1546,78 +1529,48 @@ pub fn format_node_range(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
 ) -> Option<(rowan::TextRange, String)> {
-    // This returns `Option`, so a non-SOURCE_FILE node is a clean `None` rather
-    // than a panic (the precondition is still that callers pass the parse root).
-    let source_file = SourceFile::cast(node.clone())?;
-    // File-wide alignment pre-pass: see rustdoc above for the
-    // rationale. The selected subset always uses the full file's
-    // alignment columns. Hot paths with a precomputed `PostingAlignment`
-    // should call `format_node_range_with_alignment` instead.
-    let alignment = compute_alignment(&source_file, GroupingStyle::default());
-    format_node_range_with_alignment(node, range, alignment)
+    format_node_range_grouped(node, range, GroupingStyle::default())
 }
 
-/// Like [`format_node_range`] but skips the per-call
-/// [`compute_alignment`] walk by accepting a precomputed
-/// `PostingAlignment`.
+/// [`format_node_range`], kept for callers holding a precomputed alignment.
 ///
-/// The cache pattern is identical to
-/// [`format_node_with_alignment`]: parse → take
-/// `ParseResult::alignment` → call this function. The hot path the
-/// cache addresses is the LSP `textDocument/rangeFormatting`
-/// fallback (CST-snap path that fires on parse-error files), which
-/// can be invoked per-keystroke through format-on-type clients.
-/// Without the cache the per-call cost is
-/// `O(N_postings_in_file)`; with the cache it's
-/// `O(N_cst_nodes covered by range)`.
-///
-/// `alignment` MUST match what `compute_alignment(&SourceFile::cast(node).unwrap())` would
-/// return for the given `node`; pinned by
-/// `format_node_range_matches_format_node_range_with_alignment`. Same
-/// `range` semantics, `ERROR_NODE` policy, snap rules, and
-/// `# Panics` precondition as [`format_node_range`].
+/// Range formatting now runs the whole-file driver,
+/// which measures the file's alignment itself, so `alignment` is not
+/// used (it had to equal that measurement anyway). Prefer
+/// [`format_parsed_range`], which reuses the caller's parse.
 #[must_use]
 pub fn format_node_range_with_alignment(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
-    alignment: PostingAlignment,
+    _alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    let mut out = Out::new(LineEnding::Lf);
-    let snap = format_node_range_with_style(
-        node,
-        range,
-        alignment,
-        GroupingStyle::default(),
-        &ErrorRanges::default(),
-        &mut out,
-    )?;
-    Some((snap, out.into_string()))
+    // The range is formatted by the whole-file driver, which measures the
+    // file's alignment itself; a caller's alignment must equal it anyway.
+    format_node_range_grouped(node, range, GroupingStyle::default())
 }
 
 /// [`format_node_range`] under an explicit grouping style, measuring the
 /// alignment itself.
 ///
-/// Prefer this over pairing a caller-supplied alignment with a
-/// alignment: the alignment MUST have been measured under the same style, and
-/// doing both here makes that unfalsifiable. Costs one `compute_alignment`
-/// walk, which is why the ungrouped hot path still uses the cached alignment.
+/// Reads the tree's text again (a tree carries no parse errors); prefer
+/// [`format_parsed_range_with_options`], which reuses the caller's parse.
 pub fn format_node_range_grouped(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
     style: GroupingStyle<'_>,
 ) -> Option<(rowan::TextRange, String)> {
-    let source_file = SourceFile::cast(node.clone())?;
-    let alignment = compute_alignment(&source_file, style);
-    let mut out = Out::new(LineEnding::Lf);
-    let snap = format_node_range_with_style(
-        node,
+    // A tree carries no parse errors; reading its text again finds them, so
+    // a directive holding one is copied as written here too.
+    SourceFile::cast(node.clone())?;
+    let parsed = crate::parse_without_occurrences(&node.to_string());
+    format_parsed_range_with_options(
+        &parsed,
         range,
-        alignment,
-        style,
-        &ErrorRanges::default(),
-        &mut out,
-    )?;
-    Some((snap, out.into_string()))
+        FormatOptions {
+            grouping: style,
+            ..FormatOptions::default()
+        },
+    )
 }
 
 /// [`format_node_range`] for a tree that may hold parse errors.
@@ -1633,8 +1586,6 @@ pub fn format_node_range_grouped(
 /// default `style` the alignment cached on `parse_result` is reused;
 /// otherwise it is measured under `style` (the cache is measured ungrouped).
 ///
-/// The other range entry points know nothing of parse errors and are for
-/// trees without them.
 #[must_use]
 pub fn format_parsed_range(
     parse_result: &crate::ParseResult,
@@ -1659,34 +1610,40 @@ pub fn format_parsed_range_with_options(
     range: rowan::TextRange,
     options: FormatOptions<'_>,
 ) -> Option<(rowan::TextRange, String)> {
-    let style = options.grouping;
     let node = parse_result.syntax_node();
-    let alignment = if style.groups_anything() {
-        compute_alignment(&SourceFile::cast(node.clone())?, style)
-    } else {
-        parse_result.alignment()
+    SourceFile::cast(node.clone())?;
+    let snap = range_snap(&node, range)?;
+    // The whole file through the certified driver (ADR 0009), with every
+    // item outside the snap copied as written: range formatting is
+    // whole-file formatting restricted to the range, certified the same way.
+    let bom = if parse_result.has_leading_bom { 3 } else { 0 };
+    let mut source = String::with_capacity(usize::from(node.text_range().len()) + bom);
+    if parse_result.has_leading_bom {
+        source.push_str(crate::bom::BOM);
+    }
+    source.push_str(&node.to_string());
+    let prefix = usize::from(snap.start()) + bom;
+    let suffix = source.len() - (usize::from(snap.end()) + bom);
+    let frontend = Beancount {
+        options,
+        keep: Some((prefix, suffix)),
     };
-    let broken = ErrorRanges::new(parse_result);
-    let mut out = Out::new(options.line_ending);
-    let snap = format_node_range_with_style(&node, range, alignment, style, &broken, &mut out)?;
-    Some((snap, out.into_string()))
+    let input = Reading::new(&source, Some(parse_result), Some((prefix, suffix)));
+    let (out, _) = certify::format_certified(&frontend, &input);
+    // The text outside the snap is copied as written, so the output differs
+    // from the source only between the same prefix and suffix.
+    let replacement = out
+        .get(prefix..out.len().saturating_sub(suffix))
+        .filter(|_| out.len() >= prefix + suffix)
+        .unwrap_or(&source[prefix..source.len() - suffix]);
+    Some((snap, replacement.to_string()))
 }
 
-/// [`format_node_range_with_alignment`] with an explicit grouping style.
-///
-/// Same `alignment`/`style` agreement invariant as
-/// `format_node_with_style`: `alignment` must have been measured by
-/// `compute_alignment` under this same `style`, or the currency column will be
-/// off by the separators' width. The cached `ParseResult::alignment` is
-/// measured UNGROUPED, so it may only be paired with the default style.
-fn format_node_range_with_style(
-    node: &crate::SyntaxNode,
-    range: rowan::TextRange,
-    alignment: PostingAlignment,
-    style: GroupingStyle<'_>,
-    broken: &ErrorRanges,
-    out: &mut Out,
-) -> Option<rowan::TextRange> {
+/// The snapped range a range formatting of `range` replaces: the smallest set
+/// of top-level directives and comments the selection touches (see
+/// [`format_node_range`]), or `None` when it touches none, or covers a region
+/// the parser could not read.
+fn range_snap(node: &crate::SyntaxNode, range: rowan::TextRange) -> Option<rowan::TextRange> {
     // Precondition check (debug-only). Same rationale as
     // `format_node_with_alignment`: the bare delegate already
     // validated the kind, so the most common call path (bare →
@@ -1780,68 +1737,6 @@ fn format_node_range_with_style(
         }
     }
 
-    // Second pass: emit only the children whose range falls
-    // inside `snap`. We re-walk rather than caching the first
-    // pass because the second pass needs to maintain the
-    // `prev_was_directive` blank-line state in source order, and
-    // the child set is small enough that the second walk is
-    // cheap. (Re-walking also keeps the data-flow obvious: snap
-    // computation and emission are two distinct concerns.)
-    // `out` is the caller's, empty.
-    let mut spacing = TopLevelSpacing::default();
-    // A top-level WHITESPACE token directly before a node, tracked as the
-    // whole-file walk tracks it, so a verbatim copy keeps its first line's
-    // indentation (#2786) here too.
-    let mut indent: Option<crate::SyntaxToken> = None;
-    for el in node.children_with_tokens() {
-        let line_indent = indent.take();
-        let child_range = el.text_range();
-        // Use the snap range (not the input `range`) so we emit
-        // every child WITHIN the snap, even those that the
-        // original selection didn't directly intersect but that
-        // sit between two intersecting children. Without this,
-        // ERROR_NODE-free trivia between two selected directives
-        // would be re-formatted into our output (the comment
-        // pass picks them up), which matches `format_node`.
-        if child_range.end() <= snap.start() || child_range.start() >= snap.end() {
-            continue;
-        }
-        // A directive's leading blank lines are part of its node, so the
-        // first directive in the snap carries the blank lines above it
-        // INSIDE the snapped range, and dropping them would delete them
-        // from the file. They are always re-emitted, as the whole-file walk
-        // does.
-        match el {
-            rowan::NodeOrToken::Node(n) => {
-                // ERROR_NODEs never reach here: the range path bails out
-                // above (returns None) when the snap covers one. A directive
-                // holding a parse error is copied verbatim by the same
-                // emitter the whole-file walk uses (#2803), so its unparsable
-                // text is kept; the author's blank lines are preserved
-                // identically too (#1325, #2506).
-                if !ast::Directive::can_cast(n.kind()) {
-                    continue;
-                }
-                let emitter = NodeEmitter {
-                    alignment,
-                    group: style,
-                    broken,
-                };
-                let _ = emitter.emit(&n, line_indent.as_ref(), false, &mut spacing, out);
-            }
-            rowan::NodeOrToken::Token(t) => {
-                if t.kind() == crate::SyntaxKind::WHITESPACE {
-                    indent = Some(t);
-                } else {
-                    spacing.top_level_token(&t, None, out);
-                }
-            }
-        }
-    }
-    spacing.flush(out);
-    if !out.ends_with('\n') && !spacing.open_line {
-        out.push('\n');
-    }
     Some(snap)
 }
 

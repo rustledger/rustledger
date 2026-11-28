@@ -59,11 +59,9 @@ pub mod logos_lexer;
 /// exactly one site.
 pub mod format {
     #[doc(hidden)]
-    pub use crate::cst::certify::{
-        __comment_stream, __defect_lines, __error_lines, __same_meaning, same_directive,
-    };
+    pub use crate::cst::certify::FormatReport;
     #[doc(hidden)]
-    pub use crate::cst::format::{__format_source_report, FormatReport};
+    pub use crate::cst::format::__format_source_report;
     pub use crate::cst::format::{
         CanonicalizeError, FormatOptions, GroupingStyle, LineEnding, PostingAlignment,
         canonicalize_directives, compute_alignment, display_width, format_node,
@@ -72,6 +70,10 @@ pub mod format {
         format_parsed_range_with_options, format_parsed_with_options, format_source,
         format_source_grouped, format_source_with_options, format_source_with_parsed,
         format_source_with_parsed_grouped, try_format_source, try_format_source_grouped,
+    };
+    #[doc(hidden)]
+    pub use crate::cst::meaning::{
+        __comment_stream, __defect_lines, __error_lines, __same_meaning, same_directive,
     };
 }
 

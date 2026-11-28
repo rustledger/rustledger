@@ -816,7 +816,10 @@ use crate::types::{Error, LedgerOptions};
 /// v155: loader v82, unchanged; the hand-modeled pass that quieted a line
 /// after its first invalid token is gone and the error oracle alone decides
 /// those lines. A source with a parse error keeps one.
-pub const CACHE_VERSION: u32 = 155;
+/// v156: loader v82, unchanged; a `Ledger`'s processed directives move:
+/// `close_tree` drops the `close` of an account no `open` opens and closes
+/// opened descendants only.
+pub const CACHE_VERSION: u32 = 156;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -17,7 +17,6 @@
 @ categories
 5	options|display_precision|display_precision|-|-
 3	balances|extra-in-impl|account|-|-
-2	errors|impl-fewer|oracle:LoadError|-|-|-
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
 @ deviations
@@ -696,9 +695,9 @@ compat	f231ef6f9174	match	tests/compatibility/files/parser-lima/test-cases_Parse
 compat	a8115ef2d4a3	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.OptionSingleValue.beancount
 compat	151b7369899c	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.ReadonlyOption.beancount
 compat	9244b4dcbd07	match	tests/compatibility/files/parser-lima/test-cases_ParserOptions.ToleranceMapValue.beancount
-compat	0108326315de	errors|impl-fewer|oracle:LoadError|-|-|-	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.Plugin.beancount
+compat	0108326315de	match	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.Plugin.beancount
 compat	c68f893d2998	match	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.PluginAsOption.beancount
-compat	369ac5337d75	errors|impl-fewer|oracle:LoadError|-|-|-	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.PluginWithConfig.beancount
+compat	369ac5337d75	match	tests/compatibility/files/parser-lima/test-cases_ParserPlugin.PluginWithConfig.beancount
 compat	5a51f8166267	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaForgotten.beancount
 compat	5dcfa0c9e4f7	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaInvalidPop.beancount
 compat	f89be2a7ccec	match	tests/compatibility/files/parser-lima/test-cases_PushPopMeta.PushmetaNormal.beancount

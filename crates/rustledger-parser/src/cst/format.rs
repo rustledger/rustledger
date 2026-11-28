@@ -925,6 +925,18 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 /// Lexes the source lazily, as far as the bytes asked about, so a caller that
 /// stops early (`cr_outside_strings_present` at the first `\r` outside a
 /// string) does not lex the rest of the file.
+///
+/// `body` is a source with its leading BOM stripped, the text the parser
+/// builds its tree from, and it is read through the tree's own token stream
+/// ([`KindTokenIter`](crate::cst::lossless_tokens::KindTokenIter)), not the
+/// bare lexer. The two differ on a body that starts with a second BOM: the
+/// tree makes that BOM a token of its own and lexes the rest as a file start,
+/// where the bare lexer glues it into an invalid token with what follows
+/// (`\u{feff}"""` is one token there, and the `"` after it opens a string the
+/// tree does not have). The formatter emits the tree, so a `\r\n` the bare
+/// lexer put inside such a string was left unfolded, and the tree's NEWLINE
+/// holding it was then copied with its `\r` kept, one more blank line ahead
+/// of it on every pass (`fuzz_format_roundtrip`, #3084).
 struct StringLiterals<'src> {
     /// The string spans after `current`, in order.
     spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src>,
@@ -935,9 +947,9 @@ struct StringLiterals<'src> {
 impl<'src> StringLiterals<'src> {
     fn new(body: &'src str) -> Self {
         let mut spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src> = Box::new(
-            crate::logos_lexer::TokenIter::new(body, true)
-                .filter(|(token, _)| matches!(token, crate::logos_lexer::Token::String(_)))
-                .map(|(_, span)| span.start..span.end),
+            crate::cst::lossless_tokens::KindTokenIter::new(body)
+                .filter(|(kind, _)| *kind == crate::SyntaxKind::STRING)
+                .map(|(_, span)| span),
         );
         let current = spans.next();
         Self { spans, current }

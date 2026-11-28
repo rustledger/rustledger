@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
-use rustledger_parser::format::{format_source, try_format_source};
+use rustledger_parser::format::{cr_outside_strings_present, format_source, try_format_source};
 use rustledger_parser::parse;
 
 #[path = "../fuzz/fuzz_targets/common/format_roundtrip.rs"]
@@ -233,6 +233,28 @@ fn test_format_source_keeps_a_second_bom() {
         assert_roundtrip(src);
     }
     assert_eq!(format_source("\u{FEFF}\u{FEFF}"), "\u{FEFF}\u{FEFF}\n");
+}
+
+/// `fuzz_format_roundtrip` crash (#3084, `fuzz/regressions/
+/// fuzz_format_roundtrip/crash-98ac0a55...`): after a second BOM, the
+/// line-ending fold found the string literals with the bare lexer, which
+/// glues that BOM into an invalid token with the `"""` after it, so the `"`
+/// on the next line opened a string holding the `\r\n`, and the fold left it.
+/// The tree the formatter emits makes the BOM a token of its own and reads
+/// `""` and `"\n"` there, the `\r\n` a line ending outside any string, which
+/// the verbatim copy of its error node kept with one more blank line ahead of
+/// it on every pass. The fold now reads strings as the tree does: that
+/// `\r\n` is folded, and one inside a string the tree reads is still kept.
+#[test]
+fn test_format_source_folds_line_endings_as_the_tree_reads_a_second_bom() {
+    let src = "\u{FEFF}\u{FEFF}\"\"\"\n\"\n\r\n\"";
+    assert_eq!(format_source(src), "\u{FEFF}\u{FEFF}\"\"\"\n\"\n\n\"\n");
+    assert!(cr_outside_strings_present(src));
+    assert_roundtrip(src);
+    let src = "\u{FEFF}\u{FEFF}\"\n\r\n\"";
+    assert_eq!(format_source(src), "\u{FEFF}\u{FEFF}\"\n\r\n\"\n");
+    assert!(!cr_outside_strings_present(src));
+    assert_roundtrip(src);
 }
 
 /// Unicode whitespace (a no-break space, a vertical tab) is an error to the

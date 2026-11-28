@@ -458,7 +458,7 @@ Python repr (`frozenset({'t1'})`).
 | `filter_currency(x, currency)` | The positions of a position or inventory held in `currency`, else `NULL`; a position gives itself or `NULL` |
 
 Negating or taking the absolute value of an inventory keeps each lot's
-cost; a lot's exact `{{T}}` total is rebuilt as units x per-unit, as after
+cost; a lot's exact <span v-pre>`{{T}}`</span> total is rebuilt as units x per-unit, as after
 an `Inventory::merge`.
 
 `commodity()` and `currency()` overlap but are not interchangeable.

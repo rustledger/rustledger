@@ -829,7 +829,9 @@ use crate::types::{Error, LedgerOptions};
 /// of a lot whose basis is not exactly `units x per-unit` carries the lot's
 /// exact total (`PerUnitFromTotal`) where `Decimal`'s rounded product hid the
 /// difference.
-pub const CACHE_VERSION: u32 = 159;
+/// v160: loader v82, unchanged; a `Ledger`'s processed directives move: `zerosum`
+/// opens its matched accounts on the ledger's first entry's date.
+pub const CACHE_VERSION: u32 = 160;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

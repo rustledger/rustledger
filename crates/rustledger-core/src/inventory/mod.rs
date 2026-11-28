@@ -97,10 +97,10 @@ impl fmt::Display for BookingMethod {
 /// - [`AllPositions`](ReductionScope::AllPositions): every position is
 ///   considered, regardless of whether it carries a cost.
 /// - [`CostBearingOnly`](ReductionScope::CostBearingOnly): only positions
-///   with a cost are considered.  This prevents a negative simple (no-cost)
-///   position — left behind by a sell-without-cost-spec — from causing a
-///   subsequent cost-bearing augmentation to be misclassified as a reduction.
-///   See: issue #875, beancount#889.
+///   with a cost are considered. Booking's reduction gate does NOT use it
+///   (it considers every position, as beancount does; see
+///   [`Inventory::is_booking_reduction`]); it remains for asking about lots
+///   alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReductionScope {
     /// Consider all positions (cost-bearing and simple).
@@ -2299,12 +2299,10 @@ impl Inventory {
     /// Returns `true` if there's a position with the same currency but opposite
     /// sign, meaning these units would reduce the inventory rather than add to it.
     ///
-    /// When `has_cost_spec` is `true`, only positions **with** a cost basis are
-    /// considered for reduction matching.  Simple (no-cost) positions are ignored
-    /// because they live in a different "cost layer" — a sell-without-cost-spec
-    /// that left a negative simple position should not cause a subsequent
-    /// cost-bearing augmentation to be misclassified as a reduction.
-    /// See: issue #875, beancount#889.
+    /// With [`ReductionScope::CostBearingOnly`], only positions **with** a cost
+    /// basis are considered. Booking's gate,
+    /// [`Self::is_booking_reduction`], considers every position, as beancount's
+    /// `is_reduced_by` does.
     ///
     /// This is used to determine whether a posting is a sale/reduction or a
     /// purchase/augmentation.
@@ -2365,10 +2363,18 @@ impl Inventory {
     /// presence of the spec, which includes an empty/unresolved one like `{}`),
     /// the booking method isn't `NONE` (issue #1182 — `NONE` accumulates every
     /// posting as an augmentation, with no lot matching), and the inventory holds
-    /// a cost-bearing position of the opposite sign in the same currency
-    /// ([`Self::is_reduced_by`] with [`ReductionScope::CostBearingOnly`]). This
-    /// gate was previously written byte-for-byte in both crates and the #1182 fix
-    /// had to be applied twice.
+    /// a position of the opposite sign in the same currency, held at cost or
+    /// not ([`Self::is_reduced_by`] with [`ReductionScope::AllPositions`]), as
+    /// beancount's `is_reduced_by` decides it. This gate was previously written
+    /// byte-for-byte in both crates and the #1182 fix had to be applied twice.
+    ///
+    /// A position held without a cost counts: holding `10 BTC` bought without
+    /// one, `-1 BTC {98.52 USD}` reduces, matches no lot, and fails (`No
+    /// matching lot`, beancount's `No position matches`). It used to count only
+    /// lots held at cost (#875), so that posting opened a short lot beside the
+    /// uncosted long, and a purchase at cost after a sale without a cost spec
+    /// (`-25 HOOG @ 1.60 EUR` leaving `-25 HOOG`) was an augmentation where
+    /// bean-check 3.2.3 refuses it too.
     ///
     /// One exception, when the account holds lots of BOTH signs: a spec that
     /// matches none of the opposite-sign lots but does match a lot of the
@@ -2415,11 +2421,13 @@ impl Inventory {
         // exception cannot apply, so the common single-sided account never
         // scans). An unbuilt cache falls back to the scan definitions.
         let positive = units.number.is_sign_positive();
+        // `own` stays lots held at cost: the exception below is about a spec
+        // matching a LOT of the posting's own sign.
         let (opposite, own) = match self.units_cache.get(&units.currency) {
             Some(stats) => (
                 stats
                     .counts
-                    .opposite(positive, ReductionScope::CostBearingOnly)
+                    .opposite(positive, ReductionScope::AllPositions)
                     > 0,
                 stats
                     .counts
@@ -2428,13 +2436,13 @@ impl Inventory {
             ),
             None if !self.units_cache.is_empty() => (false, false),
             None => (
-                self.is_reduced_by_scan(units, ReductionScope::CostBearingOnly),
+                self.is_reduced_by_scan(units, ReductionScope::AllPositions),
                 true,
             ),
         };
         debug_assert_eq!(
             opposite,
-            self.is_reduced_by_scan(units, ReductionScope::CostBearingOnly),
+            self.is_reduced_by_scan(units, ReductionScope::AllPositions),
             "the cached sign counts disagree with a scan of positions",
         );
         opposite && !(own && self.adds_to_its_own_side(units, spec, method))
@@ -6412,47 +6420,62 @@ mod tests {
     // cost-bearing positions when the incoming posting has a cost spec.
     // =========================================================================
 
+    /// A posting with a cost spec reduces when the inventory holds the
+    /// opposite sign at all, at cost or not, as beancount decides it: after
+    /// `100 HOOG {1.50 EUR}` and a sale without a cost spec leaving `-25 HOOG`,
+    /// `+50 HOOG {1.70 EUR}` is a reduction (it matches no lot and fails, as
+    /// bean-check 3.2.3 refuses it with `No position matches`). #875 made it
+    /// an augmentation; the maintainer chose beancount's answer (question 3
+    /// of the semantic differential, #3071).
     #[test]
-    fn test_is_reduced_by_ignores_simple_positions_when_has_cost_spec() {
-        // Regression test for issue #875 / beancount#889.
-        //
-        // Scenario:
-        //   1. Buy 100 HOOG {1.50 EUR}  -> inventory: [100 HOOG {1.50 EUR}]
-        //   2. Sell 25 HOOG @ 1.60 EUR   -> inventory: [100 HOOG {1.50 EUR}, -25 HOOG (simple)]
-        //   3. Buy 50 HOOG {1.70 EUR}    -> should be augmentation, NOT reduction
-        //
-        // Before fix: is_reduced_by saw the -25 HOOG simple position and
-        // incorrectly reported that +50 HOOG would reduce the inventory.
+    fn a_cost_spec_reduces_against_an_opposite_uncosted_position() {
         let mut inv = Inventory::new();
-
-        // Step 1: buy 100 HOOG with cost
         let cost = Cost::new(dec!(1.50), "EUR").with_date(date(2024, 1, 10));
         inv.add(Position::with_cost(Amount::new(dec!(100), "HOOG"), cost))
             .expect("fixture fits in Decimal");
-
-        // Step 2: sell 25 HOOG without cost spec (simple position)
         inv.add(Position::simple(Amount::new(dec!(-25), "HOOG")))
             .expect("fixture fits in Decimal");
+        let spec = CostSpec::empty()
+            .with_number(crate::CostNumber::PerUnit { value: dec!(1.70) })
+            .with_currency("EUR");
+        assert!(inv.is_booking_reduction(
+            &Amount::new(dec!(50), "HOOG"),
+            Some(&spec),
+            BookingMethod::Strict
+        ));
 
-        // Step 3: check if buying 50 HOOG with cost spec would be a reduction
+        // And the other direction: an uncosted long, a sale at a cost.
+        let mut long = Inventory::new();
+        long.add(Position::simple(Amount::new(dec!(10), "BTC")))
+            .expect("fixture fits in Decimal");
+        let sale = CostSpec::empty()
+            .with_number(crate::CostNumber::PerUnit { value: dec!(98.52) })
+            .with_currency("USD");
+        assert!(long.is_booking_reduction(
+            &Amount::new(dec!(-1), "BTC"),
+            Some(&sale),
+            BookingMethod::Strict
+        ));
+        // NONE still never reduces.
+        assert!(!long.is_booking_reduction(
+            &Amount::new(dec!(-1), "BTC"),
+            Some(&sale),
+            BookingMethod::None
+        ));
+    }
+
+    /// `is_reduced_by` itself still filters by scope when asked to.
+    #[test]
+    fn test_is_reduced_by_scope_filters_simple_positions() {
+        let mut inv = Inventory::new();
+        let cost = Cost::new(dec!(1.50), "EUR").with_date(date(2024, 1, 10));
+        inv.add(Position::with_cost(Amount::new(dec!(100), "HOOG"), cost))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(-25), "HOOG")))
+            .expect("fixture fits in Decimal");
         let buy_units = Amount::new(dec!(50), "HOOG");
-
-        // With has_cost_spec=true, only cost-bearing positions should be
-        // considered. The 100 HOOG {1.50 EUR} is positive and so is the
-        // incoming 50 HOOG -> same sign -> NOT a reduction.
-        assert!(
-            !inv.is_reduced_by(&buy_units, ReductionScope::CostBearingOnly),
-            "augmentation with cost spec should NOT be treated as reduction \
-             when only a simple (no-cost) position has opposite sign"
-        );
-
-        // With AllPositions, all positions are considered,
-        // including the -25 HOOG simple position -> IS a reduction.
-        assert!(
-            inv.is_reduced_by(&buy_units, ReductionScope::AllPositions),
-            "without cost spec filter, the -25 HOOG simple position \
-             should cause is_reduced_by to return true"
-        );
+        assert!(!inv.is_reduced_by(&buy_units, ReductionScope::CostBearingOnly));
+        assert!(inv.is_reduced_by(&buy_units, ReductionScope::AllPositions));
     }
 
     #[test]

@@ -831,7 +831,10 @@ use crate::types::{Error, LedgerOptions};
 /// difference.
 /// v160: loader v82, unchanged; a `Ledger`'s processed directives move: `zerosum`
 /// opens its matched accounts on the ledger's first entry's date.
-pub const CACHE_VERSION: u32 = 160;
+/// v161: loader v82, unchanged; a `Ledger`'s booked directives move: a cost spec
+/// against an account holding the commodity without a cost is a reduction,
+/// refused when it matches no lot, where it booked a new lot.
+pub const CACHE_VERSION: u32 = 161;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

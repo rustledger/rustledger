@@ -168,3 +168,34 @@ fn a_mistyped_lot_date_still_fails_on_a_mixed_account() {
         ledger.errors,
     );
 }
+
+/// A cost spec against an account holding the commodity without a cost
+/// reduces it, matches no lot, and is refused, as bean-check 3.2.3 refuses
+/// it (`No position matches`). Holding `10 BTC` bought without a cost,
+/// `-1 BTC {98.52 USD}` opened a short lot at cost beside the long; and a
+/// purchase at cost after a sale without a cost spec (issue #875's ledger)
+/// was an augmentation, where beancount refuses it too.
+#[test]
+fn a_cost_spec_against_an_uncosted_holding_is_refused() {
+    for ledger in [
+        "2024-01-01 open Assets:Wallet\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:Opening\n\
+         2024-01-04 *\n  Assets:Wallet  10 BTC\n  Equity:Opening  -10 BTC\n\
+         2024-01-10 *\n  Assets:Wallet  -1 BTC {98.52 USD}\n  Assets:Cash  98.52 USD\n",
+        "option \"operating_currency\" \"EUR\"\n2024-01-01 open Assets:Bank EUR\n2024-01-01 open Assets:Stocks HOOG\n\
+         2024-01-10 * \"Buy\"\n  Assets:Stocks  100 HOOG {1.50 EUR}\n  Assets:Bank\n\
+         2024-01-15 * \"Sell without cost spec\"\n  Assets:Stocks  -25 HOOG @ 1.60 EUR\n  Assets:Bank\n\
+         2024-01-20 * \"Buy again\"\n  Assets:Stocks  50 HOOG {1.70 EUR}\n  Assets:Bank\n",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.beancount");
+        std::fs::write(&path, ledger).expect("write ledger");
+        let loaded = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+            .expect("load ledger");
+        let booking = loaded
+            .errors
+            .iter()
+            .filter(|e| e.is_booking_failure())
+            .count();
+        assert_eq!(booking, 1, "{:?}", loaded.errors);
+    }
+}

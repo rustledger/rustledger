@@ -822,7 +822,10 @@ use crate::types::{Error, LedgerOptions};
 /// v157: loader v82, unchanged; a `Ledger`'s processed directives move:
 /// `auto_accounts` runs after booking, so it opens no account only a refused
 /// transaction or a dropped zero posting names.
-pub const CACHE_VERSION: u32 = 157;
+/// v158: loader v82, unchanged; a `Ledger`'s booked directives move: a STRICT or
+/// `STRICT_WITH_SIZE` sale of every matching lot lists its postings in the
+/// order the lots were added, where it listed them by lot date.
+pub const CACHE_VERSION: u32 = 158;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

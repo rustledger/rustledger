@@ -673,13 +673,18 @@ impl Inventory {
                 // survives to carry a date and the choice cannot be observed.
                 // Beancount has this same exception, and for the same reason.
                 // Exact, never `Sum`: see `sums_exactly_to` (#2554).
+                //
+                // The lots are listed in the order they were added, as
+                // beancount lists them (its inventory is an insertion-ordered
+                // map), so the booked postings come out in its order: by date
+                // they put a later-added, earlier-dated lot first.
                 if sums_exactly_to(
                     matching_indices
                         .iter()
                         .map(|&i| self.positions[i].units.number.abs()),
                     units.number.abs(),
                 ) {
-                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date)?;
+                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Slot)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
@@ -777,7 +782,8 @@ impl Inventory {
                     return from_lot(idx);
                 }
                 // Total match exception: selling the whole matched inventory
-                // makes the choice of lot irrelevant.
+                // makes the choice of lot irrelevant. Listed in the order the
+                // lots were added, as STRICT lists them (see there).
                 // Exact, never `Sum`: see `sums_exactly_to` (#2554).
                 if sums_exactly_to(
                     matching_indices
@@ -785,7 +791,7 @@ impl Inventory {
                         .map(|&i| self.positions[i].units.number.abs()),
                     units.number.abs(),
                 ) {
-                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date)?;
+                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Slot)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
                 Err(BookingError::AmbiguousMatch {
@@ -3004,6 +3010,23 @@ mod reduction_tests {
         let inv = mk([lot(10, 100, 1)]);
         let r = try_reduce(&inv, &sell_stk(10), BookingMethod::Strict);
         assert_eq!(basis(&r), dec!(1000));
+    }
+
+    /// A STRICT (or `STRICT_WITH_SIZE`) reduction taking every matching lot
+    /// lists them in the order they were added, as beancount lists its
+    /// insertion-ordered inventory: a lot added second but dated earlier
+    /// comes second. By date it came first, so the booked postings came out
+    /// in the other order from beancount's.
+    #[test]
+    fn strict_total_match_lists_lots_in_the_order_they_were_added() {
+        // Added first, dated the 20th; added second, dated the 5th.
+        let inv = mk([lot(14, 207, 20), lot(4, 75, 5)]);
+        for method in [BookingMethod::Strict, BookingMethod::StrictWithSize] {
+            let r = try_reduce(&inv, &sell_stk(18), method);
+            let order: Vec<Decimal> = r.matched.iter().map(|p| p.units.number.abs()).collect();
+            assert_eq!(order, [dec!(14), dec!(4)], "{method:?}");
+            assert_eq!(basis(&r), dec!(14) * dec!(207) + dec!(4) * dec!(75));
+        }
     }
 
     // ---- HIFO matched units + insufficient accounting ----------------

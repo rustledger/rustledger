@@ -3988,3 +3988,45 @@ fn test_valuation_plugin_commodity_is_not_a_duplicate_commodity() {
         );
     }
 }
+
+/// A STRICT sale of every matching lot books one posting per lot, in the
+/// order the lots were bought, as bean-check books it: the lot bought first
+/// but dated later comes first. The postings came out by lot date.
+#[test]
+fn test_strict_total_sale_books_lots_in_purchase_order() {
+    use rustledger_core::Directive;
+    use rustledger_loader::{LoadOptions, load};
+    for method in ["STRICT", "STRICT_WITH_SIZE"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.beancount");
+        std::fs::write(
+            &path,
+            format!(
+                "2024-01-01 open Assets:Cash\n\
+                 2024-01-01 open Income:Gains\n\
+                 2024-01-02 open Assets:B \"{method}\"\n\
+                 2024-01-02 *\n  Assets:B  14 VTI {{{{2898.00 USD}}}}\n  Assets:B  4 VTI {{75.14 USD, 2023-09-08}}\n  Assets:Cash\n\
+                 2024-01-12 *\n  Assets:B  -18 VTI {{}} @ 177.23 USD\n  Assets:Cash  3190.14 USD\n  Income:Gains\n"
+            ),
+        )
+        .expect("write ledger");
+        let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+        assert!(ledger.errors.is_empty(), "{method}: {:?}", ledger.errors);
+        let sale = ledger
+            .directives
+            .iter()
+            .filter_map(|s| match &s.value {
+                Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .next_back()
+            .expect("the sale");
+        let units: Vec<String> = sale
+            .postings
+            .iter()
+            .filter(|p| p.value.account.as_str() == "Assets:B")
+            .map(|p| p.value.units.as_ref().expect("booked").to_string())
+            .collect();
+        assert_eq!(units, ["-14 VTI", "-4 VTI"], "{method}");
+    }
+}

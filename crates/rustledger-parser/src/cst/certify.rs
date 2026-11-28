@@ -297,10 +297,14 @@ pub fn __same_meaning(
 #[doc(hidden)]
 #[must_use]
 pub fn __error_lines(src: &str, r: &ParseResult) -> Vec<String> {
-    lines_at(src, r.errors.iter().map(|e| e.span.start))
-        .into_iter()
-        .map(|l| format!("{l:?}"))
-        .collect()
+    lines_at(
+        src,
+        &LineIndex::new(src),
+        r.errors.iter().map(|e| e.span.start),
+    )
+    .into_iter()
+    .map(|l| format!("{l:?}"))
+    .collect()
 }
 
 /// [`__error_lines`], the lines holding an error quieted by bison's
@@ -310,6 +314,7 @@ pub fn __error_lines(src: &str, r: &ParseResult) -> Vec<String> {
 pub fn __defect_lines(src: &str, r: &ParseResult) -> Vec<String> {
     lines_at(
         src,
+        &LineIndex::new(src),
         r.errors
             .iter()
             .map(|e| e.span.start)
@@ -327,6 +332,7 @@ pub fn floor_boundary(s: &str, at: usize) -> usize {
 }
 
 /// The line starts of a text, for byte-offset → line lookups.
+#[derive(Clone)]
 pub struct LineIndex {
     /// Byte offset of each line's start (after a `\n`); `starts[0] == 0`.
     starts: Vec<usize>,
@@ -337,6 +343,16 @@ impl LineIndex {
         let mut starts = vec![0];
         starts.extend(src.match_indices('\n').map(|(i, _)| i + 1));
         Self { starts }
+    }
+
+    /// Where line `line` starts.
+    pub fn start(&self, line: usize) -> usize {
+        self.starts.get(line).copied().unwrap_or(0)
+    }
+
+    /// How many lines there are.
+    pub const fn count(&self) -> usize {
+        self.starts.len()
     }
 
     /// The 0-based line holding byte `at` (how many `\n`s precede it).
@@ -377,16 +393,18 @@ pub fn is_subsequence<T: PartialEq>(needle: &[T], hay: &[T]) -> bool {
 
 /// The text of each line of `src` holding one of the offsets `at` (sorted
 /// ascending), in order, each once.
-pub fn lines_at(src: &str, at: impl Iterator<Item = usize>) -> Vec<&str> {
-    let mut starts: Vec<usize> = at
-        .map(|a| {
-            let a = floor_boundary(src, a);
-            src[..a].rfind('\n').map_or(0, |i| i + 1)
-        })
-        .collect();
-    starts.sort_unstable();
-    starts.dedup();
-    starts.into_iter().map(|s| line_text(src, s)).collect()
+pub fn lines_at<'s>(
+    src: &'s str,
+    index: &LineIndex,
+    at: impl Iterator<Item = usize>,
+) -> Vec<&'s str> {
+    let mut lines: Vec<usize> = at.map(|a| index.line(floor_boundary(src, a))).collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+        .into_iter()
+        .map(|l| line_text(src, index.start(l)))
+        .collect()
 }
 
 // ---- The certifier ---------------------------------------------------------
@@ -431,6 +449,7 @@ struct Region<'p> {
 /// What a text yields, split by item.
 pub(super) struct Facts<'p> {
     text: &'p str,
+    lines: LineIndex,
     items: Vec<Region<'p>>,
     separator: Region<'p>,
     has_errors: bool,
@@ -479,8 +498,10 @@ impl<'p> Facts<'p> {
         items: usize,
         locate: impl Fn(usize) -> Option<usize>,
     ) -> Self {
+        let lines = LineIndex::new(text);
         let mut facts = Self {
             text,
+            lines: lines.clone(),
             items: std::iter::repeat_with(Region::default)
                 .take(items)
                 .collect(),
@@ -493,7 +514,6 @@ impl<'p> Facts<'p> {
         // artifact: which values the parser salvages from a line it cannot
         // read depends on details the formatter normalizes. Those lines are
         // checked verbatim instead (below).
-        let lines = LineIndex::new(text);
         let skip: Vec<usize> = r.errors.iter().map(|e| lines.line(e.span.start)).collect();
         for (span, m) in meanings(r) {
             if !lines.touches(&span, &skip) {
@@ -503,13 +523,25 @@ impl<'p> Facts<'p> {
         for (at, e) in comment_events(text, r) {
             facts.region(locate(at)).comments.push(e);
         }
+        // An error at the end of the text (`unexpected end of file`) is on the
+        // last line holding text: the final newline the formatter adds must
+        // not move it onto an empty line of its own, or out of its item.
+        let at_text = |at: usize| {
+            if at >= text.len() {
+                text.len().saturating_sub(1)
+            } else {
+                at
+            }
+        };
         for e in &r.errors {
-            let region = facts.region(locate(e.span.start));
-            region.error_at.push(e.span.start);
-            region.defect_at.push(e.span.start);
+            let at = at_text(e.span.start);
+            let region = facts.region(locate(at));
+            region.error_at.push(at);
+            region.defect_at.push(at);
         }
         for s in &r.defect_spans {
-            facts.region(locate(s.start)).defect_at.push(s.start);
+            let at = at_text(s.start);
+            facts.region(locate(at)).defect_at.push(at);
         }
         facts
     }
@@ -796,16 +828,16 @@ fn same_region(
     // reported or quieted (bison's recovery window hides an error the
     // formatter's normalization can uncover), and every line holding a
     // reported error is kept byte for byte.
-    let in_errors = lines_at(input.text, a.error_at.iter().copied());
-    let in_defects = lines_at(input.text, a.defect_at.iter().copied());
-    let out_errors = lines_at(output.text, b.error_at.iter().copied());
+    let in_errors = lines_at(input.text, &input.lines, a.error_at.iter().copied());
+    let in_defects = lines_at(input.text, &input.lines, a.defect_at.iter().copied());
+    let out_errors = lines_at(output.text, &output.lines, b.error_at.iter().copied());
     if !is_subsequence(&out_errors, &in_defects) {
         return Err("a line gained a parse error");
     }
     if in_errors.is_empty() {
         return Ok(());
     }
-    let out_lines = region_lines(output.text, item, ranges);
+    let out_lines = region_lines(output, item, ranges);
     if is_subsequence(&in_errors, &out_lines) {
         Ok(())
     } else {
@@ -816,36 +848,34 @@ fn same_region(
 /// The text of every line of `out` in `item`'s written range (for the
 /// separator, every line starting outside all of them).
 fn region_lines<'s>(
-    out: &'s str,
+    output: &Facts<'s>,
     item: Option<usize>,
     ranges: &[(usize, usize, usize)],
 ) -> Vec<&'s str> {
-    // Each line as `(start, end)`, its `\n` excluded.
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (i, _) in out.match_indices('\n') {
-        lines.push((start, i));
-        start = i + 1;
+    let (out, lines) = (output.text, &output.lines);
+    let text = |l: usize| line_text(out, lines.start(l));
+    if let Some(it) = item {
+        // The lines the item's written range overlaps.
+        let Some(&(rs, re, _)) = ranges
+            .get(ranges.partition_point(|&(_, _, x)| x < it))
+            .filter(|&&(_, _, x)| x == it)
+        else {
+            return Vec::new();
+        };
+        return (lines.line(rs)..=lines.line(re.saturating_sub(1).max(rs)))
+            .map(text)
+            .collect();
     }
-    if start < out.len() || start == 0 {
-        lines.push((start, out.len()));
-    }
-    lines
-        .into_iter()
-        .filter(|&(s, e)| {
-            if let Some(it) = item {
-                // A line the item's written range overlaps.
-                ranges
-                    .iter()
-                    .find(|&&(_, _, x)| x == it)
-                    .is_some_and(|&(rs, re, _)| s < re && rs <= e)
-            } else {
-                // A line starting outside every written range.
+    // The lines starting outside every written range.
+    (0..lines.count())
+        .filter(|&l| {
+            let s = lines.start(l);
+            (s < out.len() || s == 0) && {
                 let i = ranges.partition_point(|&(_, end, _)| end <= s);
                 ranges.get(i).is_none_or(|&(rs, _, _)| rs > s)
             }
         })
-        .map(|(s, _)| line_text(out, s))
+        .map(text)
         .collect()
 }
 

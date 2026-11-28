@@ -149,15 +149,84 @@ pub struct NativePluginRegistry {
     regular: Vec<Box<dyn RegularPlugin>>,
 }
 
-/// Extract the short plugin name from a potentially qualified module path.
+/// The third-party plugin modules native plugins stand in for, by exact path.
 ///
-/// Examples:
-/// - `"zerosum"` → `"zerosum"`
-/// - `"beancount.plugins.implicit_prices"` → `"implicit_prices"`
-/// - `"beancount_reds_plugins.zerosum.zerosum"` → `"zerosum"`
-#[inline]
-fn plugin_short_name(name: &str) -> &str {
-    name.rsplit('.').next().unwrap_or(name)
+/// Each maps a module path to the native plugin's name. Documented in
+/// `docs/reference/plugins.md` ("Supported Python Plugins") and
+/// `docs/reference/compatibility.md` #2.
+pub const THIRD_PARTY_MODULES: &[(&str, &str)] = &[
+    ("beancount_reds_plugins.zerosum.zerosum", "zerosum"),
+    (
+        "beancount_reds_plugins.effective_date.effective_date",
+        "effective_date",
+    ),
+    (
+        "beancount_reds_plugins.rename_accounts.rename_accounts",
+        "rename_accounts",
+    ),
+    (
+        "beancount_reds_plugins.box_accrual.box_accrual",
+        "box_accrual",
+    ),
+    (
+        "beancount_reds_plugins.capital_gains_classifier.long_short",
+        "long_short",
+    ),
+    (
+        "beancount_reds_plugins.capital_gains_classifier.gain_loss",
+        "gain_loss",
+    ),
+    ("beancount_ln_plugins.ln.long_short", "long_short"),
+    ("beanahead.plugins.rx_txn_plugin", "rx_txn_plugin"),
+    (
+        "tariochbctools.plugins.generate_base_ccy_prices",
+        "generate_base_ccy_prices",
+    ),
+    (
+        "beancount_lazy_plugins.generate_base_ccy_prices",
+        "generate_base_ccy_prices",
+    ),
+    ("beancount_lazy_plugins.valuation", "valuation"),
+    (
+        "beancount_options.check_option_expiry",
+        "check_option_expiry",
+    ),
+    (
+        "beancount_options.check_option_assignment",
+        "check_option_assignment",
+    ),
+];
+
+/// The native plugin name a `plugin` reference names, or `None` when it
+/// names no native plugin.
+///
+/// A reference names a native plugin by exactly one of:
+///
+/// - its bare name (`"zerosum"`, `"implicit_prices"`);
+/// - beancount's module path for it, `beancount.plugins.<name>`
+///   (`"beancount.plugins.implicit_prices"`);
+/// - the exact module path of the third-party plugin it stands in for
+///   ([`THIRD_PARTY_MODULES`]: `"beancount_reds_plugins.zerosum.zerosum"`).
+///
+/// Anything else is not native, and resolves as any other module reference
+/// (a plugin that is not found). It used to match by the last dotted
+/// segment alone, so a misspelled `beancount.plugin.unrealized` (or
+/// `anything.zerosum`) silently ran the native plugin, where beancount
+/// fails to import it.
+#[must_use]
+pub fn native_plugin_name(name: &str) -> Option<&str> {
+    if !name.contains('.') {
+        return Some(name);
+    }
+    if let Some(rest) = name.strip_prefix("beancount.plugins.")
+        && !rest.contains('.')
+    {
+        return Some(rest);
+    }
+    THIRD_PARTY_MODULES
+        .iter()
+        .find(|(module, _)| *module == name)
+        .map(|(_, native)| *native)
 }
 
 /// Build the singleton registry. Called once per process via the
@@ -227,7 +296,7 @@ impl NativePluginRegistry {
     /// Accepts both short names (`"auto_accounts"`) and fully
     /// qualified module paths (`"beancount.plugins.auto_accounts"`).
     pub fn find_synth(&self, name: &str) -> Option<&dyn SynthPlugin> {
-        let short_name = plugin_short_name(name);
+        let short_name = native_plugin_name(name)?;
         self.synth
             .iter()
             .find(|p| p.name() == short_name)
@@ -243,7 +312,7 @@ impl NativePluginRegistry {
     /// Accepts both short names (`"implicit_prices"`) and fully
     /// qualified module paths (`"beancount.plugins.implicit_prices"`).
     pub fn find_regular(&self, name: &str) -> Option<&dyn RegularPlugin> {
-        let short_name = plugin_short_name(name);
+        let short_name = native_plugin_name(name)?;
         self.regular
             .iter()
             .find(|p| p.name() == short_name)
@@ -267,7 +336,9 @@ impl NativePluginRegistry {
     /// returned reference's type carries the pass.
     #[must_use]
     pub fn has(&self, name: &str) -> bool {
-        let short_name = plugin_short_name(name);
+        let Some(short_name) = native_plugin_name(name) else {
+            return false;
+        };
         self.synth.iter().any(|p| p.name() == short_name)
             || self.regular.iter().any(|p| p.name() == short_name)
     }
@@ -278,58 +349,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_plugin_short_name_bare() {
-        assert_eq!(plugin_short_name("zerosum"), "zerosum");
-        assert_eq!(plugin_short_name("implicit_prices"), "implicit_prices");
+    fn test_native_plugin_name_bare_and_beancount_path() {
+        assert_eq!(native_plugin_name("zerosum"), Some("zerosum"));
+        assert_eq!(
+            native_plugin_name("beancount.plugins.implicit_prices"),
+            Some("implicit_prices")
+        );
+        assert_eq!(native_plugin_name(""), Some(""));
     }
 
     #[test]
-    fn test_plugin_short_name_beancount_plugins() {
+    fn test_native_plugin_name_third_party_exact_paths() {
         assert_eq!(
-            plugin_short_name("beancount.plugins.implicit_prices"),
-            "implicit_prices"
+            native_plugin_name("beancount_reds_plugins.zerosum.zerosum"),
+            Some("zerosum")
         );
         assert_eq!(
-            plugin_short_name("beancount.plugins.check_commodity"),
-            "check_commodity"
-        );
-    }
-
-    #[test]
-    fn test_plugin_short_name_beanahead() {
-        assert_eq!(
-            plugin_short_name("beanahead.plugins.rx_txn_plugin"),
-            "rx_txn_plugin"
-        );
-    }
-
-    #[test]
-    fn test_plugin_short_name_reds_plugins() {
-        assert_eq!(
-            plugin_short_name("beancount_reds_plugins.zerosum.zerosum"),
-            "zerosum"
+            native_plugin_name("beancount_reds_plugins.capital_gains_classifier.gain_loss"),
+            Some("gain_loss")
         );
         assert_eq!(
-            plugin_short_name("beancount_reds_plugins.capital_gains_classifier.gain_loss"),
-            "gain_loss"
+            native_plugin_name("beanahead.plugins.rx_txn_plugin"),
+            Some("rx_txn_plugin")
         );
         assert_eq!(
-            plugin_short_name("beancount_reds_plugins.effective_date.effective_date"),
-            "effective_date"
+            native_plugin_name("tariochbctools.plugins.generate_base_ccy_prices"),
+            Some("generate_base_ccy_prices")
         );
     }
 
+    /// A path that only ENDS in a native plugin's name is not that plugin:
+    /// beancount fails to import `beancount.plugin.unrealized` (the
+    /// singular `plugin`), and so does rledger now, where it ran the native
+    /// `unrealized`.
     #[test]
-    fn test_plugin_short_name_tarioch() {
-        assert_eq!(
-            plugin_short_name("tariochbctools.plugins.generate_base_ccy_prices"),
-            "generate_base_ccy_prices"
-        );
-    }
-
-    #[test]
-    fn test_plugin_short_name_empty() {
-        assert_eq!(plugin_short_name(""), "");
+    fn test_native_plugin_name_rejects_other_paths() {
+        for name in [
+            "beancount.plugin.unrealized",
+            "my.zerosum",
+            "beancount.plugins.sub.leafonly",
+            "beancount_reds_plugins.zerosum",
+        ] {
+            assert_eq!(native_plugin_name(name), None, "{name}");
+            assert!(!NativePluginRegistry::global().has(name), "{name}");
+        }
     }
 
     #[test]

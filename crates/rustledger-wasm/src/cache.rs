@@ -834,7 +834,10 @@ use crate::types::{Error, LedgerOptions};
 /// v161: loader v82, unchanged; a `Ledger`'s booked directives move: a cost spec
 /// against an account holding the commodity without a cost is a reduction,
 /// refused when it matches no lot, where it booked a new lot.
-pub const CACHE_VERSION: u32 = 161;
+/// v162: loader v82, unchanged; a `Ledger`'s findings and directives move: a
+/// plugin path no native plugin answers to exactly (`beancount.plugin.unrealized`)
+/// no longer runs one.
+pub const CACHE_VERSION: u32 = 162;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

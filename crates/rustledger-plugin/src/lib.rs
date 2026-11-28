@@ -64,7 +64,8 @@ pub use dispatch::{
 };
 pub use native::{
     AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,
-    SynthPlugin, document_discovery_config, document_discovery_config_with_main_file,
+    SynthPlugin, THIRD_PARTY_MODULES, document_discovery_config,
+    document_discovery_config_with_main_file, native_plugin_name,
 };
 #[cfg(feature = "wasm-runtime")]
 pub use runtime::{

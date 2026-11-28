@@ -16,10 +16,7 @@
 #@inputs gen 10000
 @ categories
 5	options|display_precision|display_precision|-|-
-4	entries|postings.order|transaction|-|multi-currency
 3	balances|extra-in-impl|account|-|-
-2	entries|postings.order|transaction|-|elided+multi-currency
-2	entries|postings.order|transaction|-|expr+multi-currency
 2	errors|impl-fewer|oracle:LoadError|-|-|-
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
@@ -27,6 +24,7 @@
 813	average-booking
 163	included-file-plugins
 120	currency-accounts-posting-order
+8	currency-group-posting-order
 6	custom-display-precision
 5	cross-file-booking-order
 1	total-cost-half-cent
@@ -134,7 +132,7 @@ compat	67dd503417f8	crash	tests/compatibility/files/beanahead/tests_resources_de
 compat	deeb47f71e19	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_230630.beancount
 compat	781c82b9a2dc	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_opts.beancount
 compat	a695d3224beb	crash	tests/compatibility/files/beanahead/tests_resources_defs_rx_opts_221231.beancount
-compat	15c661a1763f	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/beanahead/tests_resources_example_ledger.beancount
+compat	15c661a1763f	deviation:currency-group-posting-order	tests/compatibility/files/beanahead/tests_resources_example_ledger.beancount
 compat	dead86fb912b	match	tests/compatibility/files/beanahead/tests_resources_example_ledger_txns.beancount
 compat	4bae9595af68	crash	tests/compatibility/files/beanahead/tests_resources_example_rx.beancount
 compat	6c60f36334d4	crash	tests/compatibility/files/beanahead/tests_resources_expired_expected_rx.beancount
@@ -262,7 +260,7 @@ compat	21375dd7d74b	match	tests/compatibility/files/beancount-import/testdata_so
 compat	88cbbca75fd2	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_checking_import_results.beancount
 compat	0a077fa9c453	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_import_results.beancount
 compat	f54e72992bac	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount
-compat	78c22c7a2454	entries|postings.order|transaction|-|elided+multi-currency	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_journal.beancount
+compat	78c22c7a2454	deviation:currency-group-posting-order	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_journal.beancount
 compat	1ae69b21da8d	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_savings_import_results.beancount
 compat	48569d75b20a	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount
 compat	448ac2c22951	match	tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_treasury_import_results.beancount
@@ -339,8 +337,8 @@ compat	4bc84780b73b	match	tests/compatibility/files/beancount-portfolio-alloc/te
 compat	9f7b5d60e488	match	tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_zero-position.beancount
 compat	e76bfb3c7e8d	match	tests/compatibility/files/beancount-staging/docs_examples_journal.beancount
 compat	4c53c4037216	match	tests/compatibility/files/beancount-staging/docs_examples_staging.beancount
-compat	6b8186ccd521	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/beancount-v3/examples_example.beancount
-compat	fca081a81af7	entries|postings.order|transaction|-|elided+multi-currency	tests/compatibility/files/beancount-v3/examples_simple_basic.beancount
+compat	6b8186ccd521	deviation:currency-group-posting-order	tests/compatibility/files/beancount-v3/examples_example.beancount
+compat	fca081a81af7	deviation:currency-group-posting-order	tests/compatibility/files/beancount-v3/examples_simple_basic.beancount
 compat	8827e45ecac0	match	tests/compatibility/files/beancount-v3/examples_simple_starter.beancount
 compat	4613fab30ae2	match	tests/compatibility/files/beancount-v3/examples_vesting_vesting.beancount
 compat	86ee96d867bc	match	tests/compatibility/files/beancounttools/tests_tariochbctools_plugins_data_generate_base_ccy_prices_entry_already_exists_expected.beancount
@@ -432,9 +430,9 @@ compat	f0a98de4d601	match	tests/compatibility/files/fava/contrib_examples_huge-e
 compat	8663f6d28ecd	match	tests/compatibility/files/fava/tests_data_edit-example.beancount
 compat	66015c1e5d54	match	tests/compatibility/files/fava/tests_data_errors.beancount
 compat	a0536c118513	deviation:custom-display-precision	tests/compatibility/files/fava/tests_data_example.beancount
-compat	554c53091079	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/fava/tests_data_extension-report-example.beancount
+compat	554c53091079	deviation:currency-group-posting-order	tests/compatibility/files/fava/tests_data_extension-report-example.beancount
 compat	c1b74c27dfdc	match	tests/compatibility/files/fava/tests_data_import.beancount
-compat	bc52cd9ba381	entries|postings.order|transaction|-|multi-currency	tests/compatibility/files/fava/tests_data_long-example.beancount
+compat	bc52cd9ba381	deviation:currency-group-posting-order	tests/compatibility/files/fava/tests_data_long-example.beancount
 compat	3dae8729c40c	match	tests/compatibility/files/fava/tests_data_off-by-one.beancount
 compat	21499f28b888	match	tests/compatibility/files/fava/tests_data_query-example.beancount
 compat	411b9aca35f3	match	tests/compatibility/files/gnucash-to-beancount/data_sample-west.beancount
@@ -466,10 +464,10 @@ compat	dc17fe8eab1a	match	tests/compatibility/files/jcornaz-parser/tests_samples
 compat	70bc2f2a8102	match	tests/compatibility/files/jcornaz-parser/tests_samples_official.beancount
 compat	472135af2b27	match	tests/compatibility/files/jcornaz-parser/tests_samples_simple.beancount
 compat	93f70896b601	match	tests/compatibility/files/ledger2beancount/tests_accounts.beancount
-compat	3a4f9acd8817	entries|postings.order|transaction|-|expr+multi-currency	tests/compatibility/files/ledger2beancount/tests_amounts-decimal-comma.beancount
+compat	3a4f9acd8817	deviation:currency-group-posting-order	tests/compatibility/files/ledger2beancount/tests_amounts-decimal-comma.beancount
 compat	49e8e76730d9	match	tests/compatibility/files/ledger2beancount/tests_amounts-plus-sign-decimal-comma.beancount
 compat	9ca265635d40	match	tests/compatibility/files/ledger2beancount/tests_amounts-plus-sign.beancount
-compat	2a4ef8f477e3	entries|postings.order|transaction|-|expr+multi-currency	tests/compatibility/files/ledger2beancount/tests_amounts.beancount
+compat	2a4ef8f477e3	deviation:currency-group-posting-order	tests/compatibility/files/ledger2beancount/tests_amounts.beancount
 compat	8998fb77bde2	match	tests/compatibility/files/ledger2beancount/tests_aux-date.beancount
 compat	c3f1779b4fea	match	tests/compatibility/files/ledger2beancount/tests_balance-assertion.beancount
 compat	905eb6e37076	match	tests/compatibility/files/ledger2beancount/tests_bug214.beancount

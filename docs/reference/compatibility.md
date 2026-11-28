@@ -690,6 +690,32 @@ should mean the same thing both ways. Pinned by the rustdoc and tests of
 differential (`scripts/compat-semantic-parity.py`) counts a ledger with a
 plugin only an included file declares as this deviation.
 
+### 22. Posting Order in a Multi-Currency Transaction
+
+Beancount's booking regroups a transaction's postings by the currency each
+weighs in (its cost currency, else its price currency, else its own),
+groups in the order they first appear; rustledger keeps the postings in the
+order they were written. Amounts, costs and balances are the same; only the
+order `print`, `#postings` and the journal show differs.
+
+```beancount
+2018-03-26 *
+  Expenses:Travel:Airfare   30.00 GBP
+  Expenses:Travel:Airfare    9000 AVIOS
+  Assets:Rewards            -9000 AVIOS
+  Liabilities:Airline      -30.00 GBP
+```
+
+| | posting order after loading |
+|---|---|
+| beancount 3.2.3 | `30.00 GBP`, `-30.00 GBP`, `9000 AVIOS`, `-9000 AVIOS` |
+| rustledger | as written |
+
+This is deliberate: the written order is the author's, and regrouping it is
+an artifact of how beancount's booking walks currency groups. The semantic
+differential (`scripts/compat-semantic-parity.py`) counts a ledger whose
+only difference is this regrouping as this deviation.
+
 ## Parse-Error Differences
 
 rledger reports beancount 3.2.3's syntax errors on the same lines and in the

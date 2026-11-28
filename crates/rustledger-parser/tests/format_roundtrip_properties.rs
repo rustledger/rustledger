@@ -390,8 +390,8 @@ fn short_inputs(depth: u32) -> Vec<String> {
 const DEMOTIONS_MANIFEST: &str = "tests/format_roundtrip_common/exhaustive_demotions.manifest";
 
 /// Exhaustive sweep depth: `FORMAT_EXHAUSTIVE_DEPTH`, else 4 (11,111 inputs).
-/// The manifest is for the default depth; at another depth the sweep checks
-/// the promises and only reports demotions.
+/// The manifest is for the default depth; at another depth (CI's ratchet job
+/// runs depth 5) every demotion must still be one the manifest lists.
 const DEFAULT_DEPTH: u32 = 4;
 
 /// Every string of up to four symbols keeps every promise (the certifier makes
@@ -425,7 +425,20 @@ fn test_format_exhaustive_short_inputs() {
         failures[0]
     );
     if depth != DEFAULT_DEPTH {
-        eprintln!("{} inputs demoted:\n{}", demoted.len(), demoted.join("\n"));
+        let pinned: Vec<&str> =
+            include_str!("format_roundtrip_common/exhaustive_demotions.manifest")
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .collect();
+        let new: Vec<&String> = demoted
+            .iter()
+            .filter(|d| !pinned.contains(&d.as_str()))
+            .collect();
+        assert!(
+            new.is_empty(),
+            "depth {depth}: {} inputs demoted beyond the manifest (emitter bugs):\n{new:#?}",
+            new.len()
+        );
         return;
     }
     let path = manifest_dir().join(DEMOTIONS_MANIFEST);

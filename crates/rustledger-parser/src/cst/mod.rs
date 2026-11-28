@@ -58,6 +58,7 @@ mod directive_header;
 pub(crate) mod format;
 mod green;
 mod lossless_tokens;
+pub(crate) mod meaning;
 mod oracle;
 mod parser;
 mod syntax_kind;

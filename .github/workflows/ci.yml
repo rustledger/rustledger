@@ -674,6 +674,46 @@ jobs:
             echo "$dirty"
             exit 1
           fi
+  # The formatter's certifier ratchet (ADR 0009): the exhaustive sweep of
+  # short inputs one level deeper than the default test run (111,111 inputs,
+  # in release), the corpus sweeps, and range formatting against whole-file
+  # formatting. Every input must keep every promise, and nothing may be
+  # demoted beyond `exhaustive_demotions.manifest` (empty since phase B) or
+  # at all on the corpora: a demotion is an emitter bug the certifier hides
+  # from users, and this keeps it visible. The `Test` leg runs the same tests
+  # at the default depth; this job asserts they ran, so a filter or rename
+  # cannot turn the ratchet into a silent skip.
+  format-ratchet:
+    name: Formatter certifier ratchet
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUST_MIN_STACK: 8388608
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: 1.100.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Exhaustive sweep (depth 5), corpus sweeps, range = whole file
+        env:
+          FORMAT_EXHAUSTIVE_DEPTH: "5"
+        run: |
+          set -euo pipefail
+          cargo test --release -p rustledger-parser \
+            --test format_roundtrip_properties --test range_format_equals_whole \
+            2>&1 | tee ratchet.txt
+          for t in test_format_exhaustive_short_inputs \
+                   test_format_roundtrip_on_repository_ledgers \
+                   test_format_roundtrip_on_fuzz_regressions \
+                   test_range_formatting_equals_whole_file_on_format_compat_cases; do
+            if ! grep -q "test $t ... ok" ratchet.txt; then
+              echo "::error::the ratchet test $t did not run and pass"
+              exit 1
+            fi
+          done
   # Doctests (nextest doesn't support them, only on code changes)
   doctest:
     name: Doctests
@@ -908,7 +948,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, beancount-lalr-tables, lsp-platform, mcp-server, vscode-extension, vscode-nix, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate, slim-build-no-wasmtime]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, beancount-lalr-tables, lsp-platform, mcp-server, vscode-extension, vscode-nix, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate, slim-build-no-wasmtime, format-ratchet]
     steps:
       - name: Check results
         run: |
@@ -1016,7 +1056,8 @@ jobs:
           # lsp-platform (windows + macos) is in the gate: it found 25 real
           # defects on its first runs, every one of them unreachable from
           # Linux, so a red platform leg must block exactly like a red `ci`.
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.lsp-platform.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bench-build.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
+          # format-ratchet: the formatter certifier ratchet (ADR 0009).
+          results="${{ needs.format-ratchet.result }} ${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.lsp-platform.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bench-build.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

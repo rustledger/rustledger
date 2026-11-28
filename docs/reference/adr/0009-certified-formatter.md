@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted. Phases A (the certifier) and B (one frame, fixed-point
-idempotence) are implemented; phase C is planned (see
-[Phase plan](#phase-plan)).
+Accepted and implemented: phase A (the certifier), phase B (one frame,
+fixed-point idempotence) and phase C (range formatting on the driver, the
+format-neutral frontend trait); see [Phase plan](#phase-plan).
 
 ## Context
 
@@ -121,6 +121,51 @@ the safe output; the tests do not accept it:
   removes its lines. It is empty since phase B. Every input of the sweep
   must keep every promise.
 
+### The frontend trait
+
+The driver and the certifier (`crates/rustledger-parser/src/cst/certify.rs`)
+name no grammar. A `Frontend` reads a text (`read`) and supplies, for a
+reading:
+
+- *segment*: `items`, the top-level items with their byte range, whether
+  they are opaque (hold an error, or lie outside the range being
+  formatted) and whether they have content; and `node_contents`, where each
+  top-level node's content starts and ends, for the boundary check;
+- *emit*: `emit`, the formatted text under a `Plan` (the items forced
+  opaque), recording where each item went;
+- *meaning*: `meanings` (each value with the span it was read from) and
+  `same` (equality of two values), `comments` (the comment stream, with
+  frontend-named structure markers), `errors` and `defects` (where reported
+  and quieted errors start).
+
+The beancount frontend is `Beancount` in `format.rs` (the emitter) and
+`meaning.rs` (`same_directive`, the comment stream, the oracle hooks).
+Everything about beancount's bytes stays in the frontend: the leading BOM
+the parser strips, the CST frame, which nodes are directives.
+
+The leading BOM keeps one rule in the frontend's emitter: it is dropped,
+unless a second BOM follows it (the parser reads that one as text, and with
+the first gone it would become the leading BOM the next pass drops). Making
+it a certifier decision (drop it, and keep it only when dropping changes the
+reading) was considered and not done: the BOM is in no item, so the
+certifier would need a pseudo-item for it and a rule to blame it for the
+failures no item explains, in the format-neutral driver, for a byte only one
+grammar has. The rule is one condition on the tree's first token.
+
+### Range formatting
+
+Range formatting runs the same driver. The selection is snapped to the
+top-level directives and comments it touches, as before (a snap covering an
+unparsable region declines); then the whole text is formatted with every
+element outside the snap copied as written, its spacing included, and its
+items reported opaque. The replacement is the output between the unchanged
+prefix and suffix. The result is certified and a fixed point, like the
+whole file's, and equals whole-file formatting restricted to the range
+(`range_format_equals_whole`: formatting a ledger one item at a time by
+range edits ends where formatting it whole does). Text in no range (a gap
+before the first directive, the leading BOM) is only normalized by
+whole-file formatting.
+
 ### Prior art
 
 - **Black** (Python) checks, in its default safe mode, that the reformatted
@@ -174,11 +219,15 @@ before (#1335, #2794).
   and opaque items are copied byte for byte (phase A trimmed their
   trailing blanks, folded their CRLFs and added a final newline, which is
   how `2024-01-01 A; ` gained a comment).
-- **Phase C**: range formatting on the same driver, with the items outside
-  the range forced opaque (deleting the separate range path), and the driver
-  and certifier made format-neutral behind a frontend trait (segment, emit,
-  meaning), beancount being the first frontend: other grammars (ledger,
-  hledger) are planned.
+- **Phase C** (done): range formatting on the same driver, with the items
+  outside the range forced opaque (deleting the separate range path), and the
+  driver and certifier made format-neutral behind a frontend trait (segment,
+  emit, meaning), beancount being the first frontend: other grammars (ledger,
+  hledger) are planned. See [The frontend trait](#the-frontend-trait) and
+  [Range formatting](#range-formatting). CI runs the ratchet as its own job
+  (`Formatter certifier ratchet`, part of the `build` gate): the exhaustive
+  sweep at depth 5, the corpus sweeps and the range property, each asserted
+  to have run.
 
 ## Consequences
 

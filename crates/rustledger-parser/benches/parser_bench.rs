@@ -203,6 +203,17 @@ fn bench_format_source_vs_with_parsed(c: &mut Criterion) {
             },
         );
 
+        // Already-canonical input (format-on-save of a formatted file): the
+        // certifier's fast path, output == input, skips the reparse.
+        let canonical = format_source(&ledger);
+        group.bench_with_input(
+            BenchmarkId::new("format_source_canonical", size),
+            &canonical,
+            |b, canonical| {
+                b.iter(|| format_source(std::hint::black_box(canonical)));
+            },
+        );
+
         // Cached path: skips the parse + the alignment walk. The
         // `parse_result` is set up outside the iter() closure so
         // its construction cost is excluded from the measurement

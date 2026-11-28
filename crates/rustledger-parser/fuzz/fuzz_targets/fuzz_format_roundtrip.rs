@@ -10,6 +10,7 @@
 use libfuzzer_sys::fuzz_target;
 
 #[path = "common/format_roundtrip.rs"]
+#[allow(dead_code)]
 mod format_roundtrip;
 
 fuzz_target!(|data: &[u8]| {

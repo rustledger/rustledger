@@ -59,13 +59,20 @@ pub mod logos_lexer;
 /// the PR #1284 reviews, so a future deprecation can be done at
 /// exactly one site.
 pub mod format {
+    #[doc(hidden)]
+    pub use crate::cst::certify::{
+        __comment_stream, __defect_lines, __error_lines, __same_meaning, same_directive,
+    };
+    #[doc(hidden)]
+    pub use crate::cst::format::{__format_source_report, FormatReport};
     pub use crate::cst::format::{
         CanonicalizeError, GroupingStyle, PostingAlignment, canonicalize_directives,
         compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, display_width,
         format_node, format_node_grouped, format_node_range, format_node_range_grouped,
         format_node_range_with_alignment, format_node_with_alignment, format_parsed_range,
         format_source, format_source_grouped, format_source_with_parsed,
-        lf_to_crlf_outside_strings, try_format_source, try_format_source_grouped,
+        format_source_with_parsed_grouped, lf_to_crlf_outside_strings, try_format_source,
+        try_format_source_grouped,
     };
 }
 

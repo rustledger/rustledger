@@ -1,0 +1,6 @@
+# Inputs of `test_format_exhaustive_short_inputs` the formatter's certifier
+# demotes (ADR 0009): emitter bugs it keeps from users. May only shrink.
+# Regenerate: FORMAT_DEMOTIONS_UPDATE=1 cargo test -p rustledger-parser \
+#   --test format_roundtrip_properties test_format_exhaustive_short_inputs
+"2024-01-01 A; "
+"2024-01-01 A;2024-01-01 "

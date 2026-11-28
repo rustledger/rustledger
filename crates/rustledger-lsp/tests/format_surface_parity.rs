@@ -234,8 +234,8 @@ fn same_meaning(what: &str, src: &str, out: &str) -> Result<(), String> {
         items.into_iter().map(|s| strip_comment_lists(&s)).collect()
     };
     let (m_before, m_after) = (
-        drop_attachment(format_roundtrip::meaning(src, &before, &skip(src, &before))),
-        drop_attachment(format_roundtrip::meaning(out, &after, &skip(out, &after))),
+        drop_attachment(meaning(src, &before, &skip(src, &before))),
+        drop_attachment(meaning(out, &after, &skip(out, &after))),
     );
     if m_before != m_after {
         return report(format!("values {m_before:#?} became {m_after:#?}"));
@@ -443,4 +443,123 @@ fn strip_comment_lists(debug: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+/// `Debug` text with every `span: Span { start: N, end: N }` removed, so two
+/// values that differ only in where they sit in the file compare equal while
+/// every other field, decimal scale included, still counts.
+fn strip_spans(debug: &str) -> String {
+    const OPEN: &str = "span: Span { start: ";
+    let mut out = String::with_capacity(debug.len());
+    let mut rest = debug;
+    while let Some(i) = rest.find(OPEN) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let end = after.find('}').map_or(after.len(), |j| j + 1);
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `debug` with the trailing blanks of every comment string inside a
+/// `CommentList(...)` removed. A comment's value keeps the blanks after its
+/// text, and the canonical form trims trailing whitespace; that is a
+/// whitespace change, not a change of meaning.
+fn trim_comment_blanks(debug: &str) -> String {
+    const OPEN: &str = "CommentList(Some([";
+    let mut out = String::with_capacity(debug.len());
+    let mut rest = debug;
+    while let Some(i) = rest.find(OPEN) {
+        out.push_str(&rest[..i + OPEN.len()]);
+        rest = &rest[i + OPEN.len()..];
+        // Walk the list's string literals (Debug-escaped) up to its `]`.
+        let mut chars = rest.char_indices();
+        let mut in_string = false;
+        let mut end = rest.len();
+        while let Some((j, c)) = chars.next() {
+            match c {
+                '\\' if in_string => {
+                    out.push(c);
+                    if let Some((_, e)) = chars.next() {
+                        out.push(e);
+                    }
+                    continue;
+                }
+                '"' if in_string => {
+                    loop {
+                        if out.ends_with(' ') {
+                            out.pop();
+                        } else if out.ends_with("\\t") {
+                            out.truncate(out.len() - 2);
+                        } else {
+                            break;
+                        }
+                    }
+                    in_string = false;
+                }
+                '"' => in_string = true,
+                ']' if !in_string => {
+                    end = j;
+                    break;
+                }
+                _ => {}
+            }
+            out.push(c);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Everything a parse of `src` yields that carries meaning, spans dropped,
+/// leaving out what touches a line in `skip` (0-based), as `Debug` text.
+///
+/// Not the formatter's definition (`same_directive`, which the round-trip
+/// oracle uses): this test edits the `Debug` text to compare values without
+/// their comment attachment, which surface cleanup may move.
+fn meaning(src: &str, r: &rustledger_parser::ParseResult, skip: &[usize]) -> Vec<String> {
+    let lines_of = |span: rustledger_parser::Span| {
+        let line = |at: usize| newlines_before(src, at);
+        let (a, b) = (
+            line(span.start),
+            line(span.end.saturating_sub(1).max(span.start)),
+        );
+        !skip.iter().any(|l| (a..=b).contains(l))
+    };
+    let mut out: Vec<String> = r
+        .directives
+        .iter()
+        .filter(|d| lines_of(d.span))
+        .map(|d| trim_comment_blanks(&strip_spans(&format!("{:?}", d.value))))
+        .collect();
+    out.extend(
+        r.options
+            .iter()
+            .filter(|(_, _, s)| lines_of(*s))
+            .map(|(k, v, _)| format!("option {k:?} {v:?}")),
+    );
+    out.extend(
+        r.includes
+            .iter()
+            .filter(|(_, s)| lines_of(*s))
+            .map(|(p, _)| format!("include {p:?}")),
+    );
+    out.extend(
+        r.plugins
+            .iter()
+            .filter(|(_, _, s)| lines_of(*s))
+            .map(|(n, c, _)| format!("plugin {n:?} {c:?}")),
+    );
+    out
+}
+
+/// How many `\n`s `src` holds before byte `at`.
+fn newlines_before(src: &str, at: usize) -> usize {
+    let at = at.min(src.len());
+    let at = (0..=at)
+        .rev()
+        .find(|&i| src.is_char_boundary(i))
+        .unwrap_or(0);
+    src[..at].matches('\n').count()
 }

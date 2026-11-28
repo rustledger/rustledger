@@ -37,7 +37,9 @@
 //! the parser's index. Separating the concerns keeps the AST
 //! value types pure.
 
-use crate::{Directive, IncompleteAmount, MetaValue, Metadata, PriceAnnotation};
+use crate::{
+    CostNumber, Decimal, Directive, IncompleteAmount, MetaValue, Metadata, PriceAnnotation,
+};
 
 /// Walk every position a currency name can appear in this directive,
 /// invoking `visit` once per occurrence.
@@ -408,6 +410,136 @@ fn visit_price_currency<'a>(price: &'a PriceAnnotation, visit: &mut impl FnMut(&
             }
         }
         None => {}
+    }
+}
+
+/// Walk every decimal number in this directive, invoking `visit` once per
+/// occurrence, in source order.
+///
+/// `Decimal`'s `PartialEq` ignores scale (`1.5 == 1.50`), but the scale is
+/// meaning in beancount (display precision, tolerance inference), so a
+/// comparison that must see it walks the numbers with this and compares
+/// each one exactly (the formatter's certifier, which checks that
+/// formatting kept what a file means).
+///
+/// Positions covered:
+/// - `Posting.units` (`Complete` and `NumberOnly`)
+/// - `Posting.cost.number` (every `CostNumber` shape)
+/// - `Posting.price` amount
+/// - `Balance.amount`, `Balance.tolerance`
+/// - `Price.amount`
+/// - `MetaValue::Number` / `MetaValue::Amount` in any directive's or
+///   posting's metadata, in insertion order
+/// - `Custom.values` entries that are `MetaValue::Number` or
+///   `MetaValue::Amount`
+pub fn visit_numbers<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a Decimal)) {
+    match directive {
+        Directive::Transaction(txn) => {
+            visit_meta_numbers(&txn.meta, visit);
+            for posting in &txn.postings {
+                if let Some(units) = &posting.units {
+                    visit_incomplete_amount_number(units, visit);
+                }
+                if let Some(cost) = &posting.cost
+                    && let Some(number) = &cost.number
+                {
+                    match number {
+                        CostNumber::PerUnit { value } | CostNumber::Total { value } => visit(value),
+                        CostNumber::PerUnitFromTotal(booked) => {
+                            visit(&booked.per_unit);
+                            visit(&booked.total);
+                        }
+                        CostNumber::Compound { per_unit, total } => {
+                            visit(per_unit);
+                            visit(total);
+                        }
+                    }
+                }
+                if let Some(price) = &posting.price
+                    && let Some(amount) = &price.amount
+                {
+                    visit_incomplete_amount_number(amount, visit);
+                }
+                visit_meta_numbers(&posting.meta, visit);
+            }
+        }
+        Directive::Balance(bal) => {
+            visit(&bal.amount.number);
+            if let Some(tolerance) = &bal.tolerance {
+                visit(tolerance);
+            }
+            visit_meta_numbers(&bal.meta, visit);
+        }
+        Directive::Price(price) => {
+            visit(&price.amount.number);
+            visit_meta_numbers(&price.meta, visit);
+        }
+        Directive::Custom(custom) => {
+            for v in &custom.values {
+                visit_meta_value_number(v, visit);
+            }
+            visit_meta_numbers(&custom.meta, visit);
+        }
+        Directive::Open(open) => visit_meta_numbers(&open.meta, visit),
+        Directive::Close(close) => visit_meta_numbers(&close.meta, visit),
+        Directive::Commodity(comm) => visit_meta_numbers(&comm.meta, visit),
+        Directive::Pad(pad) => visit_meta_numbers(&pad.meta, visit),
+        Directive::Event(event) => visit_meta_numbers(&event.meta, visit),
+        Directive::Query(query) => visit_meta_numbers(&query.meta, visit),
+        Directive::Note(note) => visit_meta_numbers(&note.meta, visit),
+        Directive::Document(doc) => visit_meta_numbers(&doc.meta, visit),
+    }
+}
+
+/// Walk every metadata block of this directive, invoking `visit` once per
+/// block: the directive's own, then each posting's, in source order.
+///
+/// `Metadata`'s `PartialEq` is order-independent, while the order its keys
+/// were written in reaches every printed form; a comparison that must see
+/// the order walks the blocks with this.
+pub fn visit_metadata<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a Metadata)) {
+    visit(directive.meta());
+    if let Directive::Transaction(txn) = directive {
+        for posting in &txn.postings {
+            visit(&posting.meta);
+        }
+    }
+}
+
+fn visit_incomplete_amount_number<'a>(
+    amount: &'a IncompleteAmount,
+    visit: &mut impl FnMut(&'a Decimal),
+) {
+    match amount {
+        IncompleteAmount::Complete(a) => visit(&a.number),
+        IncompleteAmount::NumberOnly(n) => visit(n),
+        IncompleteAmount::CurrencyOnly(_) => {}
+    }
+}
+
+fn visit_meta_numbers<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a Decimal)) {
+    for v in meta.values() {
+        visit_meta_value_number(v, visit);
+    }
+}
+
+/// Per-`MetaValue` number extractor. See `visit_meta_value_currency` for the
+/// no-`_ => {}`-catch-all rationale.
+fn visit_meta_value_number<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a Decimal)) {
+    match v {
+        MetaValue::Number(n) => visit(n),
+        MetaValue::Amount(a) => visit(&a.number),
+        // Variants that carry no decimal (`Int` is an integer, which
+        // `PartialEq` already compares exactly).
+        MetaValue::String(_)
+        | MetaValue::Account(_)
+        | MetaValue::Currency(_)
+        | MetaValue::Tag(_)
+        | MetaValue::Link(_)
+        | MetaValue::Date(_)
+        | MetaValue::Bool(_)
+        | MetaValue::Int(_)
+        | MetaValue::None => {}
     }
 }
 
@@ -784,5 +916,72 @@ mod tests {
         assert_eq!(by_curr("EUR"), 1);
         assert_eq!(by_curr("GBP"), 1);
         assert_eq!(by_curr("JPY"), 1);
+    }
+
+    /// `visit_numbers` reaches every decimal position, in source order, so a
+    /// comparison through it sees each one's scale.
+    #[test]
+    fn test_visit_numbers_reaches_every_position() {
+        let mut meta: Metadata = Default::default();
+        meta.insert("first", MetaValue::Number(dec!(1.0)));
+        meta.insert("second", MetaValue::Amount(Amount::new(dec!(2.00), "USD")));
+        let mut posting = Posting::new("Assets:A", Amount::new(dec!(3.000), "X"))
+            .with_cost(CostSpec {
+                number: Some(crate::CostNumber::Compound {
+                    per_unit: dec!(4),
+                    total: dec!(5.5),
+                }),
+                ..Default::default()
+            })
+            .with_price(crate::PriceAnnotation::unit(Amount::new(dec!(6.25), "USD")));
+        posting.meta = meta.clone().into();
+        let txn =
+            Transaction::new(date(2024, 1, 1), "t").with_posting(Spanned::synthesized(posting));
+        let mut balance = Balance::new(date(2024, 1, 2), "Assets:A", Amount::new(dec!(7), "X"));
+        balance.tolerance = Some(dec!(0.01));
+        let price = Price::new(date(2024, 1, 3), "X", Amount::new(dec!(8.10), "USD"));
+        let mut custom = Custom::new(date(2024, 1, 4), "budget");
+        custom.values = vec![
+            MetaValue::Number(dec!(9)),
+            MetaValue::Amount(Amount::new(dec!(10.5), "USD")),
+        ];
+        let open = Open::new(date(2024, 1, 5), "Assets:A").with_meta(meta);
+
+        let mut seen = Vec::new();
+        for d in [
+            Directive::Transaction(txn),
+            Directive::Balance(balance),
+            Directive::Price(price),
+            Directive::Custom(custom),
+            Directive::Open(open),
+        ] {
+            visit_numbers(&d, &mut |n| seen.push(n.to_string()));
+        }
+        assert_eq!(
+            seen,
+            [
+                "3.000", "4", "5.5", "6.25", "1.0", "2.00", "7", "0.01", "8.10", "9", "10.5",
+                "1.0", "2.00"
+            ]
+        );
+    }
+
+    /// `visit_metadata` visits the directive's block, then each posting's.
+    #[test]
+    fn test_visit_metadata_visits_every_block_in_order() {
+        let mut first: Metadata = Default::default();
+        first.insert("on_txn", MetaValue::Bool(true));
+        let mut second: Metadata = Default::default();
+        second.insert("on_posting", MetaValue::Bool(true));
+        let mut posting = Posting::new("Assets:A", Amount::new(dec!(1), "X"));
+        posting.meta = second.into();
+        let mut txn =
+            Transaction::new(date(2024, 1, 1), "t").with_posting(Spanned::synthesized(posting));
+        txn.meta = first.into();
+        let mut keys = Vec::new();
+        visit_metadata(&Directive::Transaction(txn), &mut |m| {
+            keys.extend(m.keys().map(ToString::to_string));
+        });
+        assert_eq!(keys, ["on_txn", "on_posting"]);
     }
 }

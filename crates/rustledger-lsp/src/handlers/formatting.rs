@@ -30,7 +30,7 @@ use rustledger_parser::ParseResult;
 #[cfg(test)]
 use rustledger_parser::format::format_source;
 use rustledger_parser::format::{
-    GroupingStyle, format_node_grouped, format_source_with_parsed, lf_to_crlf_outside_strings,
+    GroupingStyle, format_source_with_parsed_grouped, lf_to_crlf_outside_strings,
 };
 
 use super::utils::{LineIndex, PositionEncoding};
@@ -104,25 +104,14 @@ pub(crate) fn canonical_text(
     if !parse_result.errors.is_empty() {
         return None;
     }
-    // Reuse the cached parse + alignment via
-    // `format_source_with_parsed` instead of re-parsing `source` and
-    // walking every posting again. On the format-on-save path this
-    // saves an entire `parse_via_cst` + a full `compute_alignment`
-    // walk per request — on a large ledger those two dominate per-
-    // save latency. Output is byte-identical to
-    // `format_source(source)`; pinned by
-    // `format_source_with_parsed_matches_format_source` in the
-    // parser crate's tests.
-    let mut formatted = if style.groups_anything() {
-        // The alignment cached on `ParseResult` was measured WITHOUT
-        // grouping, and a grouped numeral is wider, so it cannot be
-        // reused here — see `format_node_with_style`'s invariant. Take
-        // the re-measuring path instead of emitting a misaligned
-        // currency column.
-        format_node_grouped(&parse_result.syntax_node(), style)
-    } else {
-        format_source_with_parsed(parse_result, source)
-    };
+    // Reuse the cached parse via `format_source_with_parsed_grouped`
+    // instead of re-parsing `source`. On the format-on-save path this
+    // saves an entire `parse_via_cst` per request. Output is byte-identical
+    // to `format_source_grouped(source, style)`, certified the same way
+    // (ADR 0009); pinned by `format_source_with_parsed_matches_format_source`
+    // in the parser crate's tests. (The alignment cached on `ParseResult` is
+    // measured ungrouped; the function re-measures under a grouping style.)
+    let mut formatted = format_source_with_parsed_grouped(parse_result, source, style);
     if source.contains("\r\n") {
         formatted = lf_to_crlf_outside_strings(&formatted);
     }

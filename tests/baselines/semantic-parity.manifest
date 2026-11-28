@@ -15,8 +15,6 @@
 #@inputs compat 730
 #@inputs gen 10000
 @ categories
-15	entries|extra-in-impl|close|-|-
-8	entries|extra-in-impl|open|-|-
 5	options|display_precision|display_precision|-|-
 4	entries|postings.order|transaction|-|multi-currency
 3	balances|extra-in-impl|account|-|-
@@ -30,40 +28,17 @@
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
 @ deviations
-808	average-booking
+813	average-booking
 163	included-file-plugins
 120	currency-accounts-posting-order
 6	custom-display-precision
 5	cross-file-booking-order
 @ mismatches
-00eb68bc286d	entries|extra-in-impl|close|-|-
-03b0c4cf0b31	entries|extra-in-impl|close|-|-
-10ce2e2d51d8	entries|extra-in-impl|close|-|-
 29fc0a148ce6	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
-33dfeb4cffcf	entries|extra-in-impl|close|-|-
-38e76617b85d	entries|extra-in-impl|close|-|-
 486a8d296a0c	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
 530e8ed7a62c	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
-59c0449f962c	entries|extra-in-impl|open|-|-
-7204df4c6d4e	entries|extra-in-impl|open|-|-
-75478730bf5e	entries|extra-in-impl|close|-|-
-803e7bd1fc14	entries|extra-in-impl|open|-|-
-82a5cc9ada9d	entries|extra-in-impl|close|-|-
-86d8c20d9b8e	entries|extra-in-impl|close|-|-
-91ebff5d080f	entries|extra-in-impl|open|-|-
 a65697d26dae	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
-a6aaa10f06ca	entries|extra-in-impl|close|-|-
-b32853496b9d	entries|extra-in-impl|close|-|-
-b9c6f8392b50	entries|extra-in-impl|open|-|-
-bc4534479c81	entries|extra-in-impl|close|-|-
-bd9f1e075aed	entries|extra-in-impl|close|-|-
-c531b82bfee1	entries|extra-in-impl|open|-|-
-ccdc45784602	entries|extra-in-impl|open|-|-
-d06903fccdda	entries|extra-in-impl|open|-|-
-db4c2b5de7f7	entries|extra-in-impl|close|-|-
 de6bba7f98fb	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
-fa3d02023e0b	entries|extra-in-impl|close|-|-
-fc244c59bb13	entries|extra-in-impl|close|-|-
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount
@@ -422,6 +397,7 @@ compat	d8fdb06cb306	match	tests/compatibility/files/double-entry-generator/examp
 compat	3d8605de1957	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v1_example-icbc-debit-v1-output.beancount
 compat	ec9e704870be	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v2_example-icbc-debit-v2-output.beancount
 compat	14d4aca7aa35	match	tests/compatibility/files/double-entry-generator/example_jd_example-jd-output.beancount
+compat	0f70e7780250	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
 compat	d5bfd0dd43e8	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
 compat	848812ae9735	balances|extra-in-impl|account|-|-	tests/compatibility/files/double-entry-generator/example_oklink_example-oklink-output.beancount
 compat	e16a6ce3e57a	match	tests/compatibility/files/double-entry-generator/example_spdb_debit_example-spdb_debit-output.beancount

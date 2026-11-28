@@ -608,7 +608,8 @@ fn test_parse_names_the_character_a_currency_cannot_end_in() {
 /// newline is an error that points at the keyword, so the error-tolerant
 /// formatter copies it verbatim; an empty span at the very end overlapped no
 /// directive, so the line was rebuilt as `pushtag ` and trimmed on the next
-/// pass, which is not idempotent.
+/// pass, which is not idempotent. The broken last line is copied as written,
+/// without a newline (ADR 0009 phase B).
 #[test]
 fn test_format_source_is_idempotent_on_a_bare_keyword_at_eof() {
     use rustledger_parser::format::format_source;
@@ -617,7 +618,7 @@ fn test_format_source_is_idempotent_on_a_bare_keyword_at_eof() {
     ] {
         assert!(!parse(src).errors.is_empty(), "{src:?}");
         let once = format_source(src);
-        assert_eq!(once, format!("{src}\n"), "{src:?}");
+        assert_eq!(once, src, "{src:?}");
         assert_eq!(format_source(&once), once, "{src:?}: not idempotent");
     }
 }

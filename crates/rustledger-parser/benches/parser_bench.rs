@@ -203,6 +203,16 @@ fn bench_format_source_vs_with_parsed(c: &mut Criterion) {
             },
         );
 
+        // The same ledger with CRLF line endings (a Windows-authored file).
+        let crlf = ledger.replace('\n', "\r\n");
+        group.bench_with_input(
+            BenchmarkId::new("format_source_crlf", size),
+            &crlf,
+            |b, crlf| {
+                b.iter(|| format_source(std::hint::black_box(crlf)));
+            },
+        );
+
         // Already-canonical input (format-on-save of a formatted file): the
         // certifier's fast path, output == input, skips the reparse.
         let canonical = format_source(&ledger);

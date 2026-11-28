@@ -30,7 +30,7 @@ use rustledger_parser::ParseResult;
 #[cfg(test)]
 use rustledger_parser::format::format_source;
 use rustledger_parser::format::{
-    GroupingStyle, format_source_with_parsed_grouped, lf_to_crlf_outside_strings,
+    FormatOptions, GroupingStyle, LineEnding, format_parsed_with_options,
 };
 
 use super::utils::{LineIndex, PositionEncoding};
@@ -69,8 +69,8 @@ pub fn handle_formatting(
 /// to fall back to surface cleanup (the document-format request does,
 /// alignment-named commands do not).
 ///
-/// **CRLF preservation.** `format_source` always emits LF; when the
-/// source uses CRLF, we re-inject `\r` before every emitted `\n` so
+/// **CRLF preservation.** `format_source` emits LF; when the source uses
+/// CRLF, the formatter is asked to write CRLF (`LineEnding::Crlf`) so
 /// the diff only fires on ACTUAL canonical-form changes (alignment,
 /// blank-line collapse, comment normalization). Without this, every
 /// line on a CRLF file would diff (because of the `\r` removal),
@@ -93,7 +93,7 @@ pub fn format_document(
     Some(minimal_diff_edits(source, &formatted, encoding))
 }
 
-/// The canonical form of a clean `source`, with CRLF re-injected on a CRLF
+/// The canonical form of a clean `source`, written with CRLF on a CRLF
 /// document; `None` when the parse has errors. What [`format_document`]
 /// diffs against.
 pub(crate) fn canonical_text(
@@ -111,11 +111,27 @@ pub(crate) fn canonical_text(
     // (ADR 0009); pinned by `format_source_with_parsed_matches_format_source`
     // in the parser crate's tests. (The alignment cached on `ParseResult` is
     // measured ungrouped; the function re-measures under a grouping style.)
-    let mut formatted = format_source_with_parsed_grouped(parse_result, source, style);
-    if source.contains("\r\n") {
-        formatted = lf_to_crlf_outside_strings(&formatted);
+    // On a CRLF document the formatter writes CRLF itself (the line endings
+    // it owns; text it copies keeps its own), and certifies what it wrote.
+    Some(format_parsed_with_options(
+        parse_result,
+        source,
+        options_for(source, style),
+    ))
+}
+
+/// The formatter options for `source`: its ledger's grouping `style`, and
+/// CRLF line endings when the document has them, so the edits only fire on
+/// canonical-form changes.
+pub(crate) fn options_for<'a>(source: &str, style: GroupingStyle<'a>) -> FormatOptions<'a> {
+    FormatOptions {
+        grouping: style,
+        line_ending: if source.contains("\r\n") {
+            LineEnding::Crlf
+        } else {
+            LineEnding::Lf
+        },
     }
-    Some(formatted)
 }
 
 /// `source` with `edits` applied, as a client applies them (every range

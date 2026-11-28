@@ -1159,7 +1159,7 @@ impl TokenIter<'_> {
     /// first token of a line) is still an error, where beancount takes it as
     /// a token separator. (In a comment it is comment text, as in beancount.)
     /// The reason was that the formatter folded such a `\r` into a line
-    /// break; it now keeps it (`crlf_to_lf_outside_strings`), so this
+    /// break; it now reads the source as written (no fold), so this
     /// deviation (#2804) could be revisited. Pinned by
     /// `test_parse_cr_with_more_of_the_line_after_it_stays_an_error` in
     /// `tests/stray_cr.rs`. The #2966 case cannot reach the formatter that
@@ -1980,10 +1980,8 @@ const fn is_lone_capital_token(token: &Token<'_>) -> bool {
 /// a `TAG`, as beancount's longer tag match wins. The one rule for the
 /// lexer's column-0 `#`, `!`, `&`, `?`, `:` and `%` arms in `TokenIter` and
 /// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
-/// `*` heading), of the formatter's `emit_error_node`, and of the LSP's
-/// parse-error surface cleanup (`clean_line` in `rustledger-lsp`), which is
-/// why it is public. The formatter's line-ending helpers follow it through
-/// the lexer itself (`format::StringLiterals`).
+/// `*` heading), and of the LSP's parse-error surface cleanup (`clean_line`
+/// in `rustledger-lsp`), which is why it is public.
 #[must_use]
 pub fn beancount_ignores_line(line: &str) -> bool {
     match line.as_bytes() {
@@ -2015,8 +2013,7 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
 /// round-trip (#2769). A run of spaces, tabs and `\r`s from a `\r` on before
 /// it (`\r\r\n`, `\r \r\n`), or before the end of the source, is left out
 /// too: it lexes as the `Whitespace` trivia that follows the line (#2774),
-/// as after any other token, and `format::crlf_to_lf_outside_strings` drops
-/// it, so the formatter reads the line the same with or without that fold
+/// as after any other token, so a line reads the same with or without it
 /// (#2779). Spaces and tabs before the run's first `\r` stay in the line,
 /// and so does a `\r` with more of the line after it. The result sits on a
 /// `\r`, a `\n` or the end of the source, so it is always a char boundary.

@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted. Phase A (the certifier) is implemented; phases B and C are planned
-(see [Phase plan](#phase-plan)).
+Accepted. Phases A (the certifier) and B (one frame, fixed-point
+idempotence) are implemented; phase C is planned (see
+[Phase plan](#phase-plan)).
 
 ## Context
 
@@ -46,16 +47,29 @@ by a test oracle (`fuzz/fuzz_targets/common/format_roundtrip.rs`).
 item whose canonical form does not read back as the original did.** Three
 stages:
 
-1. **Classify.** Split the file into items: each top-level node of the tree
+1. **Classify.** Parse the source as written, once, in one frame (no text is
+   rewritten before the parse: the lexer reads `\r\n` as a line ending and a
+   stray `\r` run as trivia). Split the file into items: each top-level node of the tree
    (a directive, or a region the parser could not read) is one, and the text
    between them (blank lines, file-level comments, a BOM) is the separator.
    An item holding a parse error (reported, or quieted by bison's recovery
    window: `ParseResult` errors and `defect_spans`, the oracle-calibrated
    classification, not a second classifier) is **opaque**: copied byte for
-   byte. Every other item is **clean**: rebuilt by the canonical emitter.
+   byte, from its first non-blank line to the end of its last one, that
+   line's own line ending included. Every other item is **clean**: rebuilt by
+   the canonical emitter.
 1. **Emit.** Clean items through the existing canonical `emit_*` functions,
    unchanged; opaque items verbatim; the separator by the driver's spacing
-   rules. The walk records the output range of each item.
+   rules. The driver owns every byte it writes: the blank lines and comments
+   between items, the final newline (not after an opaque last line, which
+   would be a change to text it does not own), the leading BOM (dropped,
+   unless a second BOM follows), and the line ending of every line it or the
+   emitter writes, `\n` or, as an option, `\r\n` (the LSP on a CRLF
+   document). The writer records the line endings it writes, so the emitter
+   finds the end of a line it wrote without reading its output again, and
+   no decision anywhere reads the text through a second lexer pass: one
+   token stream, the tree's, is behind every one (the #3085 lesson). The
+   walk records the output range of each item.
 1. **Certify and demote.** Reparse the output and check, per item: the output
    holds exactly one node in the item's range (same boundaries); the item's
    directives, options, includes and plugins are the same (structural
@@ -63,9 +77,14 @@ stages:
    `PartialEq` does not see: `same_directive`); its comment stream is the
    same (same text in the same slot); every line holding a reported error is
    kept verbatim and no line gains one that the input did not already hold
-   (reported or quieted); and formatting the output again, with the same
-   items kept, gives the output byte for byte. An item that fails is
-   **demoted** to opaque and the file is emitted again.
+   (reported or quieted). An item that fails is **demoted** to opaque and the
+   file is emitted again.
+1. **Fixed point.** The certified output `y` is returned only if certifying
+   `y` again gives `y`. Formatting `y` then runs that same certification
+   first, gets its own input back, and returns it: `f(f(x)) == f(x)` holds by
+   construction, not by the emitter's good behavior. When `y` is not a
+   fixed point, the item at the first difference is demoted and `x`
+   certified again; when that item is already opaque, `x` is returned.
 
 Demotion only grows the set of opaque items, so the loop terminates. When a
 failure cannot be pinned on an item the formatter can still demote (the item
@@ -99,7 +118,8 @@ the safe output; the tests do not accept it:
   `\r`, `\r\n`, `A`, `;`, `*`, a space, a date) and pins the inputs the
   certifier demotes in `tests/format_roundtrip_common/exhaustive_demotions.manifest`.
   The list may only shrink: a new entry is a new emitter bug, and a fix
-  removes its lines. Every input of the sweep must keep every promise.
+  removes its lines. It is empty since phase B. Every input of the sweep
+  must keep every promise.
 
 ### Prior art
 
@@ -119,8 +139,12 @@ before (#1335, #2794).
 
 - **Time.** Certification reparses the output and formats it once more.
   Measured with `crates/rustledger-parser/benches/parser_bench.rs`
-  (`format_source_vs_with_parsed`, 1000 transactions): `format_source`
-  4.0 ms → 9.9 ms, `format_source_with_parsed` 1.5 ms → 7.1 ms. An input that
+  (`format_source_vs_with_parsed`, 1000 transactions; before the certifier,
+  phase A, phase B): `format_source` 4.0, 9.9, 8.6 ms;
+  `format_source_with_parsed` 1.5, 7.1, 6.5 ms; the same ledger with CRLF
+  line endings 17.0 ms in phase A (a second parse of the raw source),
+  9.0 ms in phase B. The floor is one parse of the output and one emit of
+  it beyond the uncertified cost. An input that
   is already canonical (format-on-save of a formatted file, `format --check`
   on a clean tree) is returned without certification, at the old cost:
   output equal to input reads as the input by being it.
@@ -133,19 +157,23 @@ before (#1335, #2794).
 
 ## Phase plan
 
-- **Phase A** (this record; 0.25): wrap the existing formatter in the
+- **Phase A** (0.25, #3086): wrap the existing formatter in the
   certifier and the demotion loop at the public entry points
   (`format_source`, `format_source_grouped`, `format_source_with_parsed`,
   `format_source_with_parsed_grouped`, `try_format_source*`, the LSP's
   document formatting). The frame exceptions stay; the certifier makes their
   disagreements safe.
-- **Phase B**: segment the original bytes in one frame (no pre-parse fold),
+- **Phase B** (done): segment the original bytes in one frame (no pre-parse fold),
   with the driver owning separators, the final newline, line endings and the
   BOM, and delete the exceptions (`RepairedLines`, `keep_bom_before_a_second`,
   `keep_cr`, the last-line rules, the string-aware scanners where nothing
   needs them). The LSP's CRLF-preserving mode becomes a driver option applied
   to the bytes the driver writes. Every decision reads the tree's one token
-  stream (the #3085 lesson).
+  stream (the #3085 lesson). Also: the fixed-point check replaced the
+  phase-A idempotence check (a second emit with the same items forced),
+  and opaque items are copied byte for byte (phase A trimmed their
+  trailing blanks, folded their CRLFs and added a final newline, which is
+  how `2024-01-01 A; ` gained a comment).
 - **Phase C**: range formatting on the same driver, with the items outside
   the range forced opaque (deleting the separate range path), and the driver
   and certifier made format-neutral behind a frontend trait (segment, emit,
@@ -160,12 +188,14 @@ before (#1335, #2794).
   absence of a known counterexample: the worst outcome is an item, or the
   file, kept as written.
 - The definition of "the same meaning" exists once, in production code.
-- Phase B can delete the frame exceptions without risk to users: a mistake
-  becomes a demotion the tests report, not corrupted output.
+- Phase B deleted the frame exceptions without risk to users: a mistake
+  would have become a demotion the tests report, not corrupted output. The
+  exhaustive sweep (every string of up to six symbols, 1.1M inputs) has no
+  demotion left.
 
 ### Negative, and accepted
 
-- Formatting a file that is not yet canonical costs about two and a half
-  times what it did (more for the cached-parse entry).
+- Formatting a file that is not yet canonical costs about twice what it did
+  before the certifier (more for the cached-parse entry).
 - A demoted item is left unformatted without telling the user. The CLI and
   the LSP do not surface demotions yet.

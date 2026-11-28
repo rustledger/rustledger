@@ -87,17 +87,26 @@ fn test_format_source_keeps_an_indented_first_line_star_an_error() {
     );
 }
 
-/// A leading BOM is dropped and CRLF is normalized to LF (the formatter's
-/// documented output), but the indentation of the first error line is kept.
+/// A leading BOM is dropped and the directives the formatter writes get LF
+/// (the formatter's documented output); the first error line is copied as
+/// written, its indentation and its own line ending included.
 #[test]
 fn test_format_source_keeps_an_indented_first_line_star_with_bom_or_crlf() {
-    let expected = "  * h\n2024-01-02 open Assets:B\n";
-    for (label, src) in [
-        ("BOM", "\u{FEFF}  * h\n2024-01-02 open Assets:B\n"),
-        ("CRLF", "  * h\r\n2024-01-02 open Assets:B\r\n"),
+    for (label, src, expected) in [
+        (
+            "BOM",
+            "\u{FEFF}  * h\n2024-01-02 open Assets:B\n",
+            "  * h\n2024-01-02 open Assets:B\n",
+        ),
+        (
+            "CRLF",
+            "  * h\r\n2024-01-02 open Assets:B\r\n",
+            "  * h\r\n2024-01-02 open Assets:B\n",
+        ),
         (
             "BOM and CRLF",
             "\u{FEFF}  * h\r\n2024-01-02 open Assets:B\r\n",
+            "  * h\r\n2024-01-02 open Assets:B\n",
         ),
     ] {
         assert_eq!(format_source(src), expected, "{label}");
@@ -142,12 +151,13 @@ fn test_format_source_keeps_junk_after_a_directive() {
     assert_unchanged("star", "2024-01-01 open Assets:A* h\n");
 }
 
-/// The file's missing final newline is still added; the `"` stays.
+/// The `"` stays, and so does the missing final newline: the broken last
+/// line is copied as written (ADR 0009).
 #[test]
 fn test_format_source_keeps_a_stray_quote_after_a_directive() {
     let src = "2024-01-01 open Assets:A\"";
     assert_errors_kept("quote", src);
-    assert_eq!(format_source(src), "2024-01-01 open Assets:A\"\n");
+    assert_eq!(format_source(src), src);
 }
 
 #[test]
@@ -225,30 +235,26 @@ fn test_format_source_keeps_an_indented_directive_an_error() {
     }
 }
 
-/// A broken directive is copied verbatim, but trailing whitespace is trimmed
-/// only outside strings: inside a multi-line string the spaces are part of
-/// its value and are kept.
+/// A broken directive is copied byte for byte: the spaces inside a
+/// multi-line string are part of its value, and the blanks after the text
+/// are text the formatter does not own either (ADR 0009).
 #[test]
 fn test_format_source_keeps_whitespace_inside_a_broken_directive_string() {
     assert_unchanged("query", "2024-01-01 query \"q\" \"SELECT\n  1  \n\" junk\n");
     assert_unchanged("note", "2024-01-01 note Assets:A \"a  \n  b\" junk\n");
-    // Trailing spaces outside the string are still trimmed.
-    assert_eq!(
-        format_source("2024-01-01 note Assets:A \"a  \n  b\" junk   \n"),
-        "2024-01-01 note Assets:A \"a  \n  b\" junk\n"
+    assert_unchanged(
+        "trailing",
+        "2024-01-01 note Assets:A \"a  \n  b\" junk   \n",
     );
 }
 
-/// CRLF is normalized to LF outside strings only, so a `\r\n` inside a broken
-/// directive's string survives, as it does in a clean one.
+/// A broken directive is copied byte for byte, its CRLFs included, so a
+/// `\r\n` inside its string survives, as it does in a clean one.
 #[test]
 fn test_format_source_keeps_a_crlf_inside_a_broken_directive_string() {
     let src = "2024-01-01 * \"multi  \r\nline\" junk\r\n  Assets:A  1 USD\r\n  Assets:B\r\n";
     assert_errors_kept("CRLF", src);
-    assert_eq!(
-        format_source(src),
-        "2024-01-01 * \"multi  \r\nline\" junk\n  Assets:A  1 USD\n  Assets:B\n"
-    );
+    assert_eq!(format_source(src), src);
     // The clean version keeps the same string bytes.
     let clean = "2024-01-01 * \"multi  \r\nline\"\r\n  Assets:A  1 USD\r\n  Assets:B\r\n";
     assert!(format_source(clean).starts_with("2024-01-01 * \"multi  \r\nline\"\n"));
@@ -461,7 +467,7 @@ fn test_format_source_keeps_blank_lines_inside_an_error_node() {
     );
     assert_eq!(
         format_source("2024-01-01 open Assets:A\n; c\n  \n* h\n"),
-        "2024-01-01 open Assets:A\n; c\n\n* h\n",
-        "a whitespace-only line stays one blank line"
+        "2024-01-01 open Assets:A\n; c\n  \n* h\n",
+        "a whitespace-only line inside a region copied as written is kept"
     );
 }

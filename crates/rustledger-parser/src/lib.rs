@@ -52,8 +52,7 @@ pub mod logos_lexer;
 /// `format_node_range`, `format_node_with_alignment`,
 /// `format_node_range_with_alignment`, `format_parsed_range`, `PostingAlignment`,
 /// `compute_alignment`, `canonicalize_directives`,
-/// `CanonicalizeError`, `lf_to_crlf_outside_strings`,
-/// `crlf_to_lf_outside_strings`, `cr_outside_strings_present`. The
+/// `CanonicalizeError`, `FormatOptions`, `LineEnding`. The
 /// flat crate-root re-exports were removed in round-5 and the
 /// duplicate `crate::cst::format` path was sealed in round-6 of
 /// the PR #1284 reviews, so a future deprecation can be done at
@@ -66,13 +65,13 @@ pub mod format {
     #[doc(hidden)]
     pub use crate::cst::format::{__format_source_report, FormatReport};
     pub use crate::cst::format::{
-        CanonicalizeError, GroupingStyle, PostingAlignment, canonicalize_directives,
-        compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, display_width,
-        format_node, format_node_grouped, format_node_range, format_node_range_grouped,
+        CanonicalizeError, FormatOptions, GroupingStyle, LineEnding, PostingAlignment,
+        canonicalize_directives, compute_alignment, display_width, format_node,
+        format_node_grouped, format_node_range, format_node_range_grouped,
         format_node_range_with_alignment, format_node_with_alignment, format_parsed_range,
-        format_source, format_source_grouped, format_source_with_parsed,
-        format_source_with_parsed_grouped, lf_to_crlf_outside_strings, try_format_source,
-        try_format_source_grouped,
+        format_parsed_range_with_options, format_parsed_with_options, format_source,
+        format_source_grouped, format_source_with_options, format_source_with_parsed,
+        format_source_with_parsed_grouped, try_format_source, try_format_source_grouped,
     };
 }
 

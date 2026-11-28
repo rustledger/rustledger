@@ -18,7 +18,7 @@ ADRs document significant architectural decisions made during rustledger develop
 | [ADR-0006](0006-wit-component-model-embedding.md) | WIT / Component-Model embedding contract | Proposed |
 | [ADR-0007](0007-average-booking-realization.md) | AVERAGE booking realizes a single weighted-average pool | Accepted |
 | [ADR-0008](0008-presentation-is-ledger-declared.md) | Presentation is declared by the ledger, resolved per surface | Accepted |
-| [ADR-0009](0009-certified-formatter.md) | The formatter certifies its own output | Accepted (Phase A) |
+| [ADR-0009](0009-certified-formatter.md) | The formatter certifies its own output | Accepted (Phases A, B) |
 
 ## About ADRs
 

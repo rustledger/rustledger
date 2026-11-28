@@ -9,8 +9,8 @@
 //! whole-file error-tolerant formatter (`format_source`, #2794).
 
 use rustledger_parser::format::{
-    GroupingStyle, crlf_to_lf_outside_strings, format_parsed_range, format_source,
-    lf_to_crlf_outside_strings,
+    FormatOptions, GroupingStyle, LineEnding, format_parsed_range,
+    format_parsed_range_with_options, format_source, format_source_with_options,
 };
 use rustledger_parser::{TextRange, TextSize, parse};
 
@@ -162,12 +162,32 @@ fn test_format_parsed_range_on_only_the_broken_directive_returns_it_verbatim() {
     assert_eq!(out, "2024-01-02 open   Assets:B junk\n");
 }
 
-/// CRLF re-injection follows the lexer's line structure: a quote the lexer
-/// does not read as a string (none closes it, or a `\` comes before the line
-/// break) ends at its own line (#2788), so the lines after it are not inside
-/// a string and keep CRLF. A copied stray `"` used to leave them LF.
+/// The error-tolerant formatter keeps a bare `\r` (classic-Mac) line ending
+/// after a stray quote: the lexer does not end a line there, so the whole
+/// line is one broken directive, copied verbatim with its error. Folding the
+/// `\r` into a line break used to turn the file into a different, valid one.
 #[test]
-fn test_lf_to_crlf_outside_strings_ends_an_unterminated_quote_at_its_line() {
+fn test_format_source_keeps_a_bare_cr_after_a_stray_quote() {
+    let src = "2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\r";
+    let out = format_source(src);
+    // Copied as written, the stray `\r` at the end of the file included.
+    assert_eq!(out, src);
+    assert_eq!(parse(&out).errors.len(), parse(src).errors.len());
+}
+
+fn crlf() -> FormatOptions<'static> {
+    FormatOptions {
+        line_ending: LineEnding::Crlf,
+        ..FormatOptions::default()
+    }
+}
+
+/// Writing CRLF follows the tree's line structure: a quote the lexer does not
+/// read as a string (none closes it, or a `\` comes before the line break)
+/// ends at its own line (#2788), so the lines after it are not inside a
+/// string and get CRLF; a string that does close keeps its own line endings.
+#[test]
+fn test_crlf_option_ends_an_unterminated_quote_at_its_line() {
     for (label, lf) in [
         (
             "stray quote",
@@ -181,34 +201,25 @@ fn test_lf_to_crlf_outside_strings_ends_an_unterminated_quote_at_its_line() {
             "backslash before the line break",
             "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
         ),
-        // With a later quote: an escape does not take a line break, so the
-        // `\` still ends the quote at its line instead of pairing it with
-        // the quote before `x`.
         (
             "backslash before the line break, later quote",
             "2024-01-01 note Assets:A \"a\\\n2024-01-02 note Assets:C \"x\"\n2024-01-03 open Assets:D\n",
         ),
     ] {
-        let crlf = lf_to_crlf_outside_strings(lf);
-        assert_eq!(crlf, lf.replace('\n', "\r\n"), "{label}");
-        // Not for a `\` right before the line break: in the CRLF text it
-        // escapes the `\r` (the lexer's `.` matches it), so the quote does
-        // pair with a later one there, and folding back leaves that `\r\n`.
-        if !lf.contains("\\\n") {
-            assert_eq!(crlf_to_lf_outside_strings(&crlf), lf, "{label}: round trip");
-        }
+        let source = lf.replace('\n', "\r\n");
+        let out = format_source_with_options(&source, crlf());
+        assert!(
+            !out.replace("\r\n", "").contains('\n'),
+            "{label}: a bare LF: {out:?}"
+        );
     }
-    // A string that does close still keeps its own line endings.
-    let multi = "2024-01-01 note Assets:A \"a\nb\"\n2024-01-02 open Assets:C\n";
-    assert_eq!(
-        lf_to_crlf_outside_strings(multi),
-        "2024-01-01 note Assets:A \"a\nb\"\r\n2024-01-02 open Assets:C\r\n"
-    );
+    // A string that does close keeps its own line endings.
+    let multi = "2024-01-01 note Assets:A \"a\nb\"\r\n2024-01-02 open Assets:C\r\n";
+    assert_eq!(format_source_with_options(multi, crlf()), multi);
 }
 
-/// The same over a range edit on a CRLF file with a copied stray quote:
-/// format the CRLF source as the LSP does (parse it as is, format the range,
-/// re-inject CRLF), and every line ending in the edit is CRLF.
+/// The same over a range edit on a CRLF file with a copied stray quote, as
+/// the LSP formats it: every line ending in the edit is CRLF.
 #[test]
 fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
     for src in [
@@ -219,29 +230,14 @@ fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
         // the edit still has CRLF throughout.
         "2024-01-01 note Assets:A \"a\\\r\n2024-01-02 note Assets:B \"x\"\r\n2024-01-03 open   Assets:C\r\n",
     ] {
-        let (_, out) = format_all(src);
-        let edit = lf_to_crlf_outside_strings(&out);
+        let parsed = parse(src);
+        let (_, edit) =
+            format_parsed_range_with_options(&parsed, TextRange::new(ts(0), ts(src.len())), crlf())
+                .unwrap_or_else(|| panic!("{src:?}: range formatting declined"));
         assert!(
             !edit.replace("\r\n", "").contains('\n'),
             "{src:?}: a bare LF in the CRLF edit: {edit:?}"
         );
         assert!(edit.contains("open Assets:C\r\n"), "{src:?}: {edit:?}");
     }
-}
-
-/// The error-tolerant formatter's line-ending fold keeps a bare `\r`
-/// (classic-Mac) line ending after a stray quote: the lexer does not end a
-/// line there, so the whole line is one broken directive, copied verbatim
-/// with its error. Folding the `\r` into a line break used to turn the file
-/// into a different, valid one. Only the stray `\r` at the end of the file,
-/// which is trivia, goes.
-#[test]
-fn test_format_source_keeps_a_bare_cr_after_a_stray_quote() {
-    let src = "2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\r";
-    let out = format_source(src);
-    assert_eq!(
-        out,
-        "2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\n"
-    );
-    assert_eq!(parse(&out).errors.len(), parse(src).errors.len());
 }

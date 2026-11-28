@@ -468,8 +468,9 @@ impl DisplayContext {
     ///
     /// Four stages, in precedence order (later wins):
     /// 1. Scan every directive's amounts to infer per-currency dp
-    ///    distributions (posting units, cost specs, price annotations,
-    ///    balance amounts + tolerances, price directives).
+    ///    distributions (posting units, every number written in a cost
+    ///    spec, price annotations, balance amounts, price directives): the
+    ///    numbers beancount's parser samples into its display context.
     /// 2. Apply `fixed_precisions` (from `option "display_precision"`).
     /// 3. Apply per-commodity `precision: N` metadata (issue #991), AFTER
     ///    the options so a commodity-level declaration wins over the
@@ -521,22 +522,15 @@ impl DisplayContext {
                         {
                             ctx.update(number, currency);
                         }
-                        // Cost (CostSpec) — feed the user-written amount to
-                        // the display-context inference. Prefer `total()`
-                        // over `per_unit()` so that for `PerUnitFromTotal`
-                        // we sample the user's literal `{{ total }}` rather
-                        // than the booker-derived per-unit (which has been
-                        // divided by |units| and typically carries far more
-                        // trailing precision than the source spec).
+                        // Cost (CostSpec): every number the user wrote in
+                        // it, as beancount's parser samples them, and no
+                        // other (`written_cost_numbers`).
                         if let Some(ref cost) = posting.cost
-                            && let (Some(number), Some(currency)) = (
-                                cost.number.map(|cn| {
-                                    cn.total().or_else(|| cn.per_unit()).unwrap_or_default()
-                                }),
-                                &cost.currency,
-                            )
+                            && let (Some(number), Some(currency)) = (cost.number, &cost.currency)
                         {
-                            ctx.update(number, currency.as_str());
+                            for written in written_cost_numbers(number) {
+                                ctx.update(written, currency.as_str());
+                            }
                         }
                         // Price annotations: included so the per-currency dist
                         // sees them, matching Python beancount's DisplayContext
@@ -554,11 +548,12 @@ impl DisplayContext {
                         }
                     }
                 }
+                // The asserted amount, not its tolerance: beancount's parser
+                // samples a balance's amount only (`1.00 ~ 0.005 USD` adds
+                // one 2 dp sample), so a tolerance written finer than the
+                // amounts must not move the currency's precision.
                 Directive::Balance(bal) => {
                     ctx.update(bal.amount.number, bal.amount.currency.as_str());
-                    if let Some(tol) = bal.tolerance {
-                        ctx.update(tol, bal.amount.currency.as_str());
-                    }
                 }
                 Directive::Price(p) => {
                     // Same rationale as posting price annotations above —
@@ -1103,6 +1098,32 @@ impl DisplayContext {
             None => format!("{sign}{integer_with_commas}"),
         }
     }
+}
+
+/// The numbers a cost spec holds as the user WROTE them: what beancount's
+/// parser samples into its display context, one sample per written number.
+///
+/// - `{a USD}`: `a`; `{{t USD}}`: `t`;
+/// - `{a # b USD}`: both `a` and `b`. A component left out (`{# b USD}`,
+///   `{a # USD}`) is held as a scale-0 zero, which is not sampled: it was
+///   not written. A written `0` is indistinguishable from it and is dropped
+///   too; it carries no fractional digits, so it could only ever add a 0 dp
+///   sample. Before, the compound form fell through to a `0` sample whatever
+///   was written, so `{143.3998 # 4.61 USD}` counted as one integer.
+/// - `PerUnitFromTotal` (booked, not as written; a caller that samples a
+///   booked stream gets it): the written total.
+fn written_cost_numbers(number: crate::CostNumber) -> impl Iterator<Item = Decimal> {
+    use crate::CostNumber;
+    let written = |d: Decimal| !(d.is_zero() && d.scale() == 0);
+    let (first, second) = match number {
+        CostNumber::PerUnit { value } | CostNumber::Total { value } => (Some(value), None),
+        CostNumber::PerUnitFromTotal(booked) => (Some(booked.total), None),
+        CostNumber::Compound { per_unit, total } => (
+            Some(per_unit).filter(|d| written(*d)),
+            Some(total).filter(|d| written(*d)),
+        ),
+    };
+    first.into_iter().chain(second)
 }
 
 #[cfg(test)]
@@ -1984,6 +2005,91 @@ mod custom_directive_precision_tests {
         ];
         let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty(), false);
         assert_eq!(ctx.get_precision("USD"), Some(2));
+    }
+
+    fn bought(cost: crate::CostSpec) -> Directive {
+        Directive::Transaction(
+            Transaction::new(naive_date(2024, 1, 2).unwrap(), "buy").with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(2), "HOOL")).with_cost(cost),
+            ),
+        )
+    }
+
+    fn balance(amount: Amount, tolerance: Option<Decimal>) -> Directive {
+        let mut b = crate::Balance::new(naive_date(2024, 1, 3).unwrap(), "Assets:Cash", amount);
+        b.tolerance = tolerance;
+        Directive::Balance(b)
+    }
+
+    /// A balance's tolerance is not sampled, as beancount's parser does not
+    /// sample it: two integer amounts and one `~ 0.05` keep USD at 0 dp
+    /// (with the tolerance sampled, the tie went to 2 dp).
+    #[test]
+    fn a_balance_tolerance_does_not_inform_precision() {
+        let directives = [
+            balance(Amount::new(dec!(1808), "USD"), None),
+            balance(Amount::new(dec!(4773), "USD"), Some(dec!(0.05))),
+        ];
+        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty(), false);
+        assert_eq!(ctx.histogram("USD"), vec![(0, 2)]);
+        assert_eq!(ctx.get_precision("USD"), Some(0));
+    }
+
+    /// Every number written in a compound cost is sampled, as beancount's
+    /// parser samples them: `{143.3998 # 4.61 USD}` is one 4 dp and one 2 dp
+    /// sample. It used to fall through to a single `0`, a 0 dp sample that
+    /// was never written.
+    #[test]
+    fn a_compound_cost_samples_both_written_numbers() {
+        let spec = crate::CostSpec::empty().with_currency("USD").with_number(
+            crate::CostNumber::Compound {
+                per_unit: dec!(143.3998),
+                total: dec!(4.61),
+            },
+        );
+        let ctx = DisplayContext::from_directives([bought(spec)].iter(), std::iter::empty(), false);
+        assert_eq!(ctx.histogram("USD"), vec![(2, 1), (4, 1)]);
+    }
+
+    /// A component left out of a compound cost (`{# 5.6 USD}`, `{1.234 #
+    /// USD}`) is not sampled: it was not written.
+    #[test]
+    fn an_omitted_compound_component_is_not_sampled() {
+        let total_only = crate::CostSpec::empty().with_currency("USD").with_number(
+            crate::CostNumber::Compound {
+                per_unit: Decimal::ZERO,
+                total: dec!(5.6),
+            },
+        );
+        let per_unit_only = crate::CostSpec::empty().with_currency("USD").with_number(
+            crate::CostNumber::Compound {
+                per_unit: dec!(1.234),
+                total: Decimal::ZERO,
+            },
+        );
+        let ctx = DisplayContext::from_directives(
+            [bought(total_only), bought(per_unit_only)].iter(),
+            std::iter::empty(),
+            false,
+        );
+        assert_eq!(ctx.histogram("USD"), vec![(1, 1), (3, 1)]);
+    }
+
+    /// A per-unit and a total cost are sampled as written.
+    #[test]
+    fn per_unit_and_total_costs_are_sampled_as_written() {
+        let per = crate::CostSpec::empty()
+            .with_currency("USD")
+            .with_number(crate::CostNumber::PerUnit { value: dec!(10.00) });
+        let total = crate::CostSpec::empty()
+            .with_currency("USD")
+            .with_number(crate::CostNumber::Total { value: dec!(5.6) });
+        let ctx = DisplayContext::from_directives(
+            [bought(per), bought(total)].iter(),
+            std::iter::empty(),
+            false,
+        );
+        assert_eq!(ctx.histogram("USD"), vec![(1, 1), (2, 1)]);
     }
 
     /// The surface rule, stated once and asserted here so a new

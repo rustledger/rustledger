@@ -15,9 +15,9 @@
 #@inputs compat 730
 #@inputs gen 10000
 @ categories
-173	options|display_precision|display_precision|-|-
 15	entries|extra-in-impl|close|-|-
 8	entries|extra-in-impl|open|-|-
+5	options|display_precision|display_precision|-|-
 4	entries|postings.order|transaction|-|multi-currency
 3	balances|extra-in-impl|account|-|-
 2	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
@@ -31,205 +31,39 @@
 1	errors|impl-more|impl:E1005|open|-|-
 @ deviations
 808	average-booking
-167	included-file-plugins
+163	included-file-plugins
 120	currency-accounts-posting-order
 6	custom-display-precision
 5	cross-file-booking-order
 @ mismatches
-0064196f5b27	options|display_precision|display_precision|-|-
-0065d9a63d87	options|display_precision|display_precision|-|-
 00eb68bc286d	entries|extra-in-impl|close|-|-
-0111aec924af	options|display_precision|display_precision|-|-
-01fbf58d5f7b	options|display_precision|display_precision|-|-
-03033782c0d0	options|display_precision|display_precision|-|-
-0363af1effcd	options|display_precision|display_precision|-|-
 03b0c4cf0b31	entries|extra-in-impl|close|-|-
-0461f1ecd3f7	options|display_precision|display_precision|-|-
-08f602df8824	options|display_precision|display_precision|-|-
-0970f1667873	options|display_precision|display_precision|-|-
-0a20bbffb8d9	options|display_precision|display_precision|-|-
-0a2bd4ead623	options|display_precision|display_precision|-|-
-0adc85a042e8	options|display_precision|display_precision|-|-
-0ae6d4342fad	options|display_precision|display_precision|-|-
-0c74312fa660	options|display_precision|display_precision|-|-
-0d1ebfdff915	options|display_precision|display_precision|-|-
-0e1dc875e43c	options|display_precision|display_precision|-|-
-0efa55e8b392	options|display_precision|display_precision|-|-
 10ce2e2d51d8	entries|extra-in-impl|close|-|-
-11ce370d8493	options|display_precision|display_precision|-|-
-12989a467640	options|display_precision|display_precision|-|-
-130a7d27a250	options|display_precision|display_precision|-|-
-17f0aca09cdf	options|display_precision|display_precision|-|-
-1a0e279a065c	options|display_precision|display_precision|-|-
-1cd97ba3be08	options|display_precision|display_precision|-|-
-2027c4fc5d79	options|display_precision|display_precision|-|-
-225acd0edccb	options|display_precision|display_precision|-|-
-226daff956cc	options|display_precision|display_precision|-|-
-2533a8635e78	options|display_precision|display_precision|-|-
-28a8fdc836ae	options|display_precision|display_precision|-|-
-28f60ccde726	options|display_precision|display_precision|-|-
-293bcdbb695b	options|display_precision|display_precision|-|-
-29c55140f48a	options|display_precision|display_precision|-|-
 29fc0a148ce6	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
-2b2887694586	options|display_precision|display_precision|-|-
-2bb311334224	options|display_precision|display_precision|-|-
-2bcce072632b	options|display_precision|display_precision|-|-
-3052865564ca	options|display_precision|display_precision|-|-
-326fe5429ff5	options|display_precision|display_precision|-|-
 33dfeb4cffcf	entries|extra-in-impl|close|-|-
-351e552716ae	options|display_precision|display_precision|-|-
-355811632720	options|display_precision|display_precision|-|-
-35fa1b7cd5f8	options|display_precision|display_precision|-|-
-38896d63705e	options|display_precision|display_precision|-|-
 38e76617b85d	entries|extra-in-impl|close|-|-
-395709017879	options|display_precision|display_precision|-|-
-396a764c8e40	options|display_precision|display_precision|-|-
-3a2c454c58f7	options|display_precision|display_precision|-|-
-3d0090c862cd	options|display_precision|display_precision|-|-
-40cbd7790f52	options|display_precision|display_precision|-|-
-410ef95a84e3	options|display_precision|display_precision|-|-
-41acce1909b3	options|display_precision|display_precision|-|-
-41d04a89f122	options|display_precision|display_precision|-|-
-43112fd5703e	options|display_precision|display_precision|-|-
-44b92a0d471f	options|display_precision|display_precision|-|-
-44e304f0fab8	options|display_precision|display_precision|-|-
-47573fa6bed0	options|display_precision|display_precision|-|-
 486a8d296a0c	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
-4990dc12f64d	options|display_precision|display_precision|-|-
-4a85055ec76b	options|display_precision|display_precision|-|-
-4bda4551de21	options|display_precision|display_precision|-|-
-4c1d08927eee	options|display_precision|display_precision|-|-
-502241cf2551	options|display_precision|display_precision|-|-
-512450f9beaf	options|display_precision|display_precision|-|-
 530e8ed7a62c	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
-53193fef8c41	options|display_precision|display_precision|-|-
-53756636780a	options|display_precision|display_precision|-|-
-553a5cb9427e	options|display_precision|display_precision|-|-
-562e2fcd679b	options|display_precision|display_precision|-|-
-564d1ddb9b93	options|display_precision|display_precision|-|-
-58921779dfbd	options|display_precision|display_precision|-|-
 59c0449f962c	entries|extra-in-impl|open|-|-
-5ab4a00c4159	options|display_precision|display_precision|-|-
-5be1e081574c	options|display_precision|display_precision|-|-
-5d3dec775f03	options|display_precision|display_precision|-|-
-5e27c7f20628	options|display_precision|display_precision|-|-
-5e6af92b658e	options|display_precision|display_precision|-|-
-60a8a10f0ae9	options|display_precision|display_precision|-|-
-63056116e23b	options|display_precision|display_precision|-|-
-670831f9b569	options|display_precision|display_precision|-|-
-6aae998ac85c	options|display_precision|display_precision|-|-
-6da398a209bc	options|display_precision|display_precision|-|-
-6e5c29ea623d	options|display_precision|display_precision|-|-
-6f03fa5f3b49	options|display_precision|display_precision|-|-
-6fea4c2ea154	options|display_precision|display_precision|-|-
-70141ac49c3f	options|display_precision|display_precision|-|-
-70362b97b3b4	options|display_precision|display_precision|-|-
-707df34ac1ca	options|display_precision|display_precision|-|-
-713fff45de86	options|display_precision|display_precision|-|-
 7204df4c6d4e	entries|extra-in-impl|open|-|-
-72d63d766b10	options|display_precision|display_precision|-|-
 75478730bf5e	entries|extra-in-impl|close|-|-
-75d93e8e5baf	options|display_precision|display_precision|-|-
-76bc90073c59	options|display_precision|display_precision|-|-
-771d5bb2ebc8	options|display_precision|display_precision|-|-
-789bff609a96	options|display_precision|display_precision|-|-
-7950c46555ff	options|display_precision|display_precision|-|-
-798902efb1af	options|display_precision|display_precision|-|-
-7a4ce89ae83c	options|display_precision|display_precision|-|-
-7b9f6719e40f	options|display_precision|display_precision|-|-
-7dc591dfe3e0	options|display_precision|display_precision|-|-
-7e04cd73b1f5	options|display_precision|display_precision|-|-
-7e290a2067c8	options|display_precision|display_precision|-|-
-7ee9206f814b	options|display_precision|display_precision|-|-
-7fd1780f0805	options|display_precision|display_precision|-|-
 803e7bd1fc14	entries|extra-in-impl|open|-|-
-815d08a97a02	options|display_precision|display_precision|-|-
 82a5cc9ada9d	entries|extra-in-impl|close|-|-
-8440009f99a9	options|display_precision|display_precision|-|-
-8573563d80a0	options|display_precision|display_precision|-|-
 86d8c20d9b8e	entries|extra-in-impl|close|-|-
-8a842cb973f8	options|display_precision|display_precision|-|-
-9016f422b1ac	options|display_precision|display_precision|-|-
-9028d45b354e	options|display_precision|display_precision|-|-
-913f9635b8e4	options|display_precision|display_precision|-|-
-91a08625959a	options|display_precision|display_precision|-|-
 91ebff5d080f	entries|extra-in-impl|open|-|-
-938d205b52a2	options|display_precision|display_precision|-|-
-982bd9c85df6	options|display_precision|display_precision|-|-
-98aa606cb697	options|display_precision|display_precision|-|-
-9aae8b5c6c59	options|display_precision|display_precision|-|-
-9c38d6313837	options|display_precision|display_precision|-|-
-9c90868e496e	options|display_precision|display_precision|-|-
-a04d68558f80	options|display_precision|display_precision|-|-
 a65697d26dae	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
 a6aaa10f06ca	entries|extra-in-impl|close|-|-
-a91de40b3f30	options|display_precision|display_precision|-|-
-aa0e05c4f0ec	options|display_precision|display_precision|-|-
-af410e19dbad	options|display_precision|display_precision|-|-
 b32853496b9d	entries|extra-in-impl|close|-|-
-b4570cef2edc	options|display_precision|display_precision|-|-
-b4ee3bbcef9b	options|display_precision|display_precision|-|-
-b69979d019bc	options|display_precision|display_precision|-|-
-b758df48e518	options|display_precision|display_precision|-|-
-b7715c11ae73	options|display_precision|display_precision|-|-
-b8d5d6e92828	options|display_precision|display_precision|-|-
-b962cefbdfc6	options|display_precision|display_precision|-|-
-b9c4c2c72a50	options|display_precision|display_precision|-|-
 b9c6f8392b50	entries|extra-in-impl|open|-|-
 bc4534479c81	entries|extra-in-impl|close|-|-
-bc779acd5032	options|display_precision|display_precision|-|-
 bd9f1e075aed	entries|extra-in-impl|close|-|-
-be2dd8bd3cc4	options|display_precision|display_precision|-|-
-c0a64184839c	options|display_precision|display_precision|-|-
-c12206002c3a	options|display_precision|display_precision|-|-
-c2ac2c9711dd	options|display_precision|display_precision|-|-
-c30f88aadd34	options|display_precision|display_precision|-|-
-c4ec50576c8e	options|display_precision|display_precision|-|-
-c4f7ed5b5d9d	options|display_precision|display_precision|-|-
-c529637b4ff8	options|display_precision|display_precision|-|-
 c531b82bfee1	entries|extra-in-impl|open|-|-
-c60b6f1917e8	options|display_precision|display_precision|-|-
-c67a83af0742	options|display_precision|display_precision|-|-
-c77765f6f969	options|display_precision|display_precision|-|-
-c83915eb983f	options|display_precision|display_precision|-|-
-c87ddbdc16c2	options|display_precision|display_precision|-|-
-c88d695ce588	options|display_precision|display_precision|-|-
-ca47fc278b69	options|display_precision|display_precision|-|-
-ca4aa189f6a6	options|display_precision|display_precision|-|-
-cae16a2a50ea	options|display_precision|display_precision|-|-
 ccdc45784602	entries|extra-in-impl|open|-|-
-cd4e2ad82493	options|display_precision|display_precision|-|-
-ce21c953889a	options|display_precision|display_precision|-|-
-ced0a2d5dc11	options|display_precision|display_precision|-|-
-cf596b8e163d	options|display_precision|display_precision|-|-
 d06903fccdda	entries|extra-in-impl|open|-|-
-d0f0479ac418	options|display_precision|display_precision|-|-
-d6f7a6f9b8ac	options|display_precision|display_precision|-|-
-d9f35afb904a	options|display_precision|display_precision|-|-
 db4c2b5de7f7	entries|extra-in-impl|close|-|-
-dc4cc8c70657	options|display_precision|display_precision|-|-
-dc9bdf26fab5	options|display_precision|display_precision|-|-
 de6bba7f98fb	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
-dfa8ffe926bb	options|display_precision|display_precision|-|-
-e0cdebf8cfa5	options|display_precision|display_precision|-|-
-e0e74cd7d36b	options|display_precision|display_precision|-|-
-e2648c72474a	options|display_precision|display_precision|-|-
-e3348cd0fc07	options|display_precision|display_precision|-|-
-e4c3f798694b	options|display_precision|display_precision|-|-
-e8df574b0da1	options|display_precision|display_precision|-|-
-ed4659c84d32	options|display_precision|display_precision|-|-
-ed4668595e28	options|display_precision|display_precision|-|-
-ef54a3c553e1	options|display_precision|display_precision|-|-
-f323a4ff27d5	options|display_precision|display_precision|-|-
-f4ba3ebedfe8	options|display_precision|display_precision|-|-
-f5a8f759e3ef	options|display_precision|display_precision|-|-
-f88fb4956bb3	options|display_precision|display_precision|-|-
 fa3d02023e0b	entries|extra-in-impl|close|-|-
 fc244c59bb13	entries|extra-in-impl|close|-|-
-fd2033008e53	options|display_precision|display_precision|-|-
-fd318409294d	options|display_precision|display_precision|-|-
-fe4bdddf6940	options|display_precision|display_precision|-|-
-ff51c78d7293	options|display_precision|display_precision|-|-
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount
@@ -756,7 +590,7 @@ compat	87070cd50c52	match	tests/compatibility/files/parser-lima/test-cases_Incom
 compat	046ff12a38d5	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostAverageWithOther.beancount
 compat	a833aa01c377	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostEmpty.beancount
 compat	cd43f68c4d8d	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostEmptyWithOther.beancount
-compat	a3aaeb85d03a	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostFull.beancount
+compat	a3aaeb85d03a	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostFull.beancount
 compat	685d3d185189	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingCurrency.beancount
 compat	0bd32e53700f	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingNumberPer.beancount
 compat	ab20ae0b8c73	match	tests/compatibility/files/parser-lima/test-cases_IncompleteInputs.CostMissingNumberTotal.beancount
@@ -854,7 +688,7 @@ compat	2b4c342f5433	match	tests/compatibility/files/parser-lima/test-cases_Parse
 compat	f9f66919b429	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.NoEmptyLines.beancount
 compat	d75c68131499	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.TransactionImbalanceFromSinglePosting.beancount
 compat	e71c5083694e	match	tests/compatibility/files/parser-lima/test-cases_ParserComplete.TransactionSinglePostingAtZero.beancount
-compat	03123272e192	options|display_precision|display_precision|-|-	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Balance.beancount
+compat	03123272e192	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Balance.beancount
 compat	3a00486fc302	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.BalanceWithCost.beancount
 compat	e4c25402a175	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Close.beancount
 compat	244b5089c187	match	tests/compatibility/files/parser-lima/test-cases_ParserEntryTypes.Commodity.beancount

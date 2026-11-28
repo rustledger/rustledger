@@ -18,12 +18,9 @@
 5	options|display_precision|display_precision|-|-
 4	entries|postings.order|transaction|-|multi-currency
 3	balances|extra-in-impl|account|-|-
-2	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
 2	entries|postings.order|transaction|-|elided+multi-currency
 2	entries|postings.order|transaction|-|expr+multi-currency
 2	errors|impl-fewer|oracle:LoadError|-|-|-
-1	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
-1	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
 1	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
 1	errors|impl-fewer|oracle:account-inactive|transaction|-|elided
 1	errors|impl-more|impl:E1005|open|-|-
@@ -34,11 +31,7 @@
 6	custom-display-precision
 5	cross-file-booking-order
 @ mismatches
-29fc0a148ce6	entries|postings.order|transaction|-|cost+elided+multi-currency+price+reduce
 486a8d296a0c	entries|postings.units.number|transaction|STRICT|cost+elided+multi-currency+price+reduce
-530e8ed7a62c	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
-a65697d26dae	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price+reduce
-de6bba7f98fb	entries|postings.order|transaction|-|cost+cost-empty+elided+multi-currency+price-total+reduce
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount

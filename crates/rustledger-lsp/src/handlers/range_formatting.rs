@@ -64,7 +64,7 @@
 
 use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
-use rustledger_parser::format::{GroupingStyle, format_parsed_range, lf_to_crlf_outside_strings};
+use rustledger_parser::format::{GroupingStyle, format_parsed_range_with_options};
 
 use super::formatting::{apply_edits, canonical_text, format_document};
 use super::utils::{LineIndex, PositionEncoding};
@@ -306,20 +306,16 @@ fn fallback_cst_snap_edit(
     // parse errors, as the whole-file formatter does: rebuilt from its
     // typed values such a directive would lose the text the parser could
     // not read (#2803).
-    let (snap_cst, mut new_text) = format_parsed_range(parse_result, cst_range, style)?;
-
-    // CRLF preservation: `format_node_range` always emits LF (it
-    // re-uses the canonical-form pipeline, which is LF-only by
-    // design). If the source buffer is CRLF, re-inject `\r` before
-    // every emitted `\n` outside string literals so the snapped
-    // region's line endings match the surrounding buffer. Without
-    // this, applying the fallback edit on a Windows-authored file
-    // would introduce mixed line endings inside the snapped range.
-    // Mirrors `format_document`'s preservation (see
-    // `formatting.rs::format_document`).
-    if source.contains("\r\n") {
-        new_text = lf_to_crlf_outside_strings(&new_text);
-    }
+    //
+    // CRLF preservation: on a CRLF buffer the formatter writes CRLF for the
+    // line endings it owns, so the snapped region's line endings match the
+    // surrounding buffer (text it copies keeps its own). Mirrors
+    // `formatting.rs::canonical_text`.
+    let (snap_cst, new_text) = format_parsed_range_with_options(
+        parse_result,
+        cst_range,
+        super::formatting::options_for(source, style),
+    )?;
 
     // Map the snapped CST range back to LSP positions: add
     // `bom_offset` to translate into original-source bytes, then
@@ -823,10 +819,9 @@ mod tests {
     }
 
     /// CRLF source through the fallback: emitted new_text must be
-    /// CRLF, not LF. Without the `lf_to_crlf_outside_strings`
-    /// re-injection in `fallback_cst_snap_edit`, applying the
-    /// edit would introduce mixed line endings inside the snapped
-    /// region (the formatter is LF-only by design).
+    /// CRLF, not LF. Without the CRLF option `fallback_cst_snap_edit`
+    /// passes the formatter, applying the edit would introduce mixed
+    /// line endings inside the snapped region.
     #[test]
     fn parse_errors_with_crlf_source_emits_crlf_replacement() {
         // CRLF on every line. Valid Open + garbage; selection

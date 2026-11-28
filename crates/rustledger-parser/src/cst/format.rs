@@ -58,9 +58,12 @@
 //!   the strings.
 //! - Trailing newline at EOF: a last line without one gets one;
 //!   blank lines after it are kept, as bean-format keeps them, and
-//!   an empty file stays empty (#2506).
-//! - Line endings: LF; CRLF inputs normalized.
-//! - Leading BOM: dropped.
+//!   an empty file stays empty (#2506). A last line copied as written
+//!   (it holds a parse error) gets none.
+//! - Line endings: LF on every line the formatter writes; CRLF inputs
+//!   normalized. Text copied as written (an item holding a parse error)
+//!   keeps its own.
+//! - Leading BOM: dropped (kept before a second BOM, which is text).
 //!
 //! No `FormatConfig` parameter. One canonical form, no knobs.
 
@@ -192,27 +195,32 @@ pub fn display_width(s: &str) -> usize {
 /// Returns canonical text. A non-empty output ends with a newline;
 /// the file's leading and trailing blank lines are kept, as
 /// bean-format keeps them, and an empty file formats to an empty
-/// string (#2506). The one exception: a broken last line that the
-/// newline would repair (a lone capital is beancount's invalid token at
-/// the end of the file, not before a `\n`) keeps going without one.
+/// string (#2506). The one exception: a last line copied as written
+/// (one holding a parse error) gets no newline, which would be a change
+/// to text the formatter does not own (a lone capital is beancount's
+/// invalid token at the end of the file, not before a `\n`).
 ///
 /// **Parse errors.** Text the parser cannot read is never deleted.
 /// An unparsable top-level line is copied verbatim (#1335), and so
 /// is a whole directive that holds a parse error (#2794), since
 /// rebuilding it from its typed values would drop the unread text.
-/// A broken line keeps a `\r` (or the lack of a final newline) whose
-/// removal would repair it, and every line holding an error keeps its
-/// bytes, so a broken file stays broken where it was. Pinned, with
-/// idempotence and meaning preservation, by the round-trip oracle
-/// (`tests/format_roundtrip_properties.rs`, `fuzz_format_roundtrip`).
+/// Such text is copied byte for byte, its own line endings and blanks
+/// included, so a broken file stays broken where it was.
 ///
-/// **Line-ending normalization runs BEFORE parsing.** `\r\n` is
-/// folded to `\n` (see [`crlf_to_lf_outside_strings`]), matching the
-/// canonical-form promise that line endings are LF-only on output. A
-/// bare `\r` with more of the line after it is kept: the lexer does not
-/// end a line there, so a classic-Mac `\r`-only file stays the broken
-/// file it is (its directives are copied verbatim) rather than being
-/// turned into a different, valid one.
+/// **Certified (ADR 0009).** The output is reparsed and checked, item
+/// by item, to read as the input did; a directive whose canonical form
+/// does not is copied as written instead, and the result is returned
+/// only if formatting it again gives it again. Pinned by the round-trip
+/// oracle (`tests/format_roundtrip_properties.rs`,
+/// `fuzz_format_roundtrip`), which requires that nothing was demoted.
+///
+/// **Line endings.** The source is parsed as written, in one frame: the
+/// lexer reads `\r\n` as a line ending and a stray `\r` run before one as
+/// trivia. Every line the formatter writes ends in `\n` (or `\r\n` under
+/// [`LineEnding::Crlf`]); a bare `\r` with more of the line after it does
+/// not end a line, so a classic-Mac `\r`-only file stays the broken file it
+/// is (copied as written) rather than being turned into a different, valid
+/// one.
 #[must_use]
 pub fn format_source(source: &str) -> String {
     format_source_grouped(source, GroupingStyle::default())
@@ -231,7 +239,48 @@ pub fn format_source(source: &str) -> String {
 /// and every ledger that has not opted in is byte-for-byte unaffected.
 #[must_use]
 pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
-    format_certified(source, None, style).0
+    format_certified(
+        source,
+        None,
+        FormatOptions {
+            grouping: style,
+            ..FormatOptions::default()
+        },
+    )
+    .0
+}
+
+/// The line ending the formatter writes.
+///
+/// It applies to the text the formatter writes itself: every line of a
+/// directive it rebuilds, the blank lines and comments between directives,
+/// the final newline. Text it copies as written (a line it cannot parse, a
+/// string literal) keeps its own line endings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LineEnding {
+    /// `\n`, the canonical form.
+    #[default]
+    Lf,
+    /// `\r\n`, for an editor that keeps a Windows-authored file's line
+    /// endings (the LSP on a CRLF document).
+    Crlf,
+}
+
+/// Options of a formatting run: the ledger's grouping style and the line
+/// ending to write. The default is the canonical form.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FormatOptions<'a> {
+    /// The thousands-separator rule declared by the ledger (see
+    /// [`format_source_grouped`]).
+    pub grouping: GroupingStyle<'a>,
+    /// The line ending written (see [`LineEnding`]).
+    pub line_ending: LineEnding,
+}
+
+/// [`format_source`] under `options`.
+#[must_use]
+pub fn format_source_with_options(source: &str, options: FormatOptions<'_>) -> String {
+    format_certified(source, None, options).0
 }
 
 /// How formatting one source went: what the certifier had to keep as
@@ -264,7 +313,14 @@ impl FormatReport {
 #[doc(hidden)]
 #[must_use]
 pub fn __format_source_report(source: &str, style: GroupingStyle<'_>) -> (String, FormatReport) {
-    format_certified(source, None, style)
+    format_certified(
+        source,
+        None,
+        FormatOptions {
+            grouping: style,
+            ..FormatOptions::default()
+        },
+    )
 }
 
 /// A parse the formatter reads, borrowed from the caller or its own.
@@ -284,46 +340,34 @@ impl std::ops::Deref for Parsed<'_> {
     }
 }
 
-/// One source, read for formatting: its line endings folded, the folded
-/// text parsed, and the ranges of that parse holding an error.
+/// One source, read for formatting: its parse (of the bytes as written, the
+/// one frame every decision is made in) and the ranges of it holding an
+/// error.
 pub(super) struct Prepared<'s, 'p> {
     pub(super) source: &'s str,
-    repaired: RepairedLines,
-    pub(super) normalized: std::borrow::Cow<'s, str>,
     pub(super) parsed: Parsed<'p>,
     pub(super) broken: ErrorRanges,
 }
 
 impl<'s, 'p> Prepared<'s, 'p> {
-    /// Read `source`, reusing `cached` (a parse of `source`) when the fold
-    /// leaves the text as it is.
+    /// Read `source`, reusing `cached` (a parse of `source`) if given.
     pub(super) fn new(source: &'s str, cached: Option<&'p crate::ParseResult>) -> Self {
-        // The parser strips the one leading BOM itself; stripping it here as
-        // well made a second BOM, which the parser keeps as text,
-        // the file's leading one, so each pass dropped one more.
-        let repaired = RepairedLines::new(source);
-        let normalized = fold_line_endings(source, &|line| repaired.holds(line));
         // The full parse, not just the tree: its errors locate the directives
-        // that must be copied verbatim (#2794). The spans are in the frame of
-        // `normalized`, BOM included; the tree is not.
-        let parsed = match (cached, &normalized) {
-            (Some(p), std::borrow::Cow::Borrowed(_)) => Parsed::Borrowed(p),
-            _ => Parsed::Owned(Box::new(crate::parse_without_occurrences(&normalized))),
-        };
-        let mut broken = ErrorRanges::new(&parsed);
-        // A `\r` left in `normalized` is one the fold kept on purpose.
-        broken.keep_cr = true;
+        // that must be copied verbatim (#2794).
+        let parsed = cached.map_or_else(
+            || Parsed::Owned(Box::new(crate::parse_without_occurrences(source))),
+            Parsed::Borrowed,
+        );
+        let broken = ErrorRanges::new(&parsed);
         Self {
             source,
-            repaired,
-            normalized,
             parsed,
             broken,
         }
     }
 
     /// The byte range of each top-level item (child node of the root), in
-    /// the frame of `normalized` (BOM included), in order.
+    /// the frame of `source` (BOM included), in order.
     ///
     /// A top-level WHITESPACE token directly before a node is the indentation
     /// of its first line, which the walk writes with the node (#2786), so it
@@ -350,8 +394,9 @@ impl<'s, 'p> Prepared<'s, 'p> {
 
     /// Write the canonical form, copying `plan`'s forced items verbatim and
     /// recording where each item went (in the frame of the returned text).
-    pub(super) fn emit(&self, style: GroupingStyle<'_>, plan: &mut Plan) -> String {
+    pub(super) fn emit(&self, options: FormatOptions<'_>, plan: &mut Plan) -> String {
         let node = self.parsed.syntax_node();
+        let style = options.grouping;
         let alignment = if style.groups_anything() {
             SourceFile::cast(node.clone())
                 .map(|sf| compute_alignment(&sf, style))
@@ -360,38 +405,19 @@ impl<'s, 'p> Prepared<'s, 'p> {
             self.parsed.alignment()
         };
         plan.written.clear();
-        let body = format_node_with_style(&node, alignment, style, &self.broken, plan);
-        let mut out = keep_bom_before_a_second(&self.parsed, body);
-        if out.starts_with(crate::bom::BOM) && self.parsed.has_leading_bom {
-            let shift = crate::bom::BOM.len();
-            for (start, end) in plan.written.iter_mut().flatten() {
-                *start += shift;
-                *end += shift;
-            }
-        }
-        // The newline added after a last line can repair it too. A lone capital
-        // is beancount's `CAPITAL` only before a space, a tab or a `\n`, so
-        // `2024-01-01T` at the end of the file is an invalid token and
-        // `2024-01-01T\n` a transaction flagged `T`, which the next pass rebuilt
-        // as `2024-01-01 T`. Such a line keeps going without a newline.
-        // A kept last line (`+4K\r`) gets no newline either: it would turn the
-        // line's stray `\r` into a CRLF, which the next pass folds.
-        let source = self.source;
-        if !source.is_empty()
-            && !source.ends_with('\n')
-            && out.ends_with('\n')
-            && ((self.repaired.holds_last() && out[..out.len() - 1].ends_with('\r'))
-                || (last_line_has_error(&self.normalized, &self.parsed)
-                    && !last_line_has_error(&out, &crate::parse_without_occurrences(&out))))
+        let mut out = Out::new(options.line_ending);
+        // The leading BOM is dropped, unless another BOM follows it: the
+        // parser reads that one as text, and with the first gone it would be
+        // the leading BOM the next pass drops.
+        if self.parsed.has_leading_bom
+            && node
+                .first_token()
+                .is_some_and(|t| t.kind() == crate::SyntaxKind::BOM)
         {
-            out.pop();
-            let len = out.len();
-            for (start, end) in plan.written.iter_mut().flatten() {
-                *start = (*start).min(len);
-                *end = (*end).min(len);
-            }
+            out.push_str(crate::bom::BOM);
         }
-        out
+        walk_source_file(&node, alignment, style, &self.broken, plan, &mut out);
+        out.into_string()
     }
 }
 
@@ -426,175 +452,118 @@ impl Plan {
     }
 }
 
-/// Format `source` and certify the result (ADR 0009): emit the canonical
-/// form, reparse it, check item by item that it reads as the source did, and
-/// demote every item that does not to a verbatim copy, until it does.
+/// Format `source` and certify the result (ADR 0009).
 ///
-/// Demotion only grows the set of verbatim items, so the loop ends; when a
-/// failure cannot be pinned on an item the formatter can demote, the source
-/// is returned unchanged, which keeps every promise trivially.
+/// `certify_items` emits the canonical form and checks it item by item,
+/// demoting what fails. Its result `y` is then returned only if it is a fixed
+/// point: `certify_items(y) == y`. That makes idempotence a property of the
+/// product, not of the emitter: formatting `y` again runs `certify_items(y)`
+/// first, gets `y`, which is its input, and returns it unchanged. When `y`
+/// is not a fixed point, the item at the first difference is demoted and the
+/// input certified again; when no demotable item is left, the source is
+/// returned unchanged, which keeps every promise trivially.
 fn format_certified(
     source: &str,
     cached: Option<&crate::ParseResult>,
-    style: GroupingStyle<'_>,
+    options: FormatOptions<'_>,
 ) -> (String, FormatReport) {
     let prep = Prepared::new(source, cached);
     let mut report = FormatReport::default();
     let mut plan = Plan::default();
-    let out = prep.emit(style, &mut plan);
-    // Already canonical: the output reads as the input by being it, and
-    // formatting it again gives it again.
-    if out == source {
-        return (out, report);
-    }
-    // The source as beancount reads it, which is not the folded text the
-    // emitter read when the fold changed anything.
-    let raw_owned;
-    let raw: &crate::ParseResult = if matches!(prep.normalized, std::borrow::Cow::Borrowed(_)) {
-        &prep.parsed
-    } else {
-        raw_owned = crate::parse_without_occurrences(source);
-        &raw_owned
-    };
-    let input = certify::Facts::of_input(&prep, raw);
-    let mut out = out;
+    let mut input = None;
     loop {
-        let failure = match certify::check(&input, &plan, &out, style) {
-            Ok(()) => return (out, report),
+        let Some((out, parsed)) = certify_items(&prep, &mut input, &mut plan, options, &mut report)
+        else {
+            report.kept_whole_file = true;
+            return (source.to_string(), report);
+        };
+        // Already canonical: formatting it again certifies it again to itself
+        // (this very computation, on the same input).
+        let Some(parsed) = parsed else {
+            return (out, report);
+        };
+        let again = Prepared::new(&out, Some(&parsed));
+        let twice = certify_items(
+            &again,
+            &mut None,
+            &mut Plan::default(),
+            options,
+            &mut FormatReport::default(),
+        )
+        .map_or_else(|| out.clone(), |(t, _)| t);
+        if twice == out {
+            return (out, report);
+        }
+        report
+            .reason
+            .get_or_insert("formatting the output again changed it");
+        // Blame the item written over the first difference, or the one after
+        // it (a gap is written ahead of the item after it).
+        let diff = out
+            .bytes()
+            .zip(twice.bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(out.len().min(twice.len()));
+        let opaque = |item: usize| {
+            input
+                .as_ref()
+                .is_none_or(|f: &certify::Facts<'_>| f.is_opaque(item))
+        };
+        // An item already kept as written that its own output rebuilds
+        // differently cannot be demoted further: keep the file.
+        let blamed = plan
+            .written
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.map(|(_, end)| (i, end)))
+            .find(|&(_, end)| end >= diff)
+            .map(|(i, _)| i)
+            .filter(|&i| !plan.forced(i) && !opaque(i));
+        let Some(item) = blamed else {
+            report.kept_whole_file = true;
+            return (source.to_string(), report);
+        };
+        plan.force(item);
+        report.demoted += 1;
+    }
+}
+
+/// Emit `prep` under `plan` and certify the output item by item, demoting
+/// what fails, until an output passes. Returns it with its parse (`None`
+/// when it is the source itself, which reads as itself), or `None` when a
+/// failure cannot be pinned on an item that can still be demoted.
+///
+/// `input` caches the facts of the source across calls.
+fn certify_items<'s>(
+    prep: &'s Prepared<'s, '_>,
+    input: &mut Option<certify::Facts<'s>>,
+    plan: &mut Plan,
+    options: FormatOptions<'_>,
+    report: &mut FormatReport,
+) -> Option<(String, Option<crate::ParseResult>)> {
+    loop {
+        let out = prep.emit(options, plan);
+        if out == prep.source {
+            return Some((out, None));
+        }
+        let facts = input.get_or_insert_with(|| certify::Facts::of_input(prep));
+        let failure = match certify::check(facts, plan, &out) {
+            Ok(parsed) => return Some((out, Some(parsed))),
             Err(failure) => failure,
         };
         report.reason.get_or_insert(failure.why);
         let mut grew = false;
         for item in failure.items {
-            if !input.is_opaque(item) && !plan.forced(item) {
+            if !facts.is_opaque(item) && !plan.forced(item) {
                 plan.force(item);
                 report.demoted += 1;
                 grew = true;
             }
         }
         if !grew {
-            report.kept_whole_file = true;
-            return (source.to_string(), report);
+            return None;
         }
-        out = prep.emit(style, &mut plan);
     }
-}
-
-/// Whether a reported error of `parsed` (the parse of `src`) sits on `src`'s
-/// last line, the one after its last `\n`.
-fn last_line_has_error(src: &str, parsed: &crate::ParseResult) -> bool {
-    let last = src.trim_end_matches('\n').rfind('\n').map_or(0, |i| i + 1);
-    parsed.errors.iter().any(|e| e.span.end > last)
-}
-
-/// The lines (0-based, by `\n`) of a source whose tokens folding its line
-/// endings would change, for [`format_source_grouped`] to keep exactly as
-/// written.
-///
-/// A lone capital before a `\r` is beancount's invalid token (`CAPITAL`
-/// needs a space, a tab or a `\n` after it), so `open Assets:A,B\r\n` is an
-/// error and `open Assets:A,B\n` a valid open, and a stray `\r` before the
-/// line ending (`R\r\t\n`) works the same. Folding such a line repaired it,
-/// and the formatter then rebuilt the directive. A line the lexer reads
-/// differently without its `\r`s keeps its bytes, line ending included, so it
-/// stays what it was.
-///
-/// Decided per line from the line's own bytes, so a kept line is kept again
-/// on the next pass (formatting stays idempotent), and only for a file that
-/// holds a `\r`.
-struct RepairedLines(Vec<bool>);
-
-impl RepairedLines {
-    fn new(source: &str) -> Self {
-        if !source.contains('\r') {
-            return Self(Vec::new());
-        }
-        let body = source.strip_prefix('\u{FEFF}').unwrap_or(source);
-        let kept = body
-            .split_inclusive('\n')
-            .map(|line| {
-                // A line beancount skips (a comment, a heading) reads the same
-                // either way; the fold's own rewrite of a lone marker (`*\r`
-                // to `* `, #2779) keeps it skipped.
-                if !line.contains('\r') || crate::logos_lexer::beancount_ignores_line(line) {
-                    return false;
-                }
-                let folded = fold_line_endings(line, &|_| false);
-                folded != line
-                    && (line_tokens(line) != line_tokens(&folded)
-                        || ends_with_lone_capital_before_cr(line))
-            })
-            .collect();
-        Self(kept)
-    }
-
-    /// Whether line `line` is kept as written.
-    fn holds(&self, line: usize) -> bool {
-        self.0.get(line).copied().unwrap_or(false)
-    }
-
-    /// Whether the last line is kept as written.
-    fn holds_last(&self) -> bool {
-        self.0.last().copied().unwrap_or(false)
-    }
-}
-
-/// The tokens of one line, trivia left out, for [`RepairedLines`].
-fn line_tokens(line: &str) -> Vec<String> {
-    crate::logos_lexer::tokenize_lossless(line)
-        .into_iter()
-        .filter(|(t, _)| {
-            !matches!(
-                t,
-                crate::logos_lexer::Token::Whitespace(_) | crate::logos_lexer::Token::Newline
-            )
-        })
-        // The kind only: the text of a token the fold rewrites on purpose
-        // (`*\r` becomes `* `, #2779) is not a change of reading.
-        .map(|(t, _)| {
-            let debug = format!("{t:?}");
-            debug.split('(').next().unwrap_or_default().to_string()
-        })
-        .collect()
-}
-
-/// Whether `line` ends in a lone capital followed only by blanks holding a
-/// `\r` (a CRLF's, or a stray one) before its line ending. Beancount reads
-/// that capital as an invalid token (`CAPITAL` needs a space, a tab or a `\n`
-/// after it, and a `\r` is none), where before a bare `\n` it is a currency
-/// or a flag. The parser's glued one-letter rules decide this, not the lexer,
-/// so [`line_tokens`] does not see it.
-fn ends_with_lone_capital_before_cr(line: &str) -> bool {
-    let content = line.strip_suffix('\n').unwrap_or(line);
-    let text = content.trim_end_matches([' ', '\t', '\r']);
-    if !content[text.len()..].starts_with('\r') {
-        return false;
-    }
-    crate::logos_lexer::tokenize_lossless(text)
-        .last()
-        .is_some_and(|(_, span)| {
-            span.end == text.len()
-                && span.end - span.start == 1
-                && text.as_bytes()[span.start].is_ascii_uppercase()
-        })
-}
-
-/// `out`, the formatted text of `parsed`, with the leading BOM put back when a
-/// second BOM follows it. The leading BOM is dropped otherwise. The second is
-/// text the parser keeps in the tree, and with the first gone it would become
-/// the leading BOM the next pass drops, so formatting was not idempotent.
-fn keep_bom_before_a_second(parsed: &crate::ParseResult, out: String) -> String {
-    let second_bom = parsed
-        .syntax_node()
-        .first_token()
-        .is_some_and(|t| t.kind() == crate::SyntaxKind::BOM);
-    if parsed.has_leading_bom && second_bom {
-        let mut kept = String::with_capacity(out.len() + crate::bom::BOM.len());
-        kept.push_str(crate::bom::BOM);
-        kept.push_str(&out);
-        return kept;
-    }
-    out
 }
 
 /// Like [`format_source`] but reuses the caller's
@@ -615,27 +584,13 @@ fn keep_bom_before_a_second(parsed: &crate::ParseResult, out: String) -> String 
 /// (the fallback exercises broken sources) and
 /// `cst::format::tests::format_source_with_parsed_matches_format_source`
 /// (the cache path exercises clean sources) across LF / CRLF /
-/// BOM / parse-error / mixed-line-ending fixtures. The cache-
-/// path equivalence holds because the formatter rebuilds output
-/// from each directive's typed values rather than echoing
-/// trivia, so the CRLF-vs-LF difference in the underlying CST
-/// trivia never reaches the output. The fallback path is
-/// byte-trivially equivalent (it IS `format_source`).
+/// BOM / parse-error / mixed-line-ending fixtures. The equivalence
+/// holds by construction: `format_source` parses the source as written
+/// too, and both run the same certified driver on that one parse.
 ///
-/// **CRLF re-injection is still the caller's responsibility.**
-/// Same as `format_source`: this function always returns LF;
-/// LSP consumers that need to preserve CRLF for Windows-
-/// authored files call [`lf_to_crlf_outside_strings`] on the
-/// returned text.
-///
-/// **Parse-error fallback.** When `parse_result.errors` is
-/// non-empty, this function delegates to `format_source(source)`
-/// — losing the cache benefit but preserving byte-identity for
-/// inputs whose CST diverges from what `format_source`'s
-/// pre-parse normalization would produce (the error list it needs
-/// to copy broken directives verbatim is computed on the normalized
-/// text). The fallback path keeps the byte-identity claim total
-/// instead of "holds-only-when-clean".
+/// **CRLF.** This function writes LF; an editor keeping a Windows-
+/// authored file's line endings asks the formatter to write CRLF
+/// ([`format_parsed_with_options`], [`LineEnding::Crlf`]).
 ///
 /// **Stale `parse_result` is the caller's responsibility.** The
 /// producer-side cache invariant (see
@@ -682,6 +637,28 @@ pub fn format_source_with_parsed_grouped(
     source: &str,
     style: GroupingStyle<'_>,
 ) -> String {
+    format_parsed_with_options(
+        parse_result,
+        source,
+        FormatOptions {
+            grouping: style,
+            ..FormatOptions::default()
+        },
+    )
+}
+
+/// [`format_source_with_parsed`] under `options` (grouping style and line
+/// ending; see [`FormatOptions`]).
+///
+/// # Panics
+///
+/// As [`format_source_with_parsed`].
+#[must_use]
+pub fn format_parsed_with_options(
+    parse_result: &crate::ParseResult,
+    source: &str,
+    options: FormatOptions<'_>,
+) -> String {
     let node = parse_result.syntax_node();
     // Defensive length check (debug-only). Catches the most
     // common form of `(parse_result, source)` mismatched pair —
@@ -703,9 +680,7 @@ pub fn format_source_with_parsed_grouped(
          different documents — the cache path will emit text for the wrong \
          buffer.",
     );
-    // The parse is reused only where the line-ending fold leaves the text
-    // as it is, so the output is `format_source`'s byte for byte.
-    format_certified(source, Some(parse_result), style).0
+    format_certified(source, Some(parse_result), options).0
 }
 
 /// Like [`format_source`], but returns the parse errors instead
@@ -752,48 +727,6 @@ pub fn try_format_source_grouped(
     // letting `format_source_grouped` re-parse.
     Ok(format_source_with_parsed_grouped(&result, source, style))
 }
-/// Convert every `\n` line terminator OUTSIDE string literals back
-/// to `\r\n`, leaving `\n` characters inside strings untouched.
-///
-/// The canonical form emitted by [`format_source`] is LF-only.
-/// Editors that round-trip Windows-authored files want to see CRLF
-/// echoed back on every line. This helper bridges the two: a `\n`
-/// inside a string literal (the user's original line ending inside a
-/// multi-line narration / note / document string) passes through
-/// verbatim, and every other one becomes `\r\n`, a comment's
-/// terminating newline included. What is a string literal is what the
-/// lexer reads as one (`StringLiterals`), so a `"` inside a comment,
-/// a heading or an invalid token opens none here either.
-///
-/// The helper lives in this module rather than the LSP crate
-/// because its correctness depends on the lexer's `STRING` and
-/// comment rules. Keep it co-located with the formatter so a
-/// lexer change forces a co-evaluation here.
-#[must_use]
-pub fn lf_to_crlf_outside_strings(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + s.matches('\n').count());
-    // BOM is data, not classification input. We re-prepend it
-    // verbatim and lex the body after it, as the parser does. The
-    // sibling crlf_to_lf_outside_strings does the same so the two
-    // walkers handle a leading-BOM file identically.
-    let (body, bom) = match s.strip_prefix('\u{FEFF}') {
-        Some(rest) => (rest, "\u{FEFF}"),
-        None => (s, ""),
-    };
-    out.push_str(bom);
-    let mut strings = StringLiterals::new(body);
-    for (i, ch) in body.char_indices() {
-        // A `\n` that already has its `\r` (a broken line the formatter
-        // copied with its CRLF) keeps just the one.
-        if ch == '\n' && !strings.contains(i) && !out.ends_with('\r') {
-            out.push_str("\r\n");
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 /// Render typed Beancount `Directive`s in the canonical form
 /// emitted by [`format_source`].
 ///
@@ -945,261 +878,6 @@ impl std::fmt::Display for CanonicalizeError {
 
 impl std::error::Error for CanonicalizeError {}
 
-/// Replace CRLF line terminators with LF, but ONLY outside string
-/// literals, and drop a stray run of `\r`s before a line ending.
-///
-/// A bare `\r` with more of the line after it is NOT a line terminator
-/// to the lexer (it is comment text in a comment and an error
-/// elsewhere), so it is kept: folding it into a line break would change
-/// what the file means, turning the rest of a comment into a line of
-/// its own, or a classic-Mac `\r`-only file the parser rejects into one
-/// it accepts.
-///
-/// String literals (`"…"`) can contain raw `\r` and `\n` per the
-/// lexer's `STRING` rule; folding CR inside a string would mutate
-/// the user's data. What is a string literal is what the lexer reads
-/// as one (`StringLiterals`).
-///
-/// One change besides the line endings: a line that is one column-0 marker
-/// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
-/// a line is ignored by beancount, and the lone marker left by dropping the
-/// `\r` would be an error there (#2779).
-/// Stricter than bean-format: it reads the file in Python's text mode, which
-/// folds `#\r\n` to `#\n`, a line bean-check then rejects.
-///
-/// Cheap fast path: if the input contains no `\r`, returns the
-/// source slice borrowed (no allocation). Used by
-/// [`format_source`] before parsing so the lexer never has to see
-/// legacy line endings. Exposed publicly under [`crlf_to_lf_outside_strings`]
-/// for tooling (CLI `--diff`, format-equivalence checks) that
-/// needs the same string-aware normalization.
-pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
-    fold_line_endings(src, &|_| false)
-}
-
-/// [`crlf_to_lf_outside_strings`], leaving every line `keep` holds (0-based,
-/// counted by `\n`) exactly as written, its line ending included.
-fn fold_line_endings<'s>(src: &'s str, keep: &dyn Fn(usize) -> bool) -> std::borrow::Cow<'s, str> {
-    if !src.contains('\r') {
-        return std::borrow::Cow::Borrowed(src);
-    }
-    // Re-prepend the BOM verbatim and lex the body after it, as the
-    // parser does.
-    let (body, bom) = match src.strip_prefix('\u{FEFF}') {
-        Some(rest) => (rest, "\u{FEFF}"),
-        None => (src, ""),
-    };
-    let mut out = String::with_capacity(src.len());
-    out.push_str(bom);
-    let mut chars = body.char_indices().peekable();
-    let mut strings = StringLiterals::new(body);
-    // The `[ \t\r]` run that starts at the last bare `\r` seen outside a
-    // string: where it ends, and whether it reaches the line ending or the
-    // end of the source (see `stray_cr_run`). Cached so a long run is
-    // scanned once, not once per `\r`.
-    let mut run_end = 0;
-    let mut run_is_stray = false;
-    // Where the current output line starts, found by `out_line_start` from
-    // where its last scan stopped, so the lone-marker check below steps over
-    // each output byte once in all (an `rfind` over `out` for every `\r` made
-    // a long line of stray `\r`s quadratic).
-    let mut line = OutLine {
-        start: bom.len(),
-        scanned: bom.len(),
-    };
-    // The 0-based line `i` is on.
-    let mut line_no = 0usize;
-    while let Some((i, ch)) = chars.next() {
-        let peek = chars.peek().map(|&(_, c)| c);
-        if strings.contains(i) || keep(line_no) {
-            out.push(ch);
-            if ch == '\n' {
-                line_no += 1;
-            }
-            continue;
-        }
-        if ch == '\n' {
-            line_no += 1;
-        }
-        if ch == '\r' && peek != Some('\n') && i >= run_end {
-            (run_end, run_is_stray) = stray_cr_run(body, i);
-        }
-        // A lone column-0 marker followed by a `\r` is a line beancount
-        // ignores (flex's `.` takes the `\r`); without the `\r` it is a
-        // bare-marker error. When the `\r` goes (the `\r` of a CRLF, or one
-        // in a stray run), a space stands in for it (#2779).
-        if ch == '\r' && (peek == Some('\n') || (i < run_end && run_is_stray)) {
-            let text = &out[line.start_in(&out)..];
-            if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
-                out.push(' ');
-            }
-        }
-        if ch == '\r' && peek == Some('\n') {
-            out.push('\n');
-            chars.next();
-            line_no += 1;
-        } else if matches!(ch, '\r' | ' ' | '\t') && i < run_end && run_is_stray {
-            // A stray run is trivia to the lexer (#2774) and is dropped.
-            // Folding it into a line break would add a blank line, which
-            // ends a transaction.
-        } else {
-            // Everything else is kept, a bare `\r` with more of the line
-            // after it included. The lexer does not end a line there (in a
-            // comment the `\r` is comment text, elsewhere it is an error), so
-            // folding it into a line break changed what the file means: the
-            // rest of a comment became a line of its own, a classic-Mac file
-            // the parser rejects became one it accepts, and `format_source`
-            // disagreed with `format_source_with_parsed`, which reads the
-            // unfolded text.
-            out.push(ch);
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
-
-/// Where the last line of a growing output string starts, for
-/// [`crlf_to_lf_outside_strings`]'s lone-marker check (#2779).
-struct OutLine {
-    start: usize,
-    /// How far `out` has been scanned for line breaks.
-    scanned: usize,
-}
-
-impl OutLine {
-    /// The start of `out`'s last line. Scans only what was pushed since the
-    /// last call, so all calls together step over each byte once. Counted in
-    /// tests (`crlf_to_lf_lone_marker_check_is_linear`).
-    fn start_in(&mut self, out: &str) -> usize {
-        let new = &out[self.scanned..];
-        #[cfg(test)]
-        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + new.len()));
-        if let Some(p) = new.rfind('\n') {
-            self.start = self.scanned + p + 1;
-        }
-        self.scanned = out.len();
-        self.start
-    }
-}
-
-/// The `[ \t\r]` run that starts at the bare `\r` at `body[at]`: where it
-/// ends, and whether it is stray, i.e. reaches a `\n` (possibly as the `\r`
-/// of a `\r\n`) or the end of `body`.
-///
-/// Mirrors `TokenIter::stray_cr_trivia_end` in the lexer, which makes such
-/// a run one `Whitespace` token (#2774): the line ends after it, so it is
-/// trivia, not a line terminator. A `\r` with more of the line after it is
-/// still an error to the lexer, and [`crlf_to_lf_outside_strings`] keeps
-/// folding it into a line break (classic-Mac files). Agreement is pinned by
-/// `crlf_to_lf_keeps_the_lexer_line_structure` in this file's tests.
-fn stray_cr_run(body: &str, at: usize) -> (usize, bool) {
-    let rest = &body.as_bytes()[at..];
-    let len = rest
-        .iter()
-        .position(|b| !matches!(b, b' ' | b'\t' | b'\r'))
-        .unwrap_or(rest.len());
-    let end = at + len;
-    (end, end == body.len() || body.as_bytes()[end] == b'\n')
-}
-
-/// `true` iff `src` contains at least one `\r` byte OUTSIDE a
-/// string literal — i.e. the byte sequence the canonical
-/// formatter would fold to `\n` via
-/// [`crlf_to_lf_outside_strings`].
-///
-/// This is the explicit predicate companion to the Cow return of
-/// [`crlf_to_lf_outside_strings`]. Tooling that only needs to
-/// know whether the fold would change bytes (the CLI `--diff`
-/// "CR-bearing line endings folded" cause line, the LSP
-/// did-the-formatter-touch-this guard) should call this instead
-/// of matching on `Cow::Owned`, which conflates allocation with
-/// semantic change. A future optimization that pre-allocated the
-/// Cow even on a no-op fold would silently invert that
-/// match-on-Cow guard; this predicate keeps the question
-/// answered by the bytes, not by allocation behavior.
-#[must_use]
-pub fn cr_outside_strings_present(src: &str) -> bool {
-    if !src.contains('\r') {
-        return false;
-    }
-    let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    // Stops at the first `\r` outside a string, and `StringLiterals` lexes
-    // only that far, so a CRLF file is decided at its first line ending.
-    let mut strings = StringLiterals::new(body);
-    body.match_indices('\r')
-        .any(|(at, _)| !strings.contains(at))
-}
-
-/// The string literals of a source, as the lexer reads them: the spans of its
-/// `String` tokens, for the line-ending helpers ([`crlf_to_lf_outside_strings`],
-/// [`lf_to_crlf_outside_strings`], [`cr_outside_strings_present`]), which
-/// leave the line endings inside a string alone.
-///
-/// Read from the lexer itself, not from a character-level mirror of it: every
-/// rule that decides whether a `"` opens a string (comments, the column-0
-/// lines beancount ignores, headings, `{#`, a quote that never closes, and
-/// beancount's invalid token, which takes a glued `"` in with the rest of its
-/// run, #2872) is the lexer's, and a character-level walk cannot follow the
-/// last without lexing.
-///
-/// Lexes the source lazily, as far as the bytes asked about, so a caller that
-/// stops early (`cr_outside_strings_present` at the first `\r` outside a
-/// string) does not lex the rest of the file.
-///
-/// `body` is a source with its leading BOM stripped, the text the parser
-/// builds its tree from, and it is read through the tree's own token stream
-/// ([`KindTokenIter`](crate::cst::lossless_tokens::KindTokenIter)), not the
-/// bare lexer. The two differ on a body that starts with a second BOM: the
-/// tree makes that BOM a token of its own and lexes the rest as a file start,
-/// where the bare lexer glues it into an invalid token with what follows
-/// (`\u{feff}"""` is one token there, and the `"` after it opens a string the
-/// tree does not have). The formatter emits the tree, so a `\r\n` the bare
-/// lexer put inside such a string was left unfolded, and the tree's NEWLINE
-/// holding it was then copied with its `\r` kept, one more blank line ahead
-/// of it on every pass (`fuzz_format_roundtrip`, #3084).
-struct StringLiterals<'src> {
-    /// The string spans after `current`, in order.
-    spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src>,
-    /// The first span that may still contain a later byte.
-    current: Option<std::ops::Range<usize>>,
-}
-
-impl<'src> StringLiterals<'src> {
-    fn new(body: &'src str) -> Self {
-        let mut spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src> = Box::new(
-            crate::cst::lossless_tokens::KindTokenIter::new(body)
-                .filter(|(kind, _)| *kind == crate::SyntaxKind::STRING)
-                .map(|(_, span)| span),
-        );
-        let current = spans.next();
-        Self { spans, current }
-    }
-
-    /// Whether the byte at `at` is inside a string literal, past its opening
-    /// quote. `at` must not decrease from one call to the next.
-    fn contains(&mut self, at: usize) -> bool {
-        while self.current.as_ref().is_some_and(|s| s.end <= at) {
-            self.current = self.spans.next();
-        }
-        self.current.as_ref().is_some_and(|s| s.start < at)
-    }
-}
-
-/// Byte offset of the first `\n` in `emitted` that ends a line, i.e. is not
-/// inside a string literal. `emitted` is formatter output starting at a line
-/// start (a directive or a posting), so it lexes as it will be read back.
-///
-/// The trailing-comment splices use this to find the end of the line a
-/// directive or posting header ends on. A plain `find('\n')` stops at a
-/// newline inside a multi-line string, and a comment spliced there becomes
-/// part of the string's value (#3046).
-fn first_line_end_outside_strings(emitted: &str) -> Option<usize> {
-    let mut strings = StringLiterals::new(emitted);
-    emitted
-        .match_indices('\n')
-        .map(|(at, _)| at)
-        .find(|&at| !strings.contains(at))
-}
-
 #[cfg(test)]
 thread_local! {
     /// A fault the certifier's tests inject into the emitter, standing in
@@ -1207,13 +885,6 @@ thread_local! {
     /// to write instead (`None` keeps it).
     pub(super) static EMIT_FAULT: std::cell::Cell<Option<fn(&str) -> Option<String>>> =
         const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
-    /// its current output line starts, for the linear-cost test (#2779).
-    static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -1283,7 +954,7 @@ impl NodeEmitter<'_, '_> {
         line_indent: Option<&crate::SyntaxToken>,
         forced: bool,
         spacing: &mut TopLevelSpacing,
-        out: &mut String,
+        out: &mut Out,
     ) -> Option<(usize, usize)> {
         if let Some(directive) = ast::Directive::cast(n.clone())
             && !forced
@@ -1298,9 +969,11 @@ impl NodeEmitter<'_, '_> {
                 && let Some(bad) = fault(&out[start..])
             {
                 out.truncate(start);
-                out.push_str(&bad);
+                for c in bad.chars() {
+                    out.push(c);
+                }
             }
-            spacing.after_node();
+            spacing.after_node(false);
             Some((start, out.len()))
         } else if n.kind() == crate::SyntaxKind::ERROR_NODE || ast::Directive::can_cast(n.kind()) {
             // A directive lands here only when a parse error falls inside it
@@ -1316,22 +989,167 @@ impl NodeEmitter<'_, '_> {
             // directive for spacing: an ERROR_NODE is a top-level content
             // block, so the author's blank lines around it (before it, and
             // before the next directive) are preserved, not flushed.
-            spacing.blank_lines(leading_blank_lines(n));
+            let verbatim = Verbatim::of(n);
+            spacing.blank_lines(verbatim.leading_blank_lines);
             spacing.flush(out);
             let start = out.len();
-            if let Some(ws) = line_indent {
+            if verbatim.leading_blank_lines == 0
+                && let Some(ws) = line_indent
+            {
                 out.push_str(ws.text());
             }
-            let trailing = emit_error_node(n, self.broken.keep_cr, out);
-            spacing.after_node();
-            // The node's own trailing blank lines were trimmed off its text;
-            // they still separate it from what follows.
-            spacing.blank_lines(trailing);
+            for t in &verbatim.tokens {
+                out.push_str(t.text());
+            }
+            spacing.after_node(!verbatim.ends_line);
+            // The node's own trailing blank lines are the gap after it.
+            spacing.blank_lines(verbatim.trailing_blank_lines);
             Some((start, out.len()))
         } else {
             // Any other non-directive node: nothing to emit.
             None
         }
+    }
+}
+
+/// The part of a top-level node copied byte for byte: from the start of its
+/// first line holding anything but blanks to the end of its last such line,
+/// that line's own line ending included (CRLF stays CRLF). The blank lines
+/// before and after it are the gaps between items, which the walk writes.
+///
+/// Read from the node's tokens, the tree's one reading of the text: a blank
+/// line is a `NEWLINE` token with only `WHITESPACE` before it.
+struct Verbatim {
+    tokens: Vec<crate::SyntaxToken>,
+    leading_blank_lines: usize,
+    trailing_blank_lines: usize,
+    /// Whether the copied text ends with its line ending (not at the end of
+    /// the file without one).
+    ends_line: bool,
+}
+
+impl Verbatim {
+    fn of(node: &crate::SyntaxNode) -> Self {
+        let tokens: Vec<crate::SyntaxToken> = node
+            .descendants_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .collect();
+        let newline = |t: &crate::SyntaxToken| t.kind() == crate::SyntaxKind::NEWLINE;
+        let blank = |t: &crate::SyntaxToken| {
+            matches!(
+                t.kind(),
+                crate::SyntaxKind::NEWLINE | crate::SyntaxKind::WHITESPACE
+            )
+        };
+        let Some(first) = tokens.iter().position(|t| !blank(t)) else {
+            return Self {
+                leading_blank_lines: tokens.iter().filter(|t| newline(t)).count(),
+                tokens: Vec::new(),
+                trailing_blank_lines: 0,
+                ends_line: true,
+            };
+        };
+        let start = tokens[..first]
+            .iter()
+            .rposition(newline)
+            .map_or(0, |i| i + 1);
+        let last = tokens.iter().rposition(|t| !blank(t)).unwrap_or(first);
+        let end = tokens[last + 1..]
+            .iter()
+            .position(newline)
+            .map(|i| last + 1 + i + 1);
+        let leading_blank_lines = tokens[..start].iter().filter(|t| newline(t)).count();
+        let (end, ends_line) = match end {
+            Some(end) => (end, true),
+            // The node runs to the end of the file without a line ending:
+            // copied to its very end, its last blanks included.
+            None => (tokens.len(), false),
+        };
+        let trailing_blank_lines = tokens[end..].iter().filter(|t| newline(t)).count();
+        Self {
+            tokens: tokens[start..end].to_vec(),
+            leading_blank_lines,
+            trailing_blank_lines,
+            ends_line,
+        }
+    }
+}
+
+/// The text the formatter writes, recording every line ending it writes
+/// itself, as opposed to the line endings it copies from the source (inside a
+/// string literal, in a verbatim item).
+///
+/// The record is what lets the emitter find the end of the line it just wrote
+/// (to put a trailing comment there, #3046) without lexing its own output
+/// again, and what makes the line ending a choice of the writer
+/// ([`LineEnding`]) instead of a rewrite of finished text.
+pub(super) struct Out {
+    text: String,
+    /// Where each line ending the formatter wrote starts, ascending.
+    line_ends: Vec<usize>,
+    ending: LineEnding,
+}
+
+impl Out {
+    pub(super) const fn new(ending: LineEnding) -> Self {
+        Self {
+            text: String::new(),
+            line_ends: Vec::new(),
+            ending,
+        }
+    }
+
+    /// Write a character. `'\n'` writes the formatter's own line ending.
+    fn push(&mut self, c: char) {
+        if c == '\n' {
+            self.line_ends.push(self.text.len());
+            self.text.push_str(match self.ending {
+                LineEnding::Lf => "\n",
+                LineEnding::Crlf => "\r\n",
+            });
+        } else {
+            self.text.push(c);
+        }
+    }
+
+    /// Write text as it is: copied text, never the formatter's own line
+    /// ending.
+    fn push_str(&mut self, s: &str) {
+        self.text.push_str(s);
+    }
+
+    /// Insert text without a line ending at `at`, which is not inside a
+    /// recorded line ending.
+    fn insert_str(&mut self, at: usize, s: &str) {
+        self.text.insert_str(at, s);
+        for end in self.line_ends.iter_mut().filter(|e| **e >= at) {
+            *end += s.len();
+        }
+    }
+
+    #[cfg(test)]
+    fn truncate(&mut self, len: usize) {
+        self.text.truncate(len);
+        self.line_ends.retain(|&e| e < len);
+    }
+
+    /// Where the first line ending the formatter wrote at or after `at`
+    /// starts.
+    fn line_end_from(&self, at: usize) -> Option<usize> {
+        let i = self.line_ends.partition_point(|&e| e < at);
+        self.line_ends.get(i).copied()
+    }
+
+    pub(super) fn into_string(self) -> String {
+        self.text
+    }
+}
+
+impl std::ops::Deref for Out {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
     }
 }
 
@@ -1351,11 +1169,6 @@ impl NodeEmitter<'_, '_> {
 #[derive(Default)]
 pub(super) struct ErrorRanges {
     ranges: Vec<(usize, usize)>,
-    /// Whether a verbatim copy keeps a `\r` before a line ending. Set by
-    /// `format_source_grouped`, whose line-ending fold leaves a `\r` only
-    /// where dropping it would repair a broken line; elsewhere a `\r` there
-    /// is a CRLF the canonical LF output drops.
-    keep_cr: bool,
 }
 
 impl ErrorRanges {
@@ -1384,10 +1197,7 @@ impl ErrorRanges {
                 _ => merged.push((start, end)),
             }
         }
-        Self {
-            ranges: merged,
-            keep_cr: false,
-        }
+        Self { ranges: merged }
     }
 
     /// Whether `range` shares a byte with any error range.
@@ -1454,6 +1264,21 @@ fn format_node_with_style(
     broken: &ErrorRanges,
     plan: &mut Plan,
 ) -> String {
+    let mut out = Out::new(LineEnding::Lf);
+    walk_source_file(node, alignment, group, broken, plan, &mut out);
+    out.into_string()
+}
+
+/// The whole-file walk behind [`format_node_with_style`], writing into `out`
+/// (which may already hold the file's leading BOM).
+fn walk_source_file(
+    node: &crate::SyntaxNode,
+    alignment: PostingAlignment,
+    group: GroupingStyle<'_>,
+    broken: &ErrorRanges,
+    plan: &mut Plan,
+    out: &mut Out,
+) {
     // Precondition check (debug-only). The bare `format_node`
     // delegate already validated the kind via the
     // `SourceFile::cast` it performs for `compute_alignment`, so
@@ -1472,7 +1297,6 @@ fn format_node_with_style(
         "format_node_with_alignment called on non-SOURCE_FILE node (got {:?})",
         node.kind(),
     );
-    let mut out = String::new();
     // Walk every direct child in source order so file-level comments
     // (file-leading per phase-2.0 trivia attachment, plus file-
     // trailing) interleave correctly with directives. Inter-directive
@@ -1523,7 +1347,7 @@ fn format_node_with_style(
                     line_indent.as_ref(),
                     plan.forced(item),
                     &mut spacing,
-                    &mut out,
+                    out,
                 );
                 plan.record(item, written);
                 item += 1;
@@ -1545,23 +1369,21 @@ fn format_node_with_style(
                     let keep_indent = line_indent
                         .as_ref()
                         .filter(|_| super::convert::is_comment_kind(t.kind()));
-                    spacing.top_level_token(
-                        &t,
-                        keep_indent.map(crate::SyntaxToken::text),
-                        &mut out,
-                    );
+                    spacing.top_level_token(&t, keep_indent.map(crate::SyntaxToken::text), out);
                 }
             }
         }
     }
     // Blank lines after the last item are the file's trailing ones.
-    spacing.flush(&mut out);
-    // A last line without its newline gets one; an empty file stays empty,
-    // as bean-format leaves it.
-    if !out.is_empty() && !out.ends_with('\n') {
+    spacing.flush(out);
+    // A last line without its newline gets one, if the formatter wrote it; an
+    // empty file stays empty, as bean-format leaves it. A line copied as
+    // written keeps going without one: the newline would be a change to text
+    // the formatter does not own, and can change how it reads (`A; ` gains a
+    // comment, a lone capital at the end of the file becomes a flag).
+    if !out.is_empty() && !out.ends_with('\n') && !spacing.open_line {
         out.push('\n');
     }
-    out
 }
 
 /// Blank-line bookkeeping for the top-level walk, shared by whole-file and
@@ -1583,6 +1405,9 @@ struct TopLevelSpacing {
     /// Whether a BOM token was written on the current line, which is still
     /// open: its `NEWLINE` is written as it comes.
     bom_line_open: bool,
+    /// Whether the last thing written is a verbatim copy that ends the file
+    /// without a line ending.
+    open_line: bool,
 }
 
 impl TopLevelSpacing {
@@ -1592,23 +1417,25 @@ impl TopLevelSpacing {
     }
 
     /// Write the held blank lines ahead of the item about to be emitted.
-    fn flush(&mut self, out: &mut String) {
+    fn flush(&mut self, out: &mut Out) {
         for _ in 0..self.pending {
             out.push('\n');
         }
         self.pending = 0;
     }
 
-    /// A directive or error node was emitted; it ends with its own newline.
-    const fn after_node(&mut self) {
+    /// A directive or error node was emitted; it ends with its own newline,
+    /// unless `open` (a verbatim copy at the end of the file).
+    const fn after_node(&mut self, open: bool) {
         self.line_has_comment = false;
         self.bom_line_open = false;
+        self.open_line = open;
     }
 
     /// A top-level token: a comment is emitted on its own line, a `NEWLINE`
     /// ends a comment's line or is a blank line, anything else is ignored.
     /// `indent` is written before a comment (a reported, indented comment line).
-    fn top_level_token(&mut self, t: &crate::SyntaxToken, indent: Option<&str>, out: &mut String) {
+    fn top_level_token(&mut self, t: &crate::SyntaxToken, indent: Option<&str>, out: &mut Out) {
         match t.kind() {
             crate::SyntaxKind::COMMENT
             | crate::SyntaxKind::PERCENT_COMMENT
@@ -1755,13 +1582,16 @@ pub fn format_node_range_with_alignment(
     range: rowan::TextRange,
     alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    format_node_range_with_style(
+    let mut out = Out::new(LineEnding::Lf);
+    let snap = format_node_range_with_style(
         node,
         range,
         alignment,
         GroupingStyle::default(),
         &ErrorRanges::default(),
-    )
+        &mut out,
+    )?;
+    Some((snap, out.into_string()))
 }
 
 /// [`format_node_range`] under an explicit grouping style, measuring the
@@ -1778,7 +1608,16 @@ pub fn format_node_range_grouped(
 ) -> Option<(rowan::TextRange, String)> {
     let source_file = SourceFile::cast(node.clone())?;
     let alignment = compute_alignment(&source_file, style);
-    format_node_range_with_style(node, range, alignment, style, &ErrorRanges::default())
+    let mut out = Out::new(LineEnding::Lf);
+    let snap = format_node_range_with_style(
+        node,
+        range,
+        alignment,
+        style,
+        &ErrorRanges::default(),
+        &mut out,
+    )?;
+    Some((snap, out.into_string()))
 }
 
 /// [`format_node_range`] for a tree that may hold parse errors.
@@ -1802,6 +1641,25 @@ pub fn format_parsed_range(
     range: rowan::TextRange,
     style: GroupingStyle<'_>,
 ) -> Option<(rowan::TextRange, String)> {
+    format_parsed_range_with_options(
+        parse_result,
+        range,
+        FormatOptions {
+            grouping: style,
+            ..FormatOptions::default()
+        },
+    )
+}
+
+/// [`format_parsed_range`] under `options`: the grouping style, and the line
+/// ending written (an editor keeping a CRLF document's line endings).
+#[must_use]
+pub fn format_parsed_range_with_options(
+    parse_result: &crate::ParseResult,
+    range: rowan::TextRange,
+    options: FormatOptions<'_>,
+) -> Option<(rowan::TextRange, String)> {
+    let style = options.grouping;
     let node = parse_result.syntax_node();
     let alignment = if style.groups_anything() {
         compute_alignment(&SourceFile::cast(node.clone())?, style)
@@ -1809,7 +1667,9 @@ pub fn format_parsed_range(
         parse_result.alignment()
     };
     let broken = ErrorRanges::new(parse_result);
-    format_node_range_with_style(&node, range, alignment, style, &broken)
+    let mut out = Out::new(options.line_ending);
+    let snap = format_node_range_with_style(&node, range, alignment, style, &broken, &mut out)?;
+    Some((snap, out.into_string()))
 }
 
 /// [`format_node_range_with_alignment`] with an explicit grouping style.
@@ -1825,7 +1685,8 @@ fn format_node_range_with_style(
     alignment: PostingAlignment,
     style: GroupingStyle<'_>,
     broken: &ErrorRanges,
-) -> Option<(rowan::TextRange, String)> {
+    out: &mut Out,
+) -> Option<rowan::TextRange> {
     // Precondition check (debug-only). Same rationale as
     // `format_node_with_alignment`: the bare delegate already
     // validated the kind, so the most common call path (bare →
@@ -1926,7 +1787,7 @@ fn format_node_range_with_style(
     // the child set is small enough that the second walk is
     // cheap. (Re-walking also keeps the data-flow obvious: snap
     // computation and emission are two distinct concerns.)
-    let mut out = String::new();
+    // `out` is the caller's, empty.
     let mut spacing = TopLevelSpacing::default();
     // A top-level WHITESPACE token directly before a node, tracked as the
     // whole-file walk tracks it, so a verbatim copy keeps its first line's
@@ -1966,22 +1827,22 @@ fn format_node_range_with_style(
                     group: style,
                     broken,
                 };
-                let _ = emitter.emit(&n, line_indent.as_ref(), false, &mut spacing, &mut out);
+                let _ = emitter.emit(&n, line_indent.as_ref(), false, &mut spacing, out);
             }
             rowan::NodeOrToken::Token(t) => {
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
                     indent = Some(t);
                 } else {
-                    spacing.top_level_token(&t, None, &mut out);
+                    spacing.top_level_token(&t, None, out);
                 }
             }
         }
     }
-    spacing.flush(&mut out);
-    if !out.ends_with('\n') {
+    spacing.flush(out);
+    if !out.ends_with('\n') && !spacing.open_line {
         out.push('\n');
     }
-    Some((snap, out))
+    Some(snap)
 }
 
 /// Whether `child` (a CST node's text range) intersects the
@@ -2137,7 +1998,7 @@ fn emit_directive(
     d: &ast::Directive,
     align: PostingAlignment,
     group: GroupingStyle<'_>,
-    out: &mut String,
+    out: &mut Out,
 ) {
     // Leading inter-directive trivia: COMMENT tokens that sit
     // BEFORE the directive's first content token. Per phase-2.0
@@ -2183,11 +2044,12 @@ fn emit_directive(
     // (where the source had it), not after the body. A multi-line string
     // in the header (narration, query, custom value, note, ...) carries
     // `\n` bytes of its own; splicing before one of those moved the
-    // comment INTO the string and silently changed its value (#3046).
+    // comment INTO the string and silently changed its value (#3046). The
+    // line endings the emitter wrote itself are recorded by `Out`, so the
+    // header's is found without reading the output again.
     if let Some(c) = trailing
-        && let Some(newline_rel) = first_line_end_outside_strings(&out[len_before..])
+        && let Some(insert_at) = out.line_end_from(len_before)
     {
-        let insert_at = len_before + newline_rel;
         let mut splice = String::with_capacity(c.len() + 1);
         splice.push(' ');
         splice.push_str(&c);
@@ -2214,98 +2076,12 @@ const fn is_lone_marker(line: &str) -> bool {
 /// beancount ignores and not a bare-marker error (#2779). bean-format keeps
 /// such a line's trailing whitespace too; a `\r` cannot survive the LF
 /// output, so a space stands in for it.
-fn push_comment_text(out: &mut String, text: &str) {
+fn push_comment_text(out: &mut Out, text: &str) {
     let text = text.trim_end_matches(['\n', '\r']);
     out.push_str(text);
     if is_lone_marker(text) {
         out.push(' ');
     }
-}
-
-/// Emit an `ERROR_NODE`'s text verbatim, so `format` never deletes content it
-/// could not parse (#1335) — chiefly org-mode `*` section headers and the
-/// comments grouped with them. Only trailing whitespace per line is stripped
-/// (the formatter's no-trailing-space policy) and the node's trailing newlines
-/// are collapsed to one; everything else — including blank lines, comments and
-/// the unparsable lines themselves — is preserved exactly as written.
-///
-/// The trimming works token by token, so it never reaches into a `STRING`: a
-/// multi-line string in a directive copied verbatim (#2794) keeps its spaces
-/// and `\r`s, which are part of its value.
-///
-/// Returns the number of blank lines that ended the node's text, which it
-/// trims; the caller keeps them as the gap before whatever follows (#2506).
-fn emit_error_node(node: &crate::SyntaxNode, keep_cr: bool, out: &mut String) -> usize {
-    // Trim a line's trailing whitespace, but not past the start of the line
-    // (the newline ending the line before is not this line's, so a blank
-    // line stays) nor past the end of the last string on it.
-    //
-    // An org-mode heading that is one `*` and whitespace (`* `, `*\t`,
-    // `*\r`) is ignored by beancount, but a lone `*` is an error there, so
-    // one space is kept after the `*` (#2779). A line that was a lone marker
-    // already stays one: it is an error either way.
-    fn end_line(text: &mut String, string_end: usize, keep_cr: bool) {
-        let line_start = text.rfind('\n').map_or(0, |i| i + 1);
-        let ignored = crate::logos_lexer::beancount_ignores_line(&text[line_start..]);
-        // Only the blanks the lexer skips. `str::trim_end` also takes Unicode
-        // whitespace (a no-break space, a vertical tab), which the lexer
-        // reports as an error: trimming it deleted the error with it. A `\r`
-        // stays when `keep_cr` says so: then it is one dropping which would
-        // repair the line (a lone capital before a `\r` is beancount's
-        // invalid token; see `RepairedLines`).
-        let content = text.trim_end_matches([' ', '\t', '\r']).len();
-        // With `keep_cr`, a trailing run holding a `\r` is kept whole: it is
-        // the stray `\r` run of a line kept as written (`RepairedLines`), and
-        // trimming the blanks after its `\r` would turn it into a CRLF, which
-        // reads differently again.
-        let keep = if keep_cr && text[content..].contains('\r') {
-            text.len()
-        } else {
-            content
-        };
-        let keep = keep.max(line_start).max(string_end);
-        text.truncate(keep);
-        if ignored && is_lone_marker(&text[line_start..]) {
-            text.push(' ');
-        }
-    }
-    let mut text = String::new();
-    let mut string_end = 0;
-    for t in node
-        .descendants_with_tokens()
-        .filter_map(rowan::NodeOrToken::into_token)
-    {
-        match t.kind() {
-            crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
-                // A CRLF's `\r` is part of the line for `end_line`'s
-                // ignored-line check (`*\r\n` is a heading), and trimmed
-                // unless `keep_cr`.
-                if t.text().starts_with('\r') {
-                    text.push('\r');
-                }
-                end_line(&mut text, string_end, keep_cr);
-                text.push('\n');
-            }
-            crate::SyntaxKind::STRING => {
-                text.push_str(t.text());
-                string_end = text.len();
-            }
-            _ => text.push_str(t.text()),
-        }
-    }
-    end_line(&mut text, string_end, keep_cr);
-    // Trim leading AND trailing blank lines: the caller emits the leading
-    // blank lines (via `leading_blank_lines`) so emitting them here too would
-    // double-count them and break idempotence. Internal blank lines and the
-    // content (org headers, grouped comments) are preserved. A string never
-    // starts or ends the text with a newline (it is quoted), so this does not
-    // reach into one.
-    let body = text.trim_matches('\n');
-    out.push_str(body);
-    out.push('\n');
-    // The trailing newlines minus the one ending the last line.
-    let tail = &text[text.trim_end_matches('\n').len()..];
-    tail.len().saturating_sub(1)
 }
 
 /// Number of blank lines the author left immediately before this
@@ -2340,7 +2116,7 @@ fn leading_blank_lines(node: &crate::SyntaxNode) -> usize {
 /// `convert::is_comment_kind` accepts) on its own line. Whitespace and newlines in the leading region
 /// are ignored — the canonical form controls inter-directive
 /// blank-line spacing separately.
-fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
+fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut Out) {
     // Blank lines AFTER the first comment (between comments, and between the
     // last comment and the directive) are the author's and are kept (#2506).
     // Those before the first comment are `leading_blank_lines`, which the
@@ -2436,7 +2212,7 @@ fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
 
 // ---- Single-line directives ------------------------------------
 
-fn emit_open(d: &ast::OpenDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_open(d: &ast::OpenDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -2477,7 +2253,7 @@ fn emit_open(d: &ast::OpenDirective, group: GroupingStyle<'_>, out: &mut String)
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_close(d: &ast::CloseDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_close(d: &ast::CloseDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -2490,7 +2266,7 @@ fn emit_close(d: &ast::CloseDirective, group: GroupingStyle<'_>, out: &mut Strin
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_commodity(d: &ast::CommodityDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_commodity(d: &ast::CommodityDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let currency = d
         .currency()
@@ -2503,7 +2279,7 @@ fn emit_commodity(d: &ast::CommodityDirective, group: GroupingStyle<'_>, out: &m
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_note(d: &ast::NoteDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_note(d: &ast::NoteDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -2522,7 +2298,7 @@ fn emit_note(d: &ast::NoteDirective, group: GroupingStyle<'_>, out: &mut String)
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_event(d: &ast::EventDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_event(d: &ast::EventDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let event_type = d
         .event_type()
@@ -2538,7 +2314,7 @@ fn emit_event(d: &ast::EventDirective, group: GroupingStyle<'_>, out: &mut Strin
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_query(d: &ast::QueryDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_query(d: &ast::QueryDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let name = d.name().map(|s| s.text().to_string()).unwrap_or_default();
     let query = d.query().map(|s| s.text().to_string()).unwrap_or_default();
@@ -2551,7 +2327,7 @@ fn emit_query(d: &ast::QueryDirective, group: GroupingStyle<'_>, out: &mut Strin
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_pad(d: &ast::PadDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_pad(d: &ast::PadDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let target = d
         .target_account()
@@ -2588,7 +2364,7 @@ fn emit_pad(d: &ast::PadDirective, group: GroupingStyle<'_>, out: &mut String) {
 /// `document` carried this walk alone while `note` had none, so formatting a
 /// note deleted its tags and links (#2184). Sharing it is what keeps the two
 /// from drifting apart again.
-fn emit_header_tags_and_links(node: &crate::SyntaxNode, out: &mut String) {
+fn emit_header_tags_and_links(node: &crate::SyntaxNode, out: &mut Out) {
     let mut seen_content = false;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
@@ -2613,7 +2389,7 @@ fn emit_header_tags_and_links(node: &crate::SyntaxNode, out: &mut String) {
     }
 }
 
-fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -2630,7 +2406,7 @@ fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_price(d: &ast::PriceDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_price(d: &ast::PriceDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let base = d
         .base_currency()
@@ -2651,7 +2427,7 @@ fn emit_price(d: &ast::PriceDirective, group: GroupingStyle<'_>, out: &mut Strin
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_balance(d: &ast::BalanceDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_balance(d: &ast::BalanceDirective, group: GroupingStyle<'_>, out: &mut Out) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -2680,7 +2456,7 @@ fn emit_balance(d: &ast::BalanceDirective, group: GroupingStyle<'_>, out: &mut S
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut Out) {
     // `custom` / `pushmeta` values are not denominated in anything, so
     // they take the ledger-wide default.
     let run_group = group.groups(None);
@@ -2748,7 +2524,7 @@ fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut Str
 
 // ---- Top-level non-dated directives -----------------------------
 
-fn emit_option(d: &ast::OptionDirective, out: &mut String) {
+fn emit_option(d: &ast::OptionDirective, out: &mut Out) {
     let key = d.key().map(|s| s.text().to_string()).unwrap_or_default();
     let value = d.value().map(|s| s.text().to_string()).unwrap_or_default();
     out.push_str("option ");
@@ -2758,14 +2534,14 @@ fn emit_option(d: &ast::OptionDirective, out: &mut String) {
     out.push('\n');
 }
 
-fn emit_include(d: &ast::IncludeDirective, out: &mut String) {
+fn emit_include(d: &ast::IncludeDirective, out: &mut Out) {
     let path = d.path().map(|s| s.text().to_string()).unwrap_or_default();
     out.push_str("include ");
     out.push_str(&path);
     out.push('\n');
 }
 
-fn emit_plugin(d: &ast::PluginDirective, out: &mut String) {
+fn emit_plugin(d: &ast::PluginDirective, out: &mut Out) {
     let module = d.module().map(|s| s.text().to_string()).unwrap_or_default();
     out.push_str("plugin ");
     out.push_str(&module);
@@ -2778,21 +2554,21 @@ fn emit_plugin(d: &ast::PluginDirective, out: &mut String) {
 
 // ---- State directives (no metadata) -----------------------------
 
-fn emit_pushtag(d: &ast::PushtagDirective, out: &mut String) {
+fn emit_pushtag(d: &ast::PushtagDirective, out: &mut Out) {
     let tag = d.tag().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str("pushtag ");
     out.push_str(&tag);
     out.push('\n');
 }
 
-fn emit_poptag(d: &ast::PoptagDirective, out: &mut String) {
+fn emit_poptag(d: &ast::PoptagDirective, out: &mut Out) {
     let tag = d.tag().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str("poptag ");
     out.push_str(&tag);
     out.push('\n');
 }
 
-fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut Out) {
     // `custom` / `pushmeta` values are not denominated in anything, so
     // they take the ledger-wide default.
     let run_group = group.groups(None);
@@ -2824,7 +2600,7 @@ fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut
     out.push('\n');
 }
 
-fn emit_popmeta(d: &ast::PopmetaDirective, out: &mut String) {
+fn emit_popmeta(d: &ast::PopmetaDirective, out: &mut Out) {
     let key = d.key().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str("popmeta ");
     out.push_str(&key);
@@ -2837,7 +2613,7 @@ fn emit_transaction(
     d: &ast::Transaction,
     align: PostingAlignment,
     group: GroupingStyle<'_>,
-    out: &mut String,
+    out: &mut Out,
 ) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str(&date);
@@ -2961,7 +2737,7 @@ fn emit_posting(
     p: &ast::Posting,
     align: PostingAlignment,
     group: GroupingStyle<'_>,
-    out: &mut String,
+    out: &mut Out,
 ) {
     // Posting-trailing comment (same-line, before the posting-line
     // NEWLINE) — capture upfront so we can splice it back in just
@@ -3060,16 +2836,17 @@ fn emit_posting(
     }
     out.push('\n');
     // Splice the trailing comment in BEFORE the posting-line
-    // NEWLINE: the first '\n' in the emitted posting region that is
-    // outside a string literal. A cost-spec label can be a multi-line
-    // string (`{"lab\nel"}`), and its `\n` is part of the value (#3046).
+    // NEWLINE: the first line ending the emitter wrote in the posting
+    // region (`Out` records them), not a `\n` inside a string literal. A
+    // cost-spec label can be a multi-line string (`{"lab\nel"}`), and its
+    // `\n` is part of the value (#3046).
     if let Some(c) = trailing
-        && let Some(rel) = first_line_end_outside_strings(&out[posting_start..])
+        && let Some(at) = out.line_end_from(posting_start)
     {
         let mut splice = String::with_capacity(c.len() + 1);
         splice.push(' ');
         splice.push_str(&c);
-        out.insert_str(posting_start + rel, &splice);
+        out.insert_str(at, &splice);
     }
     // Posting body: emit attached metadata AND posting-internal comment
     // lines in source order, indented 4 (deeper than the posting's 2).
@@ -3299,7 +3076,7 @@ fn canonical_number(text: &str, group: bool) -> std::borrow::Cow<'_, str> {
 /// `1 + 2) USD USD`). Sign drift in BALANCE / PRICE is silent data
 /// corruption — a balance assertion that previously asserted a
 /// debit would assert a credit after a round-trip.
-fn emit_amount_expression(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_amount_expression(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut Out) {
     let raw: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
@@ -3336,7 +3113,9 @@ fn emit_amount_expression(node: &crate::SyntaxNode, group: GroupingStyle<'_>, ou
         }
     }
     let end = first_currency_idx.unwrap_or(raw.len());
-    write_canonical_token_sequence(&raw[..end], group, out);
+    let mut text = String::new();
+    write_canonical_token_sequence(&raw[..end], group, &mut text);
+    out.push_str(&text);
 }
 
 /// Emit an `AMOUNT` subnode's expression region: every non-trivia
@@ -3534,7 +3313,7 @@ fn balance_tolerance(
 /// value\n`). Most directive types don't have a `.meta_entries()`
 /// accessor on their typed wrapper; we walk the syntax node
 /// directly to stay uniform.
-fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut Out) {
     // Source-order walk so body-internal COMMENT lines are preserved
     // alongside the metadata entries (#1332). The header region (up to and
     // including the header-terminating NEWLINE) is skipped so the
@@ -3579,7 +3358,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out:
 /// Two semantically-equivalent inputs (e.g. `foo: "bar"` and
 /// `foo:    "bar"`) produce byte-identical output — the
 /// gofmt-style invariant the file rustdoc promises.
-fn emit_meta_entry(m: &MetaEntry, indent: &str, group: GroupingStyle<'_>, out: &mut String) {
+fn emit_meta_entry(m: &MetaEntry, indent: &str, group: GroupingStyle<'_>, out: &mut Out) {
     out.push_str(indent);
     // Split the META_ENTRY's non-trivia tokens into [META_KEY,
     // value*]. The META_KEY token already includes the trailing
@@ -3605,7 +3384,9 @@ fn emit_meta_entry(m: &MetaEntry, indent: &str, group: GroupingStyle<'_>, out: &
     let value_tokens: Vec<crate::SyntaxToken> = iter.cloned().collect();
     if !value_tokens.is_empty() {
         out.push(' ');
-        write_canonical_token_sequence(&value_tokens, group, out);
+        let mut text = String::new();
+        write_canonical_token_sequence(&value_tokens, group, &mut text);
+        out.push_str(&text);
     }
     out.push('\n');
 }
@@ -4558,7 +4339,9 @@ mod tests {
         // the file into a different, valid one. No text is lost either way.
         let src = "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\r";
         let out = format_source(src);
-        assert_eq!(out, "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\n");
+        // A last line copied as written gets no newline: adding one is a
+        // change to text the formatter does not own.
+        assert_eq!(out, src);
         assert!(!crate::parse(&out).errors.is_empty(), "{out:?}");
     }
 
@@ -4829,9 +4612,7 @@ mod tests {
         // the lexer's SHEBANG / EMACS_DIRECTIVE comment token. The
         // fixture places `#+` mid-line and tails it with an
         // unbalanced `"`, which the lexer reads as an unterminated
-        // string cut at its line: the string scan
-        // (`StringLiterals`) runs the lexer itself, and the
-        // lexer-agreement property test pins that the two agree.
+        // string cut at its line.
         // The line is a parse error (a mid-line `#+` is not a
         // comment in beancount, #2802), so the round-trip body
         // skips it.
@@ -4942,53 +4723,6 @@ mod tests {
     /// paired with a parseable directive, and its comment attaches as
     /// inter-directive trivia under the directive-terminator rule.
     const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 14;
-
-    #[test]
-    fn lf_to_crlf_outside_strings_preserves_string_interior() {
-        // Bug: a flat in_string-only state machine would re-inject
-        // CRLF inside multi-line strings, mutating the user's bytes.
-        let s = "2024-01-15 note Assets:Bank \"line 1\nline 2\"\n";
-        let out = lf_to_crlf_outside_strings(s);
-        assert!(out.contains("line 1\nline 2"), "got: {out:?}");
-        assert!(out.ends_with("\r\n"), "got: {out:?}");
-    }
-
-    #[test]
-    fn lf_to_crlf_outside_strings_handles_comment_with_quote() {
-        // Bug: an unbalanced `"` inside a `;` comment formerly flipped
-        // in_string=true for the rest of the file, leaving every
-        // subsequent newline as LF.
-        let s = "; comment with \"a quote\n2024-01-01 open Assets:A\n";
-        let out = lf_to_crlf_outside_strings(s);
-        assert_eq!(
-            out,
-            "; comment with \"a quote\r\n2024-01-01 open Assets:A\r\n",
-        );
-    }
-
-    #[test]
-    fn lf_to_crlf_outside_strings_handles_percent_comment_with_quote() {
-        let s = "% percent \"quote\n2024-01-01 open Assets:A\n";
-        let out = lf_to_crlf_outside_strings(s);
-        assert_eq!(out, "% percent \"quote\r\n2024-01-01 open Assets:A\r\n");
-    }
-
-    #[test]
-    fn crlf_to_lf_preserves_crlf_inside_strings() {
-        // Bug fix mirror: a Windows-authored multi-line string had
-        // its CRLF folded to LF by the pre-parse normalizer too,
-        // which silently mutated the user's bytes.
-        let s = "2024-01-15 note Assets:Bank \"line1\r\nline2\"\r\n";
-        let normalized = crlf_to_lf_outside_strings(s);
-        // Outside the string, the trailing CRLF folds to LF; inside
-        // the string, CRLF stays CRLF (user's bytes preserved).
-        assert!(
-            normalized.contains("\"line1\r\nline2\""),
-            "got: {:?}",
-            &*normalized
-        );
-        assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
-    }
 
     /// Formatting must not change what the file MEANS.
     ///
@@ -5381,37 +5115,6 @@ mod tests {
         );
     }
 
-    /// `SHEBANG` / `EMACS_DIRECTIVE` lines (`#!…` / `#+…` at line
-    /// start) also count as comments for the LSP-CRLF state
-    /// machine. A stray quote inside such a line used to flip
-    /// `in_string=true` for the rest of the file just like the
-    /// `;` / `%` comment case the round-3 fix covered.
-    #[test]
-    fn lf_to_crlf_outside_strings_handles_emacs_directive_with_quote() {
-        let s = "#+title: \"My Book\n2024-01-01 open Assets:A\n";
-        let out = lf_to_crlf_outside_strings(s);
-        assert_eq!(out, "#+title: \"My Book\r\n2024-01-01 open Assets:A\r\n");
-    }
-
-    #[test]
-    fn lf_to_crlf_outside_strings_handles_shebang_with_quote() {
-        let s = "#!shebang \"quote\n2024-01-01 open Assets:A\n";
-        let out = lf_to_crlf_outside_strings(s);
-        assert_eq!(out, "#!shebang \"quote\r\n2024-01-01 open Assets:A\r\n");
-    }
-
-    /// `#` NOT at line start is a TAG / HASH token; the state
-    /// machine must NOT treat it as a comment opener.
-    #[test]
-    fn lf_to_crlf_outside_strings_hash_mid_line_is_not_comment() {
-        let s = "2024-01-15 * \"x\" #tag1\n  Assets:A 1 USD\n";
-        let out = lf_to_crlf_outside_strings(s);
-        // Every LF outside strings becomes CRLF — including the
-        // one ending the tag-bearing line.
-        assert!(out.contains("#tag1\r\n"), "got: {out:?}");
-        assert!(out.ends_with("\r\n"), "got: {out:?}");
-    }
-
     /// Regression for Copilot #2 inline review on PR #1284: a
     /// previous `emit_amount_expression` dropped leading unary
     /// signs and parens, flipping the sign on
@@ -5477,31 +5180,6 @@ mod tests {
         let src = "this is not a directive at all\n";
         let err = super::try_format_source(src).expect_err("garbage should error");
         assert!(!err.is_empty(), "errors must not be empty");
-    }
-
-    #[test]
-    fn cr_outside_strings_present_distinguishes_in_string_cr() {
-        // CR inside a multi-line string literal must NOT count —
-        // the formatter wouldn't fold it.
-        let in_string_only = "2024-01-15 note Assets:Bank \"line1\r\nline2\"\n";
-        assert!(!super::cr_outside_strings_present(in_string_only));
-
-        // CR outside any string literal (CRLF line terminator)
-        // counts — that's what crlf_to_lf_outside_strings would
-        // fold.
-        let crlf_terminator = "2024-01-01 open Assets:A\r\n";
-        assert!(super::cr_outside_strings_present(crlf_terminator));
-
-        // No `\r` at all — fast path.
-        let lf_only = "2024-01-01 open Assets:A\n";
-        assert!(!super::cr_outside_strings_present(lf_only));
-
-        // CR inside a `;` comment is outside any string and counts.
-        // (Beancount lexer's comment regex excludes the newline, so
-        // the comment region ends at `\r`; either way, the predicate
-        // says "yes, the formatter would fold this byte".)
-        let comment_with_cr = "; comment with \"quote\rstuff\n";
-        assert!(super::cr_outside_strings_present(comment_with_cr));
     }
 
     #[test]
@@ -5729,194 +5407,6 @@ mod tests {
         );
     }
 
-    /// The line-ending helpers leave alone exactly the line endings inside
-    /// what the lexer reads as a string literal (`StringLiterals`). A quote
-    /// glued into an invalid token (`x"a`, beancount's `Invalid token:
-    /// 'x"a'`, #2872) opens no string, so the line endings after it are
-    /// folded, as are those after a quote that never closes; a real
-    /// multi-line string keeps its own, as does a string after an invalid
-    /// token that stands apart from it.
-    #[test]
-    fn line_ending_helpers_follow_the_lexers_strings() {
-        for (src, folded) in [
-            ("x\"a\r\nb\"\r\n", "x\"a\nb\"\n"),
-            (
-                "2024-01-01 open Assets:A \"\r\nb\r\n",
-                "2024-01-01 open Assets:A \"\nb\n",
-            ),
-            (
-                "2024-01-01 note Assets:A \"a\r\nb\"\r\n",
-                "2024-01-01 note Assets:A \"a\r\nb\"\n",
-            ),
-            ("x$ \"a\r\nb\"\r\n", "x$ \"a\r\nb\"\n"),
-            ("; \"a\r\nb\"\r\n", "; \"a\nb\"\n"),
-        ] {
-            assert_eq!(crlf_to_lf_outside_strings(src), folded, "{src:?}");
-            assert!(cr_outside_strings_present(src), "{src:?}");
-            let lf = src.replace("\r\n", "\n");
-            let back = lf_to_crlf_outside_strings(&lf);
-            let strings: Vec<_> = crate::logos_lexer::tokenize_lossless(&lf)
-                .into_iter()
-                .filter(|(t, _)| matches!(t, crate::logos_lexer::Token::String(_)))
-                .map(|(_, s)| s.start..s.end)
-                .collect();
-            let expected: String = lf
-                .char_indices()
-                .map(|(i, c)| {
-                    if c == '\n' && !strings.iter().any(|s| s.start < i && i < s.end) {
-                        "\r\n".to_string()
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect();
-            assert_eq!(back, expected, "{lf:?}");
-        }
-        assert!(!cr_outside_strings_present(
-            "2024-01-01 note Assets:A \"a\rb\"\n"
-        ));
-    }
-
-    /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
-    /// the current output line's start with `OutLine`, which scans each
-    /// output byte once, so a long line of `\r`s is folded in linear time. It
-    /// scanned back over the whole output for every `\r` (1.8 s on this input
-    /// in a release build); with that `rfind` restored, this counts
-    /// 25,600,320,000 bytes on the first input and fails.
-    #[test]
-    fn crlf_to_lf_lone_marker_check_is_linear() {
-        const N: usize = 160_000;
-        for src in [
-            format!("; {}{}\n", "a".repeat(N), "\r".repeat(N)),
-            format!("#\r{}\n", "\r".repeat(N)),
-        ] {
-            CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(0));
-            let folded = crlf_to_lf_outside_strings(&src);
-            let scanned = CR_FOLD_LINE_SCAN_BYTES.with(std::cell::Cell::get);
-            assert!(
-                scanned <= 2 * src.len(),
-                "line-start tracking stepped over {scanned} bytes of a {}-byte input",
-                src.len()
-            );
-            assert!(!folded.contains('\r'));
-        }
-        assert_eq!(
-            crlf_to_lf_outside_strings(&format!("#\r{}\n", "\r".repeat(N))),
-            "# \n"
-        );
-    }
-
-    /// `cr_outside_strings_present` reads quotes as the line-ending helpers
-    /// do: a stray quote ends at its own line, so the `\r` after it is
-    /// outside a string, as `crlf_to_lf_outside_strings` folds it (#2803).
-    #[test]
-    fn cr_outside_strings_present_ends_an_unterminated_quote_at_its_line() {
-        for src in [
-            "2024-01-01 open Assets:A \"\r\n2024-01-02 note Assets:A \"ok\"\r\n2024-01-03 open Assets:C\r\n",
-            "2024-01-01 open Assets:A \"\r\n",
-        ] {
-            assert!(cr_outside_strings_present(src), "{src:?}");
-            assert!(
-                matches!(crlf_to_lf_outside_strings(src), std::borrow::Cow::Owned(ref s) if s != src),
-                "{src:?}"
-            );
-        }
-        // A `\r` inside a string that does close is still not outside one.
-        assert!(!cr_outside_strings_present(
-            "2024-01-01 note Assets:A \"a\rb\"\n"
-        ));
-    }
-
-    /// `crlf_to_lf_outside_strings` must not change the line structure
-    /// the lexer sees when a run of stray `\r` bytes ends a line (#2774).
-    ///
-    /// The lexer makes such a run `Whitespace` trivia; folding each `\r`
-    /// into a `\n`, as this helper did, added a blank line, which ends a
-    /// transaction, so `format_source` dropped the postings after it
-    /// while `try_format_source` (which formats the parsed tree) kept
-    /// them. Each source here parses clean, and must parse to the same
-    /// directives after the fold, with no errors, and both format entry
-    /// points must emit the same text. `stray_cr_run` mirrors the
-    /// lexer's `stray_cr_trivia_end`; this is the guard that they agree.
-    #[test]
-    fn crlf_to_lf_keeps_the_lexer_line_structure() {
-        let txn = |eol: &str| {
-            format!(
-                "2024-01-01 open Assets:A\r\n2024-01-01 open Equity:B\r\n\
-                 2024-01-02 * \"x\"{eol}  Assets:A  1 USD{eol}  Equity:B{eol}\
-                 2024-01-03 open Assets:C{eol}"
-            )
-        };
-        let mut sources: Vec<String> = ["\r\r\n", "\r\r\r\n", " \r\r\n", "\r \r\n", "\r\t\r\n"]
-            .iter()
-            .map(|eol| txn(eol))
-            .collect();
-        sources.extend(
-            [
-                "; c\r\r\n",
-                "; c\r \r\n",
-                "# c\r\r\n",
-                "% c\r\r\n",
-                "#! c\r\r\n",
-                "#+ c\r\r\n",
-                "* c\r\r\n",
-                // A lone marker before the `\r`: ignored with it, a bare-marker
-                // error without it, so the fold keeps a space (#2779).
-                "#\r\n",
-                "!\r\n",
-                "&\r\n",
-                "?\r\n",
-                ":\r\n",
-                "%\r\n",
-                "*\r\n",
-                "#\r\r\n",
-                "#\r \r\n",
-                "# c\r \r\n",
-                "#\t\r\n",
-                "* c\r \r\n",
-                "*\r \r\n",
-                "\r\r\n",
-                "  \r\r\n",
-            ]
-            .iter()
-            .map(|line| format!("2024-01-01 open Assets:A\r\n{line}2024-01-02 open Assets:B\r\n")),
-        );
-        sources.extend(
-            [
-                "2024-01-01 open Assets:A\r",
-                "2024-01-01 open Assets:A\r\r",
-                "2024-01-01 open Assets:A\r\n; c\r",
-                "2024-01-01 open Assets:A\r\n\r",
-                "2024-01-01 open Assets:A\r\n#\r",
-                "2024-01-01 open Assets:A\r\n*\r",
-                "2024-01-01 open Assets:A\r\n#\r ",
-                "2024-01-01 open Assets:A\r\n# c\r \r",
-                "\r",
-            ]
-            .map(String::from),
-        );
-        for src in &sources {
-            let parsed = crate::parse(src);
-            assert!(parsed.errors.is_empty(), "{src:?}: {:?}", parsed.errors);
-            let folded = crlf_to_lf_outside_strings(src);
-            assert!(!folded.contains('\r'), "{src:?} folded to {folded:?}");
-            let refolded = crate::parse(&folded);
-            assert!(
-                refolded.errors.is_empty(),
-                "{folded:?}: {:?}",
-                refolded.errors
-            );
-            let values = |r: &crate::ParseResult| {
-                r.directives
-                    .iter()
-                    .map(|d| d.value.clone())
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(values(&parsed), values(&refolded), "{src:?}");
-            assert_eq!(try_format_source(src), Ok(format_source(src)), "{src:?}");
-        }
-    }
-
     #[test]
     fn canonicalize_directives_positive_count_check() {
         // Pin the success path of the count check: pass a real
@@ -5953,14 +5443,13 @@ mod tests {
     /// Parse `source` via the same pipeline `format_source` uses
     /// so the resulting `SyntaxNode`'s `TextRange`s are in the
     /// same byte frame `format_node_range`'s `range` argument
-    /// is expected to use (post-BOM-strip, post-CRLF-to-LF).
-    /// Returns the syntax node + the normalized source text so
+    /// is expected to use (post-BOM-strip).
+    /// Returns the syntax node + the BOM-stripped source text so
     /// tests can compute byte offsets by `.find()`.
     fn parse_for_range(source: &str) -> (crate::SyntaxNode, String) {
         let (stripped, _bom) = crate::bom::strip_leading(source);
-        let normalized = crlf_to_lf_outside_strings(stripped).to_string();
-        let sf = SourceFile::parse(&normalized);
-        (sf.syntax().clone(), normalized)
+        let sf = SourceFile::parse(stripped);
+        (sf.syntax().clone(), stripped.to_string())
     }
 
     fn ts(n: usize) -> rowan::TextSize {
@@ -6489,13 +5978,10 @@ mod tests {
                 "parse errors (exercises fallback)",
                 "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n}}}garbage\n",
             ),
-            // Bare-`\r` (classic Mac) line terminators. The
-            // `format_source` path normalizes bare-CR to LF via
-            // `crlf_to_lf_outside_strings`, then parses cleanly.
-            // `parse_via_cst` does NOT normalize bare-CR, so the
-            // CST sees broken syntax and `parse_result.errors`
-            // is non-empty — the fallback fires. Byte-identity
-            // holds via the same `format_source` delegation.
+            // Bare-`\r` (classic Mac) line terminators: the lexer
+            // does not end a line at a bare `\r`, so the CST sees
+            // broken syntax and the file is copied as written on
+            // both paths.
             (
                 "bare CR line terminators (exercises fallback)",
                 "2024-01-01 open Assets:Bank USD\r2024-01-02 open Assets:Cash USD\r",

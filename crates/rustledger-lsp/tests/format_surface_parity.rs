@@ -26,7 +26,9 @@ use proptest::prelude::*;
 use rustledger_lsp::handlers::formatting::handle_formatting;
 use rustledger_lsp::handlers::range_formatting::handle_range_formatting;
 use rustledger_lsp::handlers::utils::{LineIndex, PositionEncoding};
-use rustledger_parser::format::{GroupingStyle, lf_to_crlf_outside_strings, try_format_source};
+use rustledger_parser::format::{
+    FormatOptions, GroupingStyle, LineEnding, format_source_with_options, try_format_source,
+};
 use rustledger_parser::parse;
 
 #[path = "../../rustledger-parser/fuzz/fuzz_targets/common/format_roundtrip.rs"]
@@ -102,12 +104,19 @@ fn lsp_range_format(source: &str, range: Range, encoding: PositionEncoding) -> S
 /// What the LSP must produce for a clean `source`: the CLI's output, with
 /// CRLF line endings when the document has them.
 fn expected(source: &str) -> String {
-    let cli = try_format_source(source).expect("clean source");
-    if source.contains("\r\n") {
-        lf_to_crlf_outside_strings(&cli)
+    assert!(try_format_source(source).is_ok(), "clean source");
+    let line_ending = if source.contains("\r\n") {
+        LineEnding::Crlf
     } else {
-        cli
-    }
+        LineEnding::Lf
+    };
+    format_source_with_options(
+        source,
+        FormatOptions {
+            line_ending,
+            ..FormatOptions::default()
+        },
+    )
 }
 
 /// The range from the start of line `first` to the start of line `last + 1`

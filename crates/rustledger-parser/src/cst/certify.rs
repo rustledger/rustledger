@@ -15,7 +15,7 @@
 
 use rustledger_core::{Decimal, Directive};
 
-use crate::{NodeOrToken, ParseResult, SyntaxKind, WalkEvent};
+use crate::{ParseResult, SyntaxKind};
 
 /// Whether two directives mean the same thing.
 ///
@@ -198,46 +198,69 @@ const fn is_trivia(kind: SyntaxKind) -> bool {
 /// that moves from one posting to the next, from inside a string to after it,
 /// or from a header to the body changes the stream.
 pub fn comment_events(src: &str, r: &ParseResult) -> Vec<(usize, CommentEvent)> {
-    let root = r.syntax_node();
-    // The CST is in post-BOM coordinates.
-    let base = if r.has_leading_bom { 3 } else { 0 };
-    let mut out = Vec::new();
-    let mut pending: Vec<CommentEvent> = Vec::new();
-    for event in root.preorder_with_tokens() {
-        match event {
-            WalkEvent::Enter(NodeOrToken::Node(n)) => {
-                let top = n
-                    .parent()
-                    .is_some_and(|p| p.kind() == SyntaxKind::SOURCE_FILE);
-                match n.kind() {
-                    SyntaxKind::ERROR_NODE => pending.push(CommentEvent::Error),
-                    _ if top => pending.push(CommentEvent::Directive),
-                    SyntaxKind::POSTING => pending.push(CommentEvent::Posting),
-                    SyntaxKind::META_ENTRY => pending.push(CommentEvent::Meta),
-                    _ => {}
+    /// The walk state: what is emitted, the markers waiting for their node's
+    /// first token, and where the next token starts.
+    struct Walk<'s> {
+        src: &'s str,
+        out: Vec<(usize, CommentEvent)>,
+        pending: Vec<CommentEvent>,
+        at: usize,
+    }
+    impl Walk<'_> {
+        // Over the green tree, not the red one: the walk visits every token of
+        // the file, twice per formatting run, and red nodes are allocated on
+        // the way.
+        fn node(&mut self, node: &rowan::GreenNodeData, top: bool) {
+            for child in node.children() {
+                match child {
+                    rowan::NodeOrToken::Node(n) => {
+                        match <crate::BeancountLanguage as rowan::Language>::kind_from_raw(n.kind())
+                        {
+                            SyntaxKind::ERROR_NODE => self.pending.push(CommentEvent::Error),
+                            _ if top => self.pending.push(CommentEvent::Directive),
+                            SyntaxKind::POSTING => self.pending.push(CommentEvent::Posting),
+                            SyntaxKind::META_ENTRY => self.pending.push(CommentEvent::Meta),
+                            _ => {}
+                        }
+                        self.node(n, false);
+                    }
+                    rowan::NodeOrToken::Token(t) => {
+                        let start = self.at;
+                        self.at += usize::from(t.text_len());
+                        let kind =
+                            <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+                        if is_comment(kind) {
+                            let before = &self.src[..floor_boundary(self.src, start)];
+                            let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+                            let lead = before[line_start..].trim_start_matches('\u{FEFF}');
+                            self.out.push((
+                                start,
+                                CommentEvent::Comment {
+                                    trailing: !lead.trim().is_empty(),
+                                    text: t.text().trim_end_matches([' ', '\t', '\r']).to_string(),
+                                },
+                            ));
+                        } else if !is_trivia(kind) && !self.pending.is_empty() {
+                            let pending = std::mem::take(&mut self.pending);
+                            self.out.extend(pending.into_iter().map(|e| (start, e)));
+                        }
+                    }
                 }
             }
-            WalkEvent::Enter(NodeOrToken::Token(t)) => {
-                let kind = t.kind();
-                let start = usize::from(t.text_range().start()) + base;
-                if is_comment(kind) {
-                    let before = &src[..floor_boundary(src, start)];
-                    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-                    let lead = before[line_start..].trim_start_matches('\u{FEFF}');
-                    out.push((
-                        start,
-                        CommentEvent::Comment {
-                            trailing: !lead.trim().is_empty(),
-                            text: t.text().trim_end_matches([' ', '\t', '\r']).to_string(),
-                        },
-                    ));
-                } else if !is_trivia(kind) {
-                    out.extend(std::mem::take(&mut pending).into_iter().map(|e| (start, e)));
-                }
-            }
-            WalkEvent::Leave(_) => {}
         }
     }
+    let root = r.syntax_node();
+    let mut walk = Walk {
+        src,
+        out: Vec::new(),
+        pending: Vec::new(),
+        // The CST is in post-BOM coordinates.
+        at: if r.has_leading_bom { 3 } else { 0 },
+    };
+    walk.node(root.green(), true);
+    let Walk {
+        mut out, pending, ..
+    } = walk;
     out.extend(pending.into_iter().map(|e| (src.len(), e)));
     out
 }
@@ -461,16 +484,12 @@ pub(super) struct Facts<'p> {
 }
 
 impl<'p> Facts<'p> {
-    /// The facts of `raw`, the parse of `prep.source` as beancount reads it,
+    /// The facts of `prep.source` (its one parse, the one the emitter read),
     /// split by `prep`'s items.
-    pub(super) fn of_input(prep: &Prepared<'p, '_>, raw: &'p ParseResult) -> Self {
+    pub(super) fn of_input(prep: &'p Prepared<'p, '_>) -> Self {
+        let raw: &'p ParseResult = &prep.parsed;
         let ranges = prep.item_ranges();
-        let fold = match &prep.normalized {
-            std::borrow::Cow::Borrowed(_) => None,
-            std::borrow::Cow::Owned(n) => Some(fold_map(prep.source, n)),
-        };
         let locate = |at: usize| {
-            let at = fold.as_ref().map_or(at, |m| m[at.min(m.len() - 1)]);
             let i = ranges.partition_point(|&(_, end)| end <= at);
             ranges.get(i).filter(|&&(start, _)| start <= at).map(|_| i)
         };
@@ -608,120 +627,45 @@ fn locate_written(out: &str, ranges: &[(usize, usize, usize)], at: usize) -> Opt
         .map(|_| item)
 }
 
-/// For each byte offset of `source` (and its end), the offset of the same
-/// text in `folded`, which is `source` with line-ending `\r`s and stray
-/// `[ \t\r]` runs dropped and a space added after a lone marker (see
-/// `fold_line_endings`). Only lines matter to the certifier, and the fold
-/// keeps every `\n`.
-fn fold_map(source: &str, folded: &str) -> Vec<usize> {
-    let (s, f) = (source.as_bytes(), folded.as_bytes());
-    let mut map = Vec::with_capacity(s.len() + 1);
-    let (mut i, mut j) = (0, 0);
-    while i < s.len() {
-        if j < f.len() && s[i] == f[j] {
-            map.push(j);
-            i += 1;
-            j += 1;
-        } else if j < f.len() && f[j] == b' ' && !matches!(s[i], b'\r' | b' ' | b'\t') {
-            j += 1;
-        } else {
-            map.push(j);
-            i += 1;
-        }
-    }
-    map.push(j);
-    map
-}
-
-/// Certify `out`, the output of `prep` under `plan`: every item reads as it
-/// did (the same boundaries, meaning, comments and error lines) and formatting
-/// `out` again gives `out`.
-pub(super) fn check(
-    input: &Facts<'_>,
-    plan: &Plan,
-    out: &str,
-    style: crate::format::GroupingStyle<'_>,
-) -> Result<(), Failure> {
+/// Certify `out`, the output of the emitter under `plan`: every item reads
+/// as it did (the same boundaries, meaning, comments and error lines).
+/// Returns the parse of `out`, which the caller reuses to check that `out`
+/// is a fixed point of formatting.
+pub(super) fn check(input: &Facts<'_>, plan: &Plan, out: &str) -> Result<ParseResult, Failure> {
     let parsed = crate::parse_without_occurrences(out);
     let ranges = written_ranges(plan);
-    let node_items = boundaries(input, &ranges, &parsed)?;
-
-    let output = Facts::of_output(out, &parsed, plan, input.items.len());
-    if input.has_errors != output.has_errors {
-        return Err(Failure::whole(
-            "a clean file became broken, or a broken one clean",
-        ));
-    }
-    let mut why = "";
-    let failed: Vec<usize> = (0..input.items.len())
-        .filter(|&i| {
-            let verdict = same_region(
-                (input, &input.items[i]),
-                (&output, &output.items[i]),
-                Some(i),
-                &ranges,
-            );
-            verdict.map_err(|w| why = w).is_err()
-        })
-        .collect();
-    if !failed.is_empty() {
-        return Err(Failure { items: failed, why });
-    }
-    same_region(
-        (input, &input.separator),
-        (&output, &output.separator),
-        None,
-        &ranges,
-    )
-    .map_err(Failure::whole)?;
-
-    // Idempotence: formatting `out` again, with the same items kept
-    // verbatim, gives `out`.
-    let again = Prepared::new(out, Some(&parsed));
-    let mut plan2 = Plan::default();
-    if plan.forced.iter().any(|&f| f) {
-        let fold = match &again.normalized {
-            std::borrow::Cow::Borrowed(_) => None,
-            std::borrow::Cow::Owned(n) => Some(fold_map(out, n)),
-        };
-        let items2 = again.item_ranges();
-        for (first, item) in &node_items {
-            if plan.forced(*item) {
-                let at = fold
-                    .as_ref()
-                    .map_or(*first, |m| m[(*first).min(m.len() - 1)]);
-                let i = items2.partition_point(|&(_, end)| end <= at);
-                if items2.get(i).is_some_and(|&(start, _)| start <= at) {
-                    plan2.force(i);
-                }
-            }
+    boundaries(input, &ranges, &parsed)?;
+    {
+        let output = Facts::of_output(out, &parsed, plan, input.items.len());
+        if input.has_errors != output.has_errors {
+            return Err(Failure::whole(
+                "a clean file became broken, or a broken one clean",
+            ));
         }
+        let mut why = "";
+        let failed: Vec<usize> = (0..input.items.len())
+            .filter(|&i| {
+                let verdict = same_region(
+                    (input, &input.items[i]),
+                    (&output, &output.items[i]),
+                    Some(i),
+                    &ranges,
+                );
+                verdict.map_err(|w| why = w).is_err()
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(Failure { items: failed, why });
+        }
+        same_region(
+            (input, &input.separator),
+            (&output, &output.separator),
+            None,
+            &ranges,
+        )
+        .map_err(Failure::whole)?;
     }
-    let twice = again.emit(style, &mut plan2);
-    if twice == out {
-        return Ok(());
-    }
-    let diff = out
-        .bytes()
-        .zip(twice.bytes())
-        .position(|(a, b)| a != b)
-        .unwrap_or(out.len().min(twice.len()));
-    // Blame the item the first difference falls in or right after (what an
-    // item writes can change the gap after it), else the item after it (a gap
-    // is written ahead of the item after it): the first of those still being
-    // rebuilt, so a retry that fails at the same place moves on.
-    let i = ranges.partition_point(|&(_, end, _)| end < diff);
-    let candidates = ranges[i.saturating_sub(usize::from(i == ranges.len()))..]
-        .iter()
-        .take(2)
-        .map(|&(_, _, item)| item);
-    Err(Failure {
-        items: candidates
-            .filter(|&item| !plan.forced(item) && !input.is_opaque(item))
-            .take(1)
-            .collect(),
-        why: "formatting the output again changed it",
-    })
+    Ok(parsed)
 }
 
 /// Check that every top-level node of `parsed` (the parse of `out`) lies in
@@ -732,11 +676,10 @@ fn boundaries(
     input: &Facts<'_>,
     ranges: &[(usize, usize, usize)],
     parsed: &ParseResult,
-) -> Result<Vec<(usize, usize)>, Failure> {
+) -> Result<(), Failure> {
     let bom = if parsed.has_leading_bom { 3 } else { 0 };
     let mut count = vec![0usize; input.items.len()];
     let mut failed = Vec::new();
-    let mut nodes = Vec::new();
     for n in parsed.syntax_node().children() {
         let Some((first, last)) = content_span(&n) else {
             continue;
@@ -749,7 +692,6 @@ fn boundaries(
         match ranges.get(i) {
             Some(&(start, end, item)) if start <= first => {
                 count[item] += 1;
-                nodes.push((first, item));
                 if last > end {
                     failed.push(item);
                     // The node runs on into the items after it.
@@ -781,7 +723,7 @@ fn boundaries(
         }
     }
     if failed.is_empty() {
-        Ok(nodes)
+        Ok(())
     } else {
         failed.sort_unstable();
         failed.dedup();
@@ -980,24 +922,25 @@ mod tests {
     }
 
     /// An emitter whose output it would format differently again (here, a
-    /// blank line it adds after the directive every time) is caught by the
-    /// second pass.
+    /// blank line it adds after the directive every time) is not a fixed
+    /// point: the item is demoted, and when its verbatim copy is rebuilt
+    /// differently again (formatting the output does not know it was
+    /// demoted), the file is kept as written. Either way the result is a
+    /// fixed point.
     #[test]
-    fn test_certify_demotes_an_item_that_is_not_idempotent() {
+    fn test_certify_keeps_a_file_that_does_not_reach_a_fixed_point() {
         fn fault(text: &str) -> Option<String> {
             text.contains("Assets:A").then(|| format!("{text}\n"))
         }
         let src = "2024-01-01 open   Assets:A\n2024-01-02 open   Assets:B\n";
         let (out, report) = format_with(src, fault);
         assert_eq!(report.demoted, 1, "{report:?}");
+        assert!(report.kept_whole_file, "{report:?}");
         assert_eq!(
             report.reason,
             Some("formatting the output again changed it")
         );
-        assert_eq!(
-            out,
-            "2024-01-01 open   Assets:A\n2024-01-02 open Assets:B\n"
-        );
+        assert_eq!(out, src);
         assert_idempotent_with(&out, fault);
     }
 
@@ -1019,28 +962,23 @@ mod tests {
         );
     }
 
-    /// A failure that cannot be pinned on a directive the formatter could
-    /// demote leaves the file as written. `2024-01-01 A; ` (a broken line,
-    /// copied verbatim, with no final newline) gained a comment when the
-    /// newline was added: the `;` before the trailing space read as one.
+    /// `2024-01-01 A; ` (a broken line) gained a comment when the formatter
+    /// trimmed the blank after the `;` or added a newline after it; the
+    /// certifier kept such files as written (phase A). A broken line is now
+    /// copied byte for byte, and a last line copied as written gets no
+    /// newline, so nothing is demoted.
     #[test]
-    fn test_certify_keeps_the_file_when_no_item_can_be_blamed() {
-        for src in ["2024-01-01 A; ", "2024-01-01 A; \n"] {
+    fn test_certify_broken_line_ending_in_a_semicolon_is_copied_verbatim() {
+        for src in [
+            "2024-01-01 A; ",
+            "2024-01-01 A; \n",
+            "2024-01-01 A;A ",
+            "\u{feff}2024-01-01 A; ",
+        ] {
             let (out, report) = __format_source_report(src, GroupingStyle::default());
-            assert!(report.kept_whole_file, "{src:?}: {report:?}");
-            assert_eq!(out, src);
+            assert!(report.is_clean(), "{src:?}: {report:?}");
+            assert_eq!(out, src.trim_start_matches('\u{feff}'));
             assert_eq!(format_source(&out), out, "{src:?}");
         }
-    }
-
-    #[test]
-    fn test_fold_map_tracks_lines() {
-        let map = super::fold_map("a\r\nb \r\n*\r\nc", "a\nb\n* \nc");
-        // `\n`s map onto `\n`s.
-        assert_eq!(map[2], 1);
-        assert_eq!(map[6], 3);
-        assert_eq!(map[9], 6);
-        assert_eq!(map[10], 7);
-        assert_eq!(map.last().copied(), Some(8));
     }
 }

@@ -10,9 +10,19 @@
 
 use rustledger_core::Directive;
 use rustledger_parser::format::{
-    cr_outside_strings_present, crlf_to_lf_outside_strings, format_source,
-    lf_to_crlf_outside_strings, try_format_source,
+    FormatOptions, LineEnding, format_source, format_source_with_options, try_format_source,
 };
+
+/// Format `src` writing CRLF, as the LSP does on a CRLF document.
+fn format_crlf(src: &str) -> String {
+    format_source_with_options(
+        src,
+        FormatOptions {
+            line_ending: LineEnding::Crlf,
+            ..FormatOptions::default()
+        },
+    )
+}
 use rustledger_parser::logos_lexer::{Token, tokenize, tokenize_lossless};
 use rustledger_parser::{parse, parse_structured};
 
@@ -185,24 +195,25 @@ fn test_tokenize_indented_star_posting_flag_is_not_a_heading() {
     );
 }
 
-/// The line-ending helpers treat the heading as a comment: its line ending
-/// folds, and a later string's interior stays verbatim, on the first line and
-/// on a later CRLF line.
+/// The formatter reads the heading as the tree does, as a line whose `"` opens
+/// no string: the heading is copied as written (its CRLF included), the
+/// directives around it are written with the chosen line ending, and a later
+/// string's interior stays verbatim, in LF and in CRLF output.
 #[test]
-fn test_crlf_to_lf_outside_strings_org_heading_with_quote() {
+fn test_format_line_endings_org_heading_with_quote() {
     let src = "2024-01-01 open Assets:A\r\n\
                * 27\" monitor\r\n\
                2024-01-02 note Assets:B \"a\r\nb\"\r\n";
     assert_eq!(
-        crlf_to_lf_outside_strings(src),
+        format_source(src),
         "2024-01-01 open Assets:A\n\
-         * 27\" monitor\n\
+         * 27\" monitor\r\n\
          2024-01-02 note Assets:B \"a\r\nb\"\n"
     );
-    assert!(cr_outside_strings_present("* 27\" monitor\r\n"));
+    assert_eq!(format_crlf(src), src);
     assert_eq!(
-        lf_to_crlf_outside_strings("* 27\" monitor\n2024-01-02 note Assets:B \"a\nb\"\n"),
-        "* 27\" monitor\r\n2024-01-02 note Assets:B \"a\nb\"\r\n"
+        format_crlf("* 27\" monitor\n2024-01-02 note Assets:B \"a\nb\"\n"),
+        "* 27\" monitor\n2024-01-02 note Assets:B \"a\nb\"\r\n"
     );
     assert_eq!(
         format_source(src),

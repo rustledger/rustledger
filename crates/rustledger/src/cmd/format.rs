@@ -9,7 +9,7 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_parser::format::{
-    GroupingStyle, cr_outside_strings_present, try_format_source_grouped,
+    FormatOptions, GroupingStyle, LineEnding, format_source_with_options, try_format_source_grouped,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -319,7 +319,7 @@ fn format_file<W: Write>(
                 let _ = writeln!(err_out, "File needs formatting: {}", file.display());
             }
             if args.diff {
-                emit_diff(file, &original_content, &formatted, err_out);
+                emit_diff(file, &original_content, &formatted, style, err_out);
             }
             Ok(ExitCode::from(1))
         }
@@ -361,43 +361,52 @@ fn format_file<W: Write>(
 ///   diff that just shows BOMs and `\r`s.
 /// - **Line-by-line replacements.** Otherwise emit `@@ line N @@`
 ///   per-line diff hunks.
-fn emit_diff(file: &PathBuf, original: &str, formatted: &str, err_out: &mut dyn Write) {
+fn emit_diff(
+    file: &PathBuf,
+    original: &str,
+    formatted: &str,
+    style: GroupingStyle<'_>,
+    err_out: &mut dyn Write,
+) {
     let _ = writeln!(err_out, "--- {}", file.display());
     let _ = writeln!(err_out, "+++ {} (formatted)", file.display());
 
-    // Compute the canonical-noise-stripped view of the original:
-    // drop the BOM, normalize CR-bearing line endings to LF outside
-    // strings, then trim_end_matches('\n'). The formatted side
-    // gets the same trim. If the bodies match, the file's delta is
-    // entirely explainable by canonical normalization; surface the
-    // specific cause so the user knows what to expect from
-    // `--in-place`.
+    // Compare the original, its BOM dropped, with the canonical form written
+    // in the original's own line endings (the formatter writes CRLF on
+    // request, so no text is rescanned here), both without their trailing
+    // line endings. If the bodies match, the file's delta is entirely
+    // explainable by canonical normalization; surface the specific cause so
+    // the user knows what to expect from `--in-place`.
     let original_no_bom = original.strip_prefix('\u{FEFF}').unwrap_or(original);
     let had_bom = original_no_bom.len() < original.len();
-    let folded_cr = cr_outside_strings_present(original_no_bom);
-    let lf_only: std::borrow::Cow<'_, str> = if folded_cr {
-        rustledger_parser::format::crlf_to_lf_outside_strings(original_no_bom)
-    } else {
-        std::borrow::Cow::Borrowed(original_no_bom)
-    };
-
-    let orig_body = lf_only.trim_end_matches('\n');
-    let fmt_body = formatted.trim_end_matches('\n');
+    let crlf = original_no_bom.contains("\r\n");
+    let in_crlf = crlf.then(|| {
+        format_source_with_options(
+            original,
+            FormatOptions {
+                grouping: style,
+                line_ending: LineEnding::Crlf,
+            },
+        )
+    });
+    let canonical = in_crlf.as_deref().unwrap_or(formatted);
+    let line_ends = ['\r', '\n'];
+    let orig_body = original_no_bom.trim_end_matches(line_ends);
+    let fmt_body = canonical.trim_end_matches(line_ends);
     if orig_body == fmt_body {
         let mut causes: Vec<&'static str> = Vec::new();
         if had_bom {
             causes.push("leading BOM (dropped)");
         }
-        // `folded_cr` comes from the explicit
-        // `cr_outside_strings_present` predicate: a file whose
-        // only `\r` is inside a string literal returns false (the
-        // formatter doesn't fold those), so we don't surface a
-        // misleading "CR folded" cause for an in-string `\r`.
-        if folded_cr {
-            causes.push("CR-bearing line endings (folded to LF)");
+        // The bodies match in CRLF and the LF output differs from it: the
+        // line endings are the change. (A `\r\n` only inside a string
+        // literal is the string's, written either way, so it is no cause.)
+        if in_crlf.as_deref().is_some_and(|c| c != formatted) {
+            causes.push("CRLF line endings (written as LF)");
         }
-        let orig_trailing = lf_only.len() - orig_body.len();
-        let fmt_trailing = formatted.len() - fmt_body.len();
+        let newlines = |s: &str| s.matches('\n').count();
+        let orig_trailing = newlines(&original_no_bom[orig_body.len()..]);
+        let fmt_trailing = newlines(&formatted[formatted.trim_end_matches(line_ends).len()..]);
         match orig_trailing.cmp(&fmt_trailing) {
             std::cmp::Ordering::Less => causes.push("missing final newline (added)"),
             std::cmp::Ordering::Greater => causes.push("extra trailing newlines (collapsed)"),

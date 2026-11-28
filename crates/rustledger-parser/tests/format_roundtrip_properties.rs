@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
-use rustledger_parser::format::{cr_outside_strings_present, format_source, try_format_source};
+use rustledger_parser::format::{format_source, try_format_source};
 use rustledger_parser::parse;
 
 #[path = "../fuzz/fuzz_targets/common/format_roundtrip.rs"]
@@ -237,23 +237,24 @@ fn test_format_source_keeps_a_second_bom() {
 
 /// `fuzz_format_roundtrip` crash (#3084, `fuzz/regressions/
 /// fuzz_format_roundtrip/crash-98ac0a55...`): after a second BOM, the
-/// line-ending fold found the string literals with the bare lexer, which
+/// (former) line-ending fold found the string literals with the bare lexer, which
 /// glues that BOM into an invalid token with the `"""` after it, so the `"`
 /// on the next line opened a string holding the `\r\n`, and the fold left it.
 /// The tree the formatter emits makes the BOM a token of its own and reads
 /// `""` and `"\n"` there, the `\r\n` a line ending outside any string, which
 /// the verbatim copy of its error node kept with one more blank line ahead of
-/// it on every pass. The fold now reads strings as the tree does: that
-/// `\r\n` is folded, and one inside a string the tree reads is still kept.
+/// it on every pass. #3085 made the fold read strings as the tree does;
+/// the fold is gone now (ADR 0009 phase B): the `\r\n` there is a blank line
+/// between two regions copied as written, which the formatter writes as
+/// `\n`, and one inside a string the tree reads is the string's. The broken
+/// last line gets no newline.
 #[test]
-fn test_format_source_folds_line_endings_as_the_tree_reads_a_second_bom() {
+fn test_format_source_reads_line_endings_as_the_tree_reads_a_second_bom() {
     let src = "\u{FEFF}\u{FEFF}\"\"\"\n\"\n\r\n\"";
-    assert_eq!(format_source(src), "\u{FEFF}\u{FEFF}\"\"\"\n\"\n\n\"\n");
-    assert!(cr_outside_strings_present(src));
+    assert_eq!(format_source(src), "\u{FEFF}\u{FEFF}\"\"\"\n\"\n\n\"");
     assert_roundtrip(src);
     let src = "\u{FEFF}\u{FEFF}\"\n\r\n\"";
-    assert_eq!(format_source(src), "\u{FEFF}\u{FEFF}\"\n\r\n\"\n");
-    assert!(!cr_outside_strings_present(src));
+    assert_eq!(format_source(src), src);
     assert_roundtrip(src);
 }
 
@@ -314,17 +315,18 @@ fn test_format_source_keeps_a_broken_lines_cr() {
 
 /// A lone capital at the end of the file is an invalid token too, and before
 /// a `\n` it is not: the final newline the formatter adds repaired a broken
-/// last line, which the next pass rebuilt. A broken last line without a
-/// newline keeps going without one. (After a failed line the parser reports
-/// the `T` as beancount does; see the report for the clean-line case.)
+/// last line, which the next pass rebuilt. A broken last line is copied as
+/// written, so it keeps going without one. (After a failed line the parser
+/// reports the `T` as beancount does; see the report for the clean-line case.)
 #[test]
 fn test_format_source_adds_no_newline_after_a_broken_last_line() {
     let src = "pushmeta\t\txn:Oxn:O\n0861-02-13T;:-3\n0861-02-13T";
     assert!(!parse(src).errors.is_empty());
     assert_eq!(format_source(src), src);
     assert_roundtrip(src);
-    // A broken last line the newline does not repair still gets one.
-    assert_eq!(format_source("pushtag"), "pushtag\n");
+    // So does every broken last line (ADR 0009 phase B: the formatter adds
+    // no text to a line it does not own).
+    assert_eq!(format_source("pushtag"), "pushtag");
     // A clean last line still gets its newline.
     assert_eq!(
         format_source("2024-01-01 open Assets:A"),
@@ -344,7 +346,8 @@ fn test_format_source_adds_no_newline_after_a_broken_last_line() {
 fn test_format_source_keeps_a_leading_indented_comment_indented() {
     let src = "\t;\n\t+";
     assert_eq!(parse(src).errors.len(), 1);
-    assert_eq!(format_source(src), "\t;\n\t+\n");
+    // The broken last line is copied as written, without a newline.
+    assert_eq!(format_source(src), src);
     assert_roundtrip(src);
 }
 

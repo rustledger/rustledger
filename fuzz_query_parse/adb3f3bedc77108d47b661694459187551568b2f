@@ -1,0 +1,27 @@
+SELECT	-(SELECT	-(-(	B
+IN(	BLT	-(-(	B
+IN(	BL,BB
+IN(	BL,B))))
+,BB
+IN(	BL,B))))
+-
+(	B
+IN(	BLT	-(LECT	-(SELECT	-(-(	B
+IN(	BLT	-(-(	B
+IN(	BL,BB
+IN(	BL,B))))
+,BB
+IN(	BL,B))))
+-
+(	B
+IN(	BLT	-(-(	B
+IN(	BL,BB
+IN(BL,B))))
+,BB
+IN(	L,B))))
+-(	B
+IN(	BL,BB
+IN(BL,B))))
+,BB
+IN(	L,B))))
+
